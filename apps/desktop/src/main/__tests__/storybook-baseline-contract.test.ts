@@ -6,25 +6,20 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { describe, it } from 'node:test';
 
-function findRepoRoot(start: string): string {
-  let dir = resolve(start);
-  for (;;) {
-    if (
-      existsSync(join(dir, 'apps', 'desktop', 'package.json'))
-      && existsSync(join(dir, 'packages', 'ui', 'package.json'))
-    ) {
-      return dir;
-    }
+import { REPO_ROOT } from './main-process-contract-source-helpers.js';
 
-    const parent = resolve(dir, '..');
-    if (parent === dir) {
-      throw new Error(`Unable to locate repo root from ${start}`);
-    }
-    dir = parent;
-  }
-}
-
-const REPO_ROOT = findRepoRoot(process.cwd());
+/**
+ * The rule these assertions enforce is "do not import the app shell", so match
+ * the import specifier rather than the bare name — #1433 item 6 added prose
+ * comments that cite `app-shell.tsx` as the file a story's real path runs
+ * through, and naming a file is not depending on it.
+ *
+ * Anchored to the module itself, not to any specifier containing the string:
+ * `app-shell-command-actions` is a leaf a story may legitimately import (the
+ * command-list builder would make command-search.stories.tsx MORE faithful,
+ * not less), and this rule is about the shell component.
+ */
+const IMPORTS_APP_SHELL = /from\s+['"][^'"]*app-shell(?:\.js)?['"]/;
 
 function readJson(path: string) {
   return JSON.parse(readFileSync(path, 'utf8')) as {
@@ -162,7 +157,7 @@ describe('Storybook baseline contract', () => {
       assert.match(src, new RegExp(`export const ${storyName}\\b`));
     }
     assert.doesNotMatch(src, /StatusGroups|statusGroups/);
-    assert.doesNotMatch(src, /app-shell/, 'Sidebar stories must not import the desktop app shell.');
+    assert.doesNotMatch(src, IMPORTS_APP_SHELL, 'Sidebar stories must not import the desktop app shell.');
   });
 
   it('storyboards ToolActivity result variants before visual polish', () => {
@@ -370,8 +365,7 @@ describe('Storybook baseline contract', () => {
 
     for (const storyName of [
       'CommandPaletteGroupedResults',
-      'CommandPaletteEmpty',
-      'CommandPaletteDisabledCommand',
+      'CommandPaletteNoMatch',
       'CommandPaletteKeyboardFocusedSelection',
       'CommandPaletteContentSearchLoading',
       'CommandPaletteContentSearchResults',
@@ -389,7 +383,7 @@ describe('Storybook baseline contract', () => {
 
     assert.doesNotMatch(storyPath, /src\/renderer/, 'desktop Storybook stories must stay out of the renderer build tree');
     assert.doesNotMatch(story, /window\.maka/, 'Command/search stories must not depend on the preload bridge');
-    assert.doesNotMatch(story, /app-shell/, 'Command/search stories must not import the desktop app shell');
+    assert.doesNotMatch(story, IMPORTS_APP_SHELL, 'Command/search stories must not import the desktop app shell');
   });
 
   it('keeps Storybook stories out of the regular @maka/ui TypeScript build', () => {

@@ -2,6 +2,9 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import type { PlanReminder } from '@maka/core';
 import { PlanReminderPanel } from '../src/plan-reminder-panel.js';
 
+// Fidelity convention (#1433): every story below names the real app path
+// that reaches it. See apps/desktop/stories/FIDELITY.md.
+
 const meta = {
   title: 'Product/Plan Reminder',
   parameters: {
@@ -108,6 +111,8 @@ const panelCallbacks = {
   onDelete: noop,
 };
 
+// Real path: sidebar → 定时任务 → 计划提醒, with reminders configured — including a completed
+// one and one that failed its last run.
 export const Populated: Story = {
   render: () => (
     <ModuleFrame>
@@ -116,6 +121,7 @@ export const Populated: Story = {
   ),
 };
 
+// Real path: same page on a fresh install, before any reminder exists.
 export const Empty: Story = {
   render: () => (
     <ModuleFrame>

@@ -9,6 +9,9 @@ import {
   useUiLocale,
 } from '@maka/ui';
 
+// Fidelity convention (#1433): every story below names the real app path
+// that reaches it. See apps/desktop/stories/FIDELITY.md.
+
 const meta = {
   title: 'Product/Module Hubs',
   parameters: { layout: 'fullscreen' },

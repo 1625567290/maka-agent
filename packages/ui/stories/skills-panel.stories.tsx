@@ -2,6 +2,9 @@ import type { Meta, StoryObj } from '@storybook/react-vite';
 import { SkillsModuleMain } from '../src/skills-panel.js';
 import type { SkillEntry } from '../src/module-panel-types.js';
 
+// Fidelity convention (#1433): every story below names the real app path
+// that reaches it. See apps/desktop/stories/FIDELITY.md.
+
 const meta = {
   title: 'Product/Skills',
   parameters: {
@@ -65,6 +68,7 @@ function ModuleFrame(props: { children: React.ReactNode }) {
   );
 }
 
+// Real path: sidebar → 扩展 → 技能, with skills installed.
 export const Populated: Story = {
   render: () => (
     <ModuleFrame>
@@ -79,6 +83,7 @@ export const Populated: Story = {
   ),
 };
 
+// Real path: same page on a fresh install, before any skill is installed.
 export const Empty: Story = {
   render: () => (
     <ModuleFrame>

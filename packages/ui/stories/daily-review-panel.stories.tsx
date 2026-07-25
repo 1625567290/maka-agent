@@ -3,6 +3,9 @@ import type { DailyReviewSummary } from '@maka/core';
 import { DailyReviewPanel } from '../src/daily-review-panel.js';
 import type { DailyReviewBridge } from '../src/module-panel-types.js';
 
+// Fidelity convention (#1433): every story below names the real app path
+// that reaches it. See apps/desktop/stories/FIDELITY.md.
+
 const meta = {
   title: 'Product/Daily Review',
   parameters: {
@@ -77,6 +80,7 @@ function ModuleFrame(props: { children: React.ReactNode }) {
   );
 }
 
+// Real path: sidebar → 定时任务 → 每日回顾, with reviews already generated.
 export const Loaded: Story = {
   render: () => (
     <ModuleFrame>
@@ -85,6 +89,7 @@ export const Loaded: Story = {
   ),
 };
 
+// Real path: same page while the review is still being generated or fetched.
 export const Loading: Story = {
   render: () => (
     <ModuleFrame>
@@ -93,6 +98,7 @@ export const Loading: Story = {
   ),
 };
 
+// Real path: same page when the main-process bridge fails to return the review.
 export const LoadError: Story = {
   render: () => (
     <ModuleFrame>
