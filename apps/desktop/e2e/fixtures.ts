@@ -114,6 +114,11 @@ function buildE2eEnv(
     }
   }
   env.MAKA_E2E = '1';
+  // The login-shell PATH probe must not make E2E command resolution depend on
+  // the developer or CI account. buildE2eEnv owns the launched environment,
+  // so it owns the deterministic skip flag (unlike relying on TERM, which is
+  // unset under xvfb).
+  env.MAKA_SKIP_SHELL_ENV = '1';
   env.MAKA_E2E_USER_DATA_DIR = userDataDir;
   if (e2eFixtureScenario) env.MAKA_E2E_FIXTURE = e2eFixtureScenario;
   if (locale) env.MAKA_E2E_FIXTURE_LOCALE = locale;
