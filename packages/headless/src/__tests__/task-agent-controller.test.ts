@@ -1156,6 +1156,45 @@ async function readAgentRunHeader(
 }
 
 describe('runTaskOnce', () => {
+  test('gives task-run backends the authoritative current-run event reader', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      let loadTurnRuntimeEvents: ((turnId: string) => Promise<RuntimeEvent[]>) | undefined;
+      const task: Task = {
+        id: 'runtime-event-reader-task',
+        instruction: 'do the thing',
+        workspaceDir: fixtureDir,
+        verification: { command: 'true', protectedPaths: [] },
+      };
+
+      const result = await runTaskOnce({ ...fakeConfig, backend: 'ai-sdk' }, task, {
+        storageRoot,
+        registerBackends: (registry) => {
+          registry.register('ai-sdk', (ctx) => {
+            loadTurnRuntimeEvents = ctx.loadTurnRuntimeEvents;
+            return new ReportingBackend({
+              sessionId: ctx.sessionId,
+              header: ctx.header,
+              store: ctx.store,
+            });
+          });
+        },
+        realBackendIsolation: { kind: 'external', label: 'unit isolation' },
+      });
+
+      assert.ok(loadTurnRuntimeEvents);
+      const events = await loadTurnRuntimeEvents(latestInvocation(result).turnId);
+      assert.ok(
+        events.some(
+          (event) =>
+            event.role === 'user' &&
+            event.content?.kind === 'text' &&
+            event.content.text === task.instruction,
+        ),
+      );
+      assert.ok(events.some((event) => event.status === 'completed'));
+    });
+  });
+
   test('lets a task-run backend spawn, list, and read a linked child session', async () => {
     await withDirs(async (fixtureDir, storageRoot) => {
       const observed: {
@@ -2377,6 +2416,43 @@ describe('runTaskOnce', () => {
         | { snapshotPath?: string }
         | undefined;
       assert.ok(snapshot?.snapshotPath, 'expected submitted snapshot metadata in score details');
+      assert.equal(
+        await readFile(join(snapshot.snapshotPath, 'check.mjs'), 'utf8'),
+        'process.exit(0);\n',
+      );
+    });
+  });
+
+  test('persists the submitted snapshot from an explicitly owned external workspace', async () => {
+    await withDirs(async (fixtureDir, storageRoot) => {
+      const externalWorkspaceDir = await mkdtemp(join(storageRoot, 'external-workspace-'));
+      const submittedSnapshotRoot = join(storageRoot, 'submitted-snapshots');
+      await writeFile(join(fixtureDir, 'check.mjs'), 'fixture copy\n', 'utf8');
+      await writeFile(join(externalWorkspaceDir, 'check.mjs'), 'external copy\n', 'utf8');
+      const task: Task = {
+        id: 'external-workspace-snapshot',
+        instruction: 'modify the external workspace',
+        workspaceDir: fixtureDir,
+        verification: { command: 'true', protectedPaths: [] },
+      };
+
+      const result = await runTaskOnce(fakeConfig, task, {
+        storageRoot,
+        registerBackends: registerProtectedTamperBackend,
+        realBackendIsolation: {
+          kind: 'external',
+          label: 'locally accessible task container',
+          workspaceDir: externalWorkspaceDir,
+          submittedSnapshotRoot,
+        },
+      });
+
+      const snapshot = result.projection.latestScoreResult?.details?.submittedSnapshot as
+        | { snapshotPath?: string; workspaceRoot?: string }
+        | undefined;
+      assert.ok(snapshot?.snapshotPath, 'expected persisted external submitted snapshot');
+      assert.equal(snapshot.workspaceRoot, externalWorkspaceDir);
+      assert.match(snapshot.snapshotPath, new RegExp(`^${submittedSnapshotRoot}`));
       assert.equal(
         await readFile(join(snapshot.snapshotPath, 'check.mjs'), 'utf8'),
         'process.exit(0);\n',
