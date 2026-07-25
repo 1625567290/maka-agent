@@ -13,7 +13,6 @@ import {
 import type {
   PermissionMode,
   PlanReminder,
-  QuickChatMode,
   QuoteRef,
   SessionSummary,
   UiLocale,
@@ -98,7 +97,7 @@ import {
   type TurnRevisionDraft,
 } from './app-shell-revision-actions';
 import { createAppShellLayoutActions } from './app-shell-layout-actions';
-import { createAppShellQuickChatActions } from './app-shell-quick-chat-actions';
+import { createAppShellSessionStartActions } from './app-shell-session-start-actions';
 import { createAppShellDailyReviewActions } from './app-shell-daily-review-actions';
 import { createAppShellSessionRowActions } from './app-shell-session-row-actions';
 import { createAppShellSessionSettingsActions } from './app-shell-session-settings-actions';
@@ -237,7 +236,6 @@ function AppShellContent({
     draftKey: attachmentDraftKey,
   });
   const [newChatPlanModeActive, setNewChatPlanModeActive] = useState(false);
-  const [newChatQuickChatMode, setNewChatQuickChatMode] = useState<QuickChatMode | undefined>();
   const [pendingCollaborationModeBySession, setPendingCollaborationModeBySession] = useState<Record<string, boolean>>({});
   const [newChatSwarmModeActive, setNewChatSwarmModeActive] = useState(false);
   const [pendingOrchestrationModeBySession, setPendingOrchestrationModeBySession] = useState<Record<string, boolean>>({});
@@ -867,19 +865,20 @@ function AppShellContent({
   // when sessions.length === 0; any session (including archived /
   // aborted) takes over with the existing chat surface.
   const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
-  const [quickChatPending, setQuickChatPending] = useState(false);
-  const quickChatPendingRef = useRef(false);
-  const { handleQuickChatSubmit, handleExpertTeamStart } = useStableActions(createAppShellQuickChatActions, {
+  // Re-entrancy lock only — a ref, not state, because nothing renders
+  // from it (#1433 removed its last reader with the first-run hero).
+  const sessionStartPendingRef = useRef(false);
+  const { startModeSession, handleExpertTeamStart } = useStableActions(createAppShellSessionStartActions, {
     uiLocale,
     activeIdRef,
     captureComposerImportOwner,
     composerRef,
     isShellSurfaceOwnerActive,
     openSessionInChat,
-    quickChatPendingRef,
+    sessionStartPendingRef,
     refreshOnboarding: onboarding.refresh,
     refreshSessions,
-    setQuickChatPending,
+    showModelSetupToast,
     toastApi,
   });
   // Built-in expert teams for the composer "+" menu - loaded once via
@@ -946,11 +945,15 @@ function AppShellContent({
   // + snapshot===null flashes the prompt-suggestion EmptyChatHero before
   // the state-routed OnboardingHero mounts.
   const isOnboardingLoading = sessions.length === 0 && onboardingState === undefined && !onboardingSettled;
+  // Only unfinished setup takes the chat surface over. A configured user with
+  // no sessions is not onboarding: they land on the normal empty chat and use
+  // the one real Composer, which creates the session on its first send.
   const showOnboardingHero =
     sessions.length === 0 &&
     !onboardingSettled &&
     onboardingState !== undefined &&
-    onboardingState.kind !== 'ready_with_history';
+    onboardingState.kind !== 'ready_with_history' &&
+    onboardingState.kind !== 'ready_empty';
   const onboardingComposerHidden = isOnboardingLoading || (showOnboardingHero && onboardingState !== undefined);
   const {
     sessionListWidth,
@@ -1069,7 +1072,6 @@ function AppShellContent({
     projectPath: projectInfo?.projectPath,
     newSessionModel: newChatModel,
     newSessionCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
-    newSessionMode: newChatQuickChatMode,
   });
 
   const { applyE2eFixture } = useStableActions(createAppShellE2eFixtureActions, {
@@ -1104,6 +1106,7 @@ function AppShellContent({
     captureComposerImportOwner,
     clearPendingSessionAction,
     isNewChatSendSurfaceActive,
+    isShellSurfaceOwnerActive,
     markSessionReadLocally,
     markSessionRunningOptimistic,
     messageRetryPendingRef,
@@ -1420,25 +1423,31 @@ function AppShellContent({
     };
   }
 
-  function isComposerImportOwnerActive(owner: ComposerImportOwner): boolean {
-    return (
-      owner.navSection === 'sessions' &&
-      navSelectionRef.current.section === 'sessions' &&
-      activeIdRef.current === owner.sessionId
-    );
-  }
-
-  function isNewChatSendSurfaceActive(owner: ComposerImportOwner): boolean {
-    return (
-      owner.navSection === 'sessions' &&
-      owner.sessionId === undefined &&
-      navSelectionRef.current.section === 'sessions' &&
-      activeIdRef.current === undefined
-    );
-  }
-
+  /**
+   * "Is this owner still the surface the user is looking at." One rule, both
+   * halves: an async result that lands after the user moved on must not toast,
+   * navigate or steal focus, and `selectNavigation` never clears `activeId`
+   * (nav-selection.ts) — so the session id alone answers yes long after the
+   * user left for 扩展 or 设置.
+   *
+   * The two below are this same question with a precondition on what KIND of
+   * owner the caller wants, not second opinions about the question. They were
+   * three independent spellings once, and the one that re-derived it from an
+   * id drifted: it lost the section half, which is exactly what let a failed
+   * send pull a user out of 技能 and into 设置 · 模型.
+   */
   function isShellSurfaceOwnerActive(owner: ComposerImportOwner): boolean {
     return navSelectionRef.current.section === owner.navSection && activeIdRef.current === owner.sessionId;
+  }
+
+  /** …and the owner was captured on the chat surface. */
+  function isComposerImportOwnerActive(owner: ComposerImportOwner): boolean {
+    return owner.navSection === 'sessions' && isShellSurfaceOwnerActive(owner);
+  }
+
+  /** …and it was the new-chat surface, which by definition has no session. */
+  function isNewChatSendSurfaceActive(owner: ComposerImportOwner): boolean {
+    return owner.sessionId === undefined && isComposerImportOwnerActive(owner);
   }
 
   async function bootstrapSessions() {
@@ -1450,7 +1459,6 @@ function AppShellContent({
   async function createSession() {
     startNewSession();
     setNewChatPlanModeActive(false);
-    setNewChatQuickChatMode(undefined);
     setNavSelection({ section: 'sessions', filter: 'chats' });
     setSearchScrollTarget(null);
     // New-task affordances reset to the empty-state composer; move focus
@@ -1567,7 +1575,7 @@ function AppShellContent({
     closePalette,
     composerRef,
     createSession,
-    handleQuickChatSubmit,
+    startModeSession,
     isComposerImportOwnerActive,
     openHelp,
     openPlanReminderForm,
@@ -1852,10 +1860,6 @@ function AppShellContent({
                 }}
                 onAddProvider={openProviderCreate}
                 onBrowseProviders={openProviderCatalog}
-                onQuickChatSubmit={handleQuickChatSubmit}
-                mentionSkills={mentionSkills}
-                onQuickChatModeChange={setNewChatQuickChatMode}
-                quickChatPending={quickChatPending}
                 connections={connections}
                 onRefreshConnections={refreshConnections}
                 onSkip={async () => {
@@ -1869,14 +1873,6 @@ function AppShellContent({
                     );
                   }
                 }}
-                onOpenSettingsSection={(section) => openSettingsSection(section)}
-                onOpenSidebarModule={(target) => {
-                  setNavSelection({
-                    section: 'automations',
-                    module: target === 'daily-review' ? 'daily-review' : 'plan-reminders',
-                  });
-                }}
-                onStartPlanReminder={openPlanReminderForm}
                 conversationItems={planConversationItems}
               />
               )}
