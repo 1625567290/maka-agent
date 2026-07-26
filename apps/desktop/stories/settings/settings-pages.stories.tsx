@@ -603,6 +603,11 @@ const makaBridge = {
       electronVersion: '33.2.0',
       nodeVersion: '20.18.0',
       chromeVersion: '130.0.6723.59',
+      // #1363: was missing entirely — the About and Data pages' 工作区路径
+      // rows rendered an EMPTY value in every story. Deliberately long and
+      // deep so the mono value exercises its wrap contract.
+      workspacePath:
+        '/Users/storybook-fixture-user/Library/Application Support/Maka/workspaces/infra-observability-platform-desktop',
     }),
     openPath: async () => ({ ok: true as const, opened: '/Users/storybook' }),
   },
@@ -763,6 +768,49 @@ const withWebSearchConfiguredBridge = withScopedMakaBridge({
   webSearch: {
     test: async () => ({ ok: true as const, results: webSearchLiveResults }),
     query: async () => ({ ok: true as const, results: webSearchLiveResults }),
+  },
+} satisfies Record<string, unknown>);
+
+/** #1362: the proxy form (protocol/host/port grid, auth grid, bypass field)
+ *  only renders behind two enabled switches — without this fixture no story
+ *  ever exercised `.settingsFormGridProxy` or the auth `.settingsFormGrid`.
+ *  Hostile widths: a long internal proxy hostname, a service-account
+ *  username, and identity fields with long CJK content. */
+const generalProxySettings = mergeSettings(createDefaultSettings(), {
+  network: {
+    proxy: {
+      enabled: true,
+      protocol: 'socks5',
+      host: 'corp-egress-gateway.ap-southeast-1.internal.example-infra.net',
+      port: 18080,
+      authEnabled: true,
+      username: 'svc-maka-desktop-proxy-rotation-2026',
+      password: 'storybook-proxy-password',
+      bypassList: [
+        'metaso.cn',
+        'baidu.com',
+        'artifact-registry.ap-southeast-1.internal.example-infra.net',
+        '*.observability.example-infra.net',
+      ],
+    },
+  },
+  personalization: {
+    displayName: '陆逊（基础设施与开发者体验平台组 · 桌面端）',
+    assistantTone:
+      '回答尽量简短，先给结论再给理由；涉及命令行操作时给出完整命令并注明工作目录；不确定的事情直接说不确定，不要编造。',
+  },
+});
+
+const withGeneralProxyBridge = withScopedMakaBridge({
+  ...makaBridge,
+  settings: {
+    ...makaBridge.settings,
+    get: async () => generalProxySettings,
+    update: async (
+      patch: Parameters<typeof window.maka.settings.update>[0],
+    ): Promise<UpdateAppSettingsResult> => ({
+      settings: mergeSettings(generalProxySettings, patch),
+    }),
   },
 } satisfies Record<string, unknown>);
 
@@ -1035,6 +1083,12 @@ export const General: Story = {
 export const Appearance: Story = {
   decorators: [withSettingsBridge],
   render: () => <SettingsStory section="appearance" />,
+};
+/** #1362: proxy + auth enabled so the full form-grid stack renders. */
+// Real path: 设置 → 通用 → 代理服务器 on → 代理认证 on.
+export const GeneralProxyConfigured: Story = {
+  decorators: [withGeneralProxyBridge],
+  render: () => <SettingsStory section="general" />,
 };
 // Real path: 设置 → 使用统计.
 export const Usage: Story = {

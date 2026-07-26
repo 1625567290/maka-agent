@@ -563,3 +563,203 @@ test('remote access prioritizes a configured channel that needs attention', asyn
     () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
   ).toBe(true);
 });
+
+/**
+ * #1362 — THE row-wrapping decision for the settings form-row pages. The
+ * `.settingsRows` card is an inline-size query container; below 460px of
+ * CARD width (not viewport width — the content column is narrower than the
+ * window by the nav sidebar) label/control rows stack vertically, and the
+ * proxy form grids collapse to one column. Switch rows are the exception:
+ * a ~40px switch always fits beside its label. Locks both directions so
+ * neither the narrow stacking nor the wide two-column layout regresses.
+ */
+test('general form rows stack at the window floor and stay two-column when wide', async ({ window: page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const settings = await openSettings(page);
+  await settings.getByRole('button', { name: '通用', exact: true }).click();
+
+  const displayNameRow = settings
+    .locator('.settingsFormRow')
+    .filter({ has: page.getByLabel('显示名称') });
+  const incognitoRow = settings.locator('.settingsFormRow').filter({ hasText: '隐身模式' });
+  const modelRow = settings.locator('.settingsRow').filter({ hasText: '默认模型' });
+  const rowTrackCount = () =>
+    modelRow.evaluate(
+      (element) => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length,
+    );
+
+  // Wide: unchanged layout — label and control share one line.
+  await expect(displayNameRow).toHaveCSS('flex-direction', 'row');
+  await expect.poll(rowTrackCount).toBe(2);
+
+  // Window floor: rows stack; switch rows keep the control beside the label.
+  await page.setViewportSize({ width: 480, height: 900 });
+  await expect(displayNameRow).toHaveCSS('flex-direction', 'column');
+  await expect(incognitoRow).toHaveCSS('flex-direction', 'row');
+  await expect.poll(rowTrackCount).toBe(1);
+
+  // The proxy sub-form only renders behind the switches: the 3-column
+  // protocol/host/port grid (150px + 84px floors) was the widest thing on
+  // the page, and the auth username/password grid is the plain 2-column
+  // `.settingsFormGrid` — both must fold to one column on a narrow card
+  // (they are separate CSS selectors; either could regress alone).
+  await settings.getByRole('switch', { name: '启用代理服务器' }).click();
+  await settings.getByRole('switch', { name: '启用代理认证' }).click();
+  const gridTrackCounts = () =>
+    settings
+      .locator('.settingsFormGrid')
+      .evaluateAll((elements) =>
+        elements.map(
+          (element) => getComputedStyle(element).gridTemplateColumns.trim().split(/\s+/).length,
+        ),
+      );
+  await expect(settings.locator('.settingsFormGridProxy')).toBeVisible();
+  // Both grids rendered (proxy + auth), each folded to one column.
+  await expect.poll(gridTrackCounts).toEqual([1, 1]);
+
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
+/**
+ * #1362 review follow-up: the user-facing result of the palette-label wrap —
+ * at the window floor the full name stays readable (the old nowrap+ellipsis
+ * cut "Catppuccin Mocha" to "Catppucc…" with no way to recover it).
+ */
+test('appearance palette names stay fully visible at the window floor', async ({
+  window: page,
+}) => {
+  await page.setViewportSize({ width: 480, height: 900 });
+  const settings = await openSettings(page);
+  await settings.getByRole('button', { name: '外观', exact: true }).click();
+
+  const label = settings
+    .locator('.settingsThemeLabel strong')
+    .filter({ hasText: 'Catppuccin Mocha' });
+  await expect(label).toBeVisible();
+  // Wrapping, not clipping: nothing hides past the box in either axis.
+  await expect.poll(
+    () =>
+      label.evaluate((element) => ({
+        horizontallyContained: element.scrollWidth <= element.clientWidth,
+        verticallyContained: element.scrollHeight <= element.clientHeight,
+      })),
+  ).toEqual({ horizontallyContained: true, verticallyContained: true });
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
+/**
+ * #1363 — the three small form-row pages at the window floor. Daily Review
+ * and About are covered by the #1362 row-stacking mechanism; the Data page
+ * adds two page-owned surfaces: the config strategy row (nowrap label +
+ * select, one-line minimum wider than the floor column) now wraps, and the
+ * workspace path renders as a wrapping mono value.
+ */
+test('data, about, and daily review stay contained at the window floor', async ({
+  window: page,
+}) => {
+  await page.setViewportSize({ width: 480, height: 900 });
+  const settings = await openSettings(page);
+
+  await settings.getByRole('button', { name: '数据', exact: true }).click();
+  const strategy = settings.locator('.settingsConfigStrategy');
+  await expect(strategy).toBeVisible();
+  await expect(strategy).toHaveCSS('flex-wrap', 'wrap');
+  // The section itself, not just the page: the page-level assertion below
+  // passes even when a child overflows into clipped space (#1363 review).
+  await expect.poll(
+    () => strategy.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+  const workspaceValue = settings.locator('.settingsRow span[data-mono="true"]').first();
+  await expect(workspaceValue).toBeVisible();
+  await expect.poll(
+    () => workspaceValue.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+
+  await settings.getByRole('button', { name: '关于', exact: true }).click();
+  await expect(settings.locator('.settingsAboutPage')).toBeVisible();
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+
+  await settings.getByRole('button', { name: '每日回顾', exact: true }).click();
+  await expect(settings.locator('.settingsFeatureStatusPage')).toBeVisible();
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
+/**
+ * #1363 review: the English strategy label ("Connections with the same
+ * name:") is wider than the 480px floor's content column — with the old
+ * `white-space: nowrap` the section overflowed into clipped space that the
+ * page-level containment assertion could not see. The label wraps now.
+ */
+test('data config strategy stays contained at the window floor in English', async ({
+  enLocaleWindow: page,
+}) => {
+  await page.setViewportSize({ width: 480, height: 900 });
+  await page.getByRole('button', { name: 'Expand sidebar' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const settings = page.getByRole('main', { name: 'Settings content' });
+  await settings.getByRole('button', { name: 'Data', exact: true }).click();
+
+  const strategy = settings.locator('.settingsConfigStrategy');
+  await expect(strategy).toBeVisible();
+  await expect.poll(
+    () =>
+      strategy.evaluate((element) => ({
+        sectionContained: element.scrollWidth <= element.clientWidth,
+        labelWraps:
+          getComputedStyle(element.querySelector('.settingsHelpText')!).whiteSpace !== 'nowrap',
+      })),
+  ).toEqual({ sectionContained: true, labelWraps: true });
+});
+
+/**
+ * #1363 review: a switch row whose control side is MORE than a bare switch
+ * (Memory's label + status Chip + switch) must stack on a narrow card — the
+ * horizontal exception used to hold it to a 15px label with char-per-line
+ * help text. The chip + switch travel as one cluster.
+ */
+test('memory status row stacks at the window floor', async ({ window: page }) => {
+  await page.setViewportSize({ width: 480, height: 900 });
+  const settings = await openSettings(page);
+  await settings.getByRole('button', { name: '记忆', exact: true }).click();
+
+  const statusRow = settings.locator('.settingsFormRow').filter({ hasText: '本地 MEMORY.md' });
+  await expect(statusRow).toBeVisible();
+  await expect(statusRow).toHaveCSS('flex-direction', 'column');
+  await expect.poll(
+    () =>
+      statusRow.evaluate((element) => {
+        const label = element.querySelector('div');
+        const cluster = element.querySelector('.settingsFormRowControlCluster');
+        const rowStyle = getComputedStyle(element);
+        const contentWidth =
+          element.clientWidth -
+          Number.parseFloat(rowStyle.paddingLeft) -
+          Number.parseFloat(rowStyle.paddingRight);
+        return {
+          // The label owns the full card width when stacked — not a sliver.
+          labelUsesFullRow: !!label && label.clientWidth >= contentWidth - 1,
+          clusterContained: !!cluster && cluster.scrollWidth <= cluster.clientWidth,
+          rowContained: element.scrollWidth <= element.clientWidth,
+        };
+      }),
+  ).toEqual({ labelUsesFullRow: true, clusterContained: true, rowContained: true });
+
+  // The whole page now: #1364 deliberately asserted Memory per-surface only,
+  // because its rows overflowed through the shared settings-rows primitive.
+  // With the stacking mechanism plus the entry-list/preview/backup track
+  // fixes there is no routed-out overflow left to carve around.
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
