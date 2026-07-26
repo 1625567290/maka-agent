@@ -223,6 +223,7 @@ export const test = base.extend<{
   enLocaleWindow: Page;
   localeSwitchWindow: Page;
   invocableSkillsWindow: Page;
+  planRemindersWindow: Page;
 }>({
   // Seeded: a pre-staged connection clears onboarding so the composer is ready.
   // Used by chat / session / settings / attachment specs.
@@ -390,6 +391,17 @@ export const test = base.extend<{
       locale: 'zh',
       invocableSkills: true,
     }, use);
+  },
+  planRemindersWindow: async ({}, use) => {
+    await withE2eWindow(
+      {
+        seed: false,
+        readinessSelector: '.maka-plan-card',
+        e2eFixtureScenario: 'plan-reminders',
+        locale: 'zh',
+      },
+      use,
+    );
   },
 });
 

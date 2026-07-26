@@ -38,6 +38,18 @@ const STORY_INDEX = {
       id: 'product-module-hubs--scheduled-plan-reminders-configured',
       type: 'story',
     },
+    'product-module-hubs--scheduled-plan-reminders-attention': {
+      id: 'product-module-hubs--scheduled-plan-reminders-attention',
+      type: 'story',
+    },
+    'product-module-hubs--scheduled-plan-reminders-keep-awake': {
+      id: 'product-module-hubs--scheduled-plan-reminders-keep-awake',
+      type: 'story',
+    },
+    'product-module-hubs--scheduled-plan-reminders-long-content': {
+      id: 'product-module-hubs--scheduled-plan-reminders-long-content',
+      type: 'story',
+    },
     'product-module-hubs--scheduled-daily-review': {
       id: 'product-module-hubs--scheduled-daily-review',
       type: 'story',
@@ -105,6 +117,16 @@ describe('Product Storybook coverage manifest', () => {
     );
   });
 
+  it('rejects unknown browser checks instead of silently skipping them', () => {
+    const manifest = validManifest();
+    manifest.surfaces.planReminders.checks = ['plan-remidner-row'];
+
+    assert.throws(
+      () => validateCoverageManifest(manifest, STORY_INDEX),
+      /planReminders uses unknown check: plan-remidner-row/,
+    );
+  });
+
   it('executes every extra manifest entry instead of silently ignoring it', () => {
     const manifest = validManifest();
     manifest.surfaces.extra = {
@@ -137,7 +159,40 @@ describe('Product Storybook coverage manifest', () => {
       await readFile('apps/desktop/stories/product-smoke-manifest.json', 'utf8'),
     );
 
-    assert.equal(validateCoverageManifest(manifest, STORY_INDEX).length, 15);
+    const jobs = validateCoverageManifest(manifest, STORY_INDEX);
+    assert.equal(jobs.length, 26);
+    assert.deepEqual(
+      jobs
+        .filter((job) => job.surface === 'planReminders')
+        .map(({ viewport, colorScheme, checks }) => ({ viewport, colorScheme, checks })),
+      [
+        { viewport: 'wide', colorScheme: 'light', checks: ['plan-reminder-row'] },
+        { viewport: 'wide', colorScheme: 'dark', checks: ['plan-reminder-row'] },
+        { viewport: 'compact', colorScheme: 'light', checks: ['plan-reminder-row'] },
+        { viewport: 'compact', colorScheme: 'dark', checks: ['plan-reminder-row'] },
+        { viewport: 'floor', colorScheme: 'light', checks: ['plan-reminder-row'] },
+        { viewport: 'floor', colorScheme: 'dark', checks: ['plan-reminder-row'] },
+      ],
+    );
+    assert.deepEqual(
+      [
+        ...new Set(
+          jobs.filter((job) => job.surface.startsWith('planReminders')).map((job) => job.surface),
+        ),
+      ],
+      [
+        'planReminders',
+        'planRemindersEmpty',
+        'planRemindersAttention',
+        'planRemindersKeepAwake',
+        'planRemindersLongContent',
+      ],
+    );
+    const narrowJobs = jobs.filter(
+      (job) => job.surface === 'planRemindersLongContent' && job.viewport === 'floor',
+    );
+    assert.equal(narrowJobs.length, 2);
+    assert.ok(narrowJobs.every((job) => job.size.width === 480 && job.size.height === 720));
   });
 });
 

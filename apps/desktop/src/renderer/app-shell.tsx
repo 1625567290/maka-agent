@@ -236,6 +236,7 @@ function AppShellContent({
     draftKey: attachmentDraftKey,
   });
   const [newChatPlanModeActive, setNewChatPlanModeActive] = useState(false);
+  const [planReminderCreateRequestNonce, setPlanReminderCreateRequestNonce] = useState(0);
   const [pendingCollaborationModeBySession, setPendingCollaborationModeBySession] = useState<Record<string, boolean>>({});
   const [newChatSwarmModeActive, setNewChatSwarmModeActive] = useState(false);
   const [pendingOrchestrationModeBySession, setPendingOrchestrationModeBySession] = useState<Record<string, boolean>>({});
@@ -1469,9 +1470,7 @@ function AppShellContent({
   function openPlanReminderForm() {
     setNavSelection({ section: 'automations', module: 'plan-reminders' });
     closePalette();
-    window.requestAnimationFrame(() => {
-      document.querySelector<HTMLInputElement>('[data-maka-plan-title-input="true"]')?.focus({ preventScroll: false });
-    });
+    setPlanReminderCreateRequestNonce((nonce) => nonce + 1);
   }
 
   /**
@@ -1713,8 +1712,9 @@ function AppShellContent({
               ) : navSelection.section === 'automations' && navSelection.module === 'plan-reminders' ? (
                 <AutomationsPage
                   hubHeader={automationsHubHeader}
-                  skills={skills}
                   reminders={planReminders}
+                  createRequestNonce={planReminderCreateRequestNonce}
+                  onCreateRequestHandled={() => setPlanReminderCreateRequestNonce(0)}
                   keepSystemAwake={
                     keepSystemAwakeController.supported
                       ? keepSystemAwakeController.keepSystemAwake

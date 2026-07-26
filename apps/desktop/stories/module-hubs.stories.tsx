@@ -28,7 +28,20 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 const NOW = Date.UTC(2026, 6, 1, 9, 30);
+const PLAN_NOW = Date.now();
 const noop = () => {};
+const CONFIGURED_CRON_LAST_RUN = {
+  id: 'run-1',
+  at: PLAN_NOW - 86_400_000,
+  status: 'triggered',
+  message: '已生成进度摘要。',
+} as const;
+const CONFIGURED_COMPLETED_LAST_RUN = {
+  id: 'run-done',
+  at: PLAN_NOW - 2 * 86_400_000,
+  status: 'triggered',
+  message: '已发送。',
+} as const;
 
 const INSTALLED_SKILLS: SkillEntry[] = [
   {
@@ -65,13 +78,13 @@ const CONFIGURED_REMINDERS: PlanReminder[] = [
     id: 'plan-weekly',
     title: '每周发布风险复盘',
     note: '聚合本周未解决的发布风险项。',
-    schedule: { kind: 'recurring', startAt: NOW - 7 * 86_400_000, recurrence: 'weekly' },
+    schedule: { kind: 'recurring', startAt: PLAN_NOW - 7 * 86_400_000, recurrence: 'weekly' },
     delivery: { channel: 'local' },
     status: 'scheduled',
     enabled: true,
-    createdAt: NOW - 14 * 86_400_000,
-    updatedAt: NOW - 2 * 86_400_000,
-    nextRunAt: NOW + 2 * 86_400_000,
+    createdAt: PLAN_NOW - 14 * 86_400_000,
+    updatedAt: PLAN_NOW - 2 * 86_400_000,
+    nextRunAt: PLAN_NOW + 2 * 86_400_000,
     runs: [],
     runCount: 0,
   },
@@ -79,33 +92,27 @@ const CONFIGURED_REMINDERS: PlanReminder[] = [
     id: 'plan-cron',
     title: '工作日早 9 点同步进度',
     note: '',
-    schedule: { kind: 'cron', startAt: NOW - 30 * 86_400_000, expression: '0 9 * * 1-5' },
+    schedule: { kind: 'cron', startAt: PLAN_NOW - 30 * 86_400_000, expression: '0 9 * * 1-5' },
     delivery: { channel: 'local' },
     status: 'scheduled',
     enabled: true,
-    createdAt: NOW - 30 * 86_400_000,
-    updatedAt: NOW - 30 * 86_400_000,
-    nextRunAt: NOW + 18 * 3_600_000,
-    runs: [
-      {
-        id: 'run-1',
-        at: NOW - 86_400_000,
-        status: 'triggered',
-        message: '已生成进度摘要。',
-      },
-    ],
+    createdAt: PLAN_NOW - 30 * 86_400_000,
+    updatedAt: PLAN_NOW - 30 * 86_400_000,
+    nextRunAt: PLAN_NOW + 18 * 3_600_000,
+    lastRun: CONFIGURED_CRON_LAST_RUN,
+    runs: [CONFIGURED_CRON_LAST_RUN],
     runCount: 1,
   },
   {
     id: 'plan-paused',
     title: '一次性补一次截图基线',
     note: '发布前再补一轮稳定基线。',
-    schedule: { kind: 'once', runAt: NOW + 3 * 86_400_000 },
+    schedule: { kind: 'once', runAt: PLAN_NOW + 3 * 86_400_000 },
     delivery: { channel: 'local' },
     status: 'paused',
     enabled: false,
-    createdAt: NOW - 5 * 86_400_000,
-    updatedAt: NOW - 86_400_000,
+    createdAt: PLAN_NOW - 5 * 86_400_000,
+    updatedAt: PLAN_NOW - 86_400_000,
     runs: [],
     runCount: 0,
   },
@@ -113,21 +120,87 @@ const CONFIGURED_REMINDERS: PlanReminder[] = [
     id: 'plan-completed',
     title: '发布日提醒',
     note: '',
-    schedule: { kind: 'once', runAt: NOW - 2 * 86_400_000 },
+    schedule: { kind: 'once', runAt: PLAN_NOW - 2 * 86_400_000 },
     delivery: { channel: 'local' },
     status: 'completed',
     enabled: false,
-    createdAt: NOW - 10 * 86_400_000,
-    updatedAt: NOW - 2 * 86_400_000,
+    createdAt: PLAN_NOW - 10 * 86_400_000,
+    updatedAt: PLAN_NOW - 2 * 86_400_000,
+    lastRun: CONFIGURED_COMPLETED_LAST_RUN,
+    runs: [CONFIGURED_COMPLETED_LAST_RUN],
+    runCount: 1,
+  },
+];
+
+const ATTENTION_REMINDERS: PlanReminder[] = [
+  {
+    id: 'plan-delivery-blocked',
+    title: '发送每日客户反馈摘要',
+    note: '汇总过去 24 小时的反馈并投递到项目群。',
+    schedule: { kind: 'cron', startAt: PLAN_NOW - 30 * 86_400_000, expression: '0 18 * * 1-5' },
+    delivery: { channel: 'bot', platform: 'telegram', chatId: 'project-room' },
+    status: 'scheduled',
+    enabled: true,
+    createdAt: PLAN_NOW - 30 * 86_400_000,
+    updatedAt: PLAN_NOW - 60 * 60_000,
+    nextRunAt: PLAN_NOW + 8 * 60 * 60_000,
+    lastRun: {
+      id: 'run-blocked',
+      at: PLAN_NOW - 60 * 60_000,
+      status: 'blocked',
+      message: 'Telegram 投递不可用：机器人已被移出目标群聊。',
+      blockReason: 'bot_delivery_unavailable',
+    },
     runs: [
       {
-        id: 'run-done',
-        at: NOW - 2 * 86_400_000,
-        status: 'triggered',
-        message: '已发送。',
+        id: 'run-blocked',
+        at: PLAN_NOW - 60 * 60_000,
+        status: 'blocked',
+        message: 'Telegram 投递不可用：机器人已被移出目标群聊。',
+        blockReason: 'bot_delivery_unavailable',
       },
     ],
-    runCount: 1,
+    runCount: 12,
+  },
+];
+
+const LONG_CONTENT_REMINDERS: PlanReminder[] = [
+  {
+    id: 'plan-hostile-content',
+    title: '每周一早上汇总所有仍未关闭、缺少明确负责人或预计完成日期、并且已经连续两个工作日没有更新的跨团队发布阻塞项',
+    note: '从工程、设计、法务与运营项目中读取发布风险，保留原始链接、负责人、最后更新时间和下一步；如果投递目标不可用，必须在本地提醒中完整说明失败原因，而不是静默跳过。',
+    schedule: {
+      kind: 'cron',
+      startAt: PLAN_NOW - 90 * 86_400_000,
+      expression: '15 8 * * 1',
+    },
+    delivery: {
+      channel: 'bot',
+      platform: 'telegram',
+      chatId: 'release-coordination-room-with-an-intentionally-hostile-identifier',
+    },
+    status: 'scheduled',
+    enabled: true,
+    createdAt: PLAN_NOW - 90 * 86_400_000,
+    updatedAt: PLAN_NOW - 2 * 60 * 60_000,
+    nextRunAt: PLAN_NOW + 5 * 86_400_000,
+    lastRun: {
+      id: 'run-long',
+      at: PLAN_NOW - 2 * 86_400_000,
+      status: 'blocked',
+      message: '隐私浏览正在进行，因此本轮任务没有读取工作区或向外部群聊投递。',
+      blockReason: 'incognito_active',
+    },
+    runs: [
+      {
+        id: 'run-long',
+        at: PLAN_NOW - 2 * 86_400_000,
+        status: 'blocked',
+        message: '隐私浏览正在进行，因此本轮任务没有读取工作区或向外部群聊投递。',
+        blockReason: 'incognito_active',
+      },
+    ],
+    runCount: 37,
   },
 ];
 
@@ -258,7 +331,10 @@ function ExtensionsMcpSurface() {
   );
 }
 
-function ScheduledPlanRemindersSurface(props: { reminders?: PlanReminder[] }) {
+function ScheduledPlanRemindersSurface(props: {
+  reminders?: PlanReminder[];
+  keepSystemAwake?: boolean;
+}) {
   const copy = getSharedUiCopy(useUiLocale()).moduleHubs.automations;
   return (
     <ModuleSurface agentsView="cron">
@@ -268,8 +344,9 @@ function ScheduledPlanRemindersSurface(props: { reminders?: PlanReminder[] }) {
           subtitle: copy.description,
           badge: <ModuleHubSelector hub="automations" value="plan-reminders" onChange={() => {}} />,
         }}
-        skills={[]}
         reminders={props.reminders ?? []}
+        keepSystemAwake={props.keepSystemAwake ?? false}
+        onKeepSystemAwakeChange={async () => {}}
         onRefresh={noop}
         onCreate={noop}
         onUpdate={noop}
@@ -299,6 +376,30 @@ function ScheduledDailyReviewSurface(props: { bridge: DailyReviewBridge }) {
   );
 }
 
+async function assertKeepAwakeStoryState(canvasElement: HTMLElement) {
+  const document = canvasElement.ownerDocument;
+  const deadline = Date.now() + 2_000;
+  let trigger: HTMLButtonElement | undefined;
+  while (!trigger && Date.now() < deadline) {
+    trigger = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => {
+      const label = button.getAttribute('aria-label');
+      return label === '定时任务页面设置' || label === 'Scheduled task page settings';
+    });
+    if (!trigger) await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  if (!trigger) throw new Error('Keep-awake story did not render the page-settings trigger');
+  trigger.click();
+
+  while (Date.now() < deadline) {
+    const item = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]'),
+    ).find((candidate) => /保持系统唤醒|Keep system awake/.test(candidate.textContent ?? ''));
+    if (item?.getAttribute('aria-checked') === 'true') return;
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  throw new Error('Keep-awake story did not expose a checked contextual control');
+}
+
 // Real path: sidebar → 扩展 → 技能, on a fresh install.
 export const ExtensionsSkills: Story = { render: () => <ExtensionsSkillsSurface /> };
 
@@ -321,6 +422,29 @@ export const ScheduledPlanReminders: Story = {
 // Real path: sidebar → 定时任务 → 计划提醒, with recurring and completed reminders.
 export const ScheduledPlanRemindersConfigured: Story = {
   render: () => <ScheduledPlanRemindersSurface reminders={CONFIGURED_REMINDERS} />,
+};
+
+// Real path: sidebar → 定时任务 → 计划提醒, after the latest delivery needs attention.
+export const ScheduledPlanRemindersAttention: Story = {
+  render: () => <ScheduledPlanRemindersSurface reminders={ATTENTION_REMINDERS} />,
+};
+
+// Real path: sidebar → 定时任务 → 计划提醒, after Keep system awake is enabled in page settings.
+export const ScheduledPlanRemindersKeepAwake: Story = {
+  render: () => (
+    <ScheduledPlanRemindersSurface
+      reminders={CONFIGURED_REMINDERS}
+      keepSystemAwake
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    await assertKeepAwakeStoryState(canvasElement);
+  },
+};
+
+// Real path: sidebar → 定时任务 → 计划提醒, with user-authored content at storage limits.
+export const ScheduledPlanRemindersLongContent: Story = {
+  render: () => <ScheduledPlanRemindersSurface reminders={LONG_CONTENT_REMINDERS} />,
 };
 
 // Real path: sidebar → 定时任务 → 每日回顾, with reviews already generated.
