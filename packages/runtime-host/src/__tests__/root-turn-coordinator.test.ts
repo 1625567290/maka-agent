@@ -22,11 +22,15 @@ import {
   type RootTurnAdmissionStore,
 } from '@maka/storage/execution-stores';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
+import type { SubscriptionFrame } from '../protocol/index.js';
+import { CanonicalSessionProjectionReader } from '../server/canonical-session-projection.js';
 import type { RuntimeHostResidency } from '../server/host-kernel.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from '../server/message-coordinator.js';
 import { RootAdmissionOwner } from '../server/root-admission-owner.js';
 import { RootTurnCoordinator } from '../server/root-turn-coordinator.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
+import { SessionContinuityCoordinator } from '../server/session-continuity-coordinator.js';
+import type { SessionContinuityFrameSink } from '../server/session-continuity-service.js';
 
 const HOLD_EXTERNAL_PROMPT = 'hold external root before follow-up';
 
@@ -56,11 +60,14 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
     await rootAdmissionOwner.recoverSession(parent.id);
     const acquireResidency = (): RuntimeHostResidency => ({ release() {} });
     let coordinator: RootTurnCoordinator | undefined;
+    let continuity: SessionContinuityCoordinator | undefined;
+    let drainRequested = false;
     const rootPort: HostMessageRootPort = {
       readSessionHeader: (sessionId) =>
         requireCoordinator(coordinator).readSessionHeader(sessionId),
       readRootState: (sessionId) => requireCoordinator(coordinator).readRootState(sessionId),
-      startFromMessage: (input) => requireCoordinator(coordinator).startFromMessage(input),
+      startFromMessage: (input, admission) =>
+        requireCoordinator(coordinator).startFromMessage(input, admission),
       claimStop: (input, commitQueueFence) =>
         requireCoordinator(coordinator).claimStop(input, commitQueueFence),
     };
@@ -78,7 +85,25 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
       receipts: stores.messageReceiptStore,
       sessionAdmission,
       acquireResidency,
+      requestDrain: () => {
+        drainRequested = true;
+      },
+      onProjectionChanged: (sessionId) =>
+        requireContinuity(continuity).enqueueCanonicalRefresh(sessionId),
     });
+    const canonicalProjection = new CanonicalSessionProjectionReader({
+      stores,
+      rootAdmissions: rootAdmissionOwner,
+      messages,
+    });
+    continuity = new SessionContinuityCoordinator(
+      hostEpoch,
+      (sessionId) => canonicalProjection.read(sessionId),
+      sessionAdmission,
+      () => {
+        drainRequested = true;
+      },
+    );
     const authority: RuntimeHostedRootAuthority = {
       bindRun: (identity) => messages.bindRun(identity),
       executeRoot: (input) => requireCoordinator(coordinator).executeRoot(input),
@@ -89,7 +114,9 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
     const backends = new BackendRegistry();
     const linkedBackends = new Map<string, LinkedChildAuthorityBackend>();
     backends.register('fake', (context) => {
-      if (!context.header.subagentRuntime) return new FakeBackend(context);
+      if (!context.header.subagentRuntime) {
+        return new PermissionWaitingBackend(context.sessionId);
+      }
       const backend = new LinkedChildAuthorityBackend(context.sessionId);
       linkedBackends.set(context.sessionId, backend);
       return backend;
@@ -104,18 +131,29 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
       now: Date.now,
       messageAuthority: authority,
     });
-    let drainRequested = false;
     coordinator = new RootTurnCoordinator(
       manager,
       stores,
       sessionAdmission,
       rootAdmissionOwner,
       messages,
+      continuity,
       acquireResidency,
       () => {
         drainRequested = true;
       },
     );
+
+    const parentSink = new RecordingContinuitySink();
+    const parentConnectionId = 'connection-waiting-parent';
+    const parentConnection = continuity.attachConnection(parentConnectionId, parentSink);
+    const parentOpened = await continuity.handlers['subscription.open'](
+      { sessionId: parent.id },
+      operationContext(hostEpoch, acquireResidency, parentConnectionId),
+    );
+    assert.equal(parentOpened.ok, true);
+    if (!parentOpened.ok) return;
+    parentConnection.activate(parentOpened.result.subscriptionId);
 
     const parentTurnId = randomUUID();
     const parentStarted = await coordinator.handlers['turn.start'](
@@ -128,6 +166,12 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
     );
     assert.equal(parentStarted.ok, true);
     if (!parentStarted.ok) return;
+    await waitForContinuityFrame(
+      parentSink,
+      (frame) =>
+        frame.kind === 'subscription.session_projection' &&
+        frame.snapshot.session.status === 'waiting_for_user',
+    );
 
     let initialReady:
       | {
@@ -139,6 +183,8 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
         }
       | undefined;
     let initialEventCount = 0;
+    const childSink = new RecordingContinuitySink();
+    let closeChildContinuity: (() => void) | undefined;
     const child = await manager.spawnChildSession(parent.id, {
       spawnedBy: {
         parentRunId: parentStarted.result.runId,
@@ -147,8 +193,19 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
       },
       agentProfile: LOCAL_READ_AGENT_PROFILE,
       prompt: 'initial linked child',
-      onReady: (ready) => {
+      onReady: async (ready) => {
         initialReady = ready;
+        const childConnectionId = 'connection-linked-child';
+        const childContinuity = requireContinuity(continuity);
+        const connection = childContinuity.attachConnection(childConnectionId, childSink);
+        const opened = await childContinuity.handlers['subscription.open'](
+          { sessionId: ready.childSessionId },
+          operationContext(hostEpoch, acquireResidency, childConnectionId),
+        );
+        assert.equal(opened.ok, true);
+        if (!opened.ok) throw new Error('Unable to subscribe to hosted linked child');
+        connection.activate(opened.result.subscriptionId);
+        closeChildContinuity = () => connection.close();
       },
       onEvent: () => {
         initialEventCount += 1;
@@ -163,6 +220,26 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
       agentName: child.agentName,
     });
     assert.equal(initialEventCount, child.eventCount);
+    assert.ok(
+      childSink.frames.some(
+        (frame) =>
+          frame.kind === 'subscription.session_delta' &&
+          frame.sessionId === child.childSessionId &&
+          frame.delta.turnId === child.turnId &&
+          frame.delta.runId === child.runId &&
+          frame.delta.kind === 'text' &&
+          frame.delta.text === 'linked child complete',
+      ),
+    );
+    assert.ok(
+      childSink.frames.some(
+        (frame) =>
+          frame.kind === 'subscription.session_projection' &&
+          frame.snapshot.rootTurn?.turnId === child.turnId &&
+          frame.snapshot.rootTurn.runId === child.runId &&
+          frame.snapshot.rootTurn.status === 'completed',
+      ),
+    );
     const initialAdmissions = await stores.agentRunStore.listRootTurnAdmissionsForRecovery(
       child.childSessionId,
     );
@@ -416,6 +493,9 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
     });
     await coordinator.close();
     await messages.close();
+    parentConnection.close();
+    closeChildContinuity?.();
+    continuity.close();
   } finally {
     await owner.close();
     await rm(base, { recursive: true, force: true });
@@ -670,11 +750,13 @@ test('shutdown re-scans a successor created by an in-flight terminal handoff', {
     };
     const sessionAdmission = new SessionAdmissionGate();
     let coordinator: RootTurnCoordinator | undefined;
+    let continuity: SessionContinuityCoordinator | undefined;
     const rootPort: HostMessageRootPort = {
       readSessionHeader: (sessionId) =>
         requireCoordinator(coordinator).readSessionHeader(sessionId),
       readRootState: (sessionId) => requireCoordinator(coordinator).readRootState(sessionId),
-      startFromMessage: (input) => requireCoordinator(coordinator).startFromMessage(input),
+      startFromMessage: (input, admission) =>
+        requireCoordinator(coordinator).startFromMessage(input, admission),
       claimStop: (input, commitQueueFence) =>
         requireCoordinator(coordinator).claimStop(input, commitQueueFence),
     };
@@ -692,7 +774,19 @@ test('shutdown re-scans a successor created by an in-flight terminal handoff', {
       receipts: stores.messageReceiptStore,
       sessionAdmission,
       acquireResidency,
+      onProjectionChanged: (sessionId) =>
+        requireContinuity(continuity).enqueueCanonicalRefresh(sessionId),
     });
+    const canonicalProjection = new CanonicalSessionProjectionReader({
+      stores,
+      rootAdmissions: rootAdmissionOwner,
+      messages,
+    });
+    continuity = new SessionContinuityCoordinator(
+      hostEpoch,
+      (sessionId) => canonicalProjection.read(sessionId),
+      sessionAdmission,
+    );
     const backends = new BackendRegistry();
     backends.register('fake', (context) => new FakeBackend(context));
     const manager = new SessionManager({
@@ -711,6 +805,7 @@ test('shutdown re-scans a successor created by an in-flight terminal handoff', {
       sessionAdmission,
       rootAdmissionOwner,
       messages,
+      continuity,
       acquireResidency,
       () => {
         drainRequested = true;
@@ -746,6 +841,7 @@ test('shutdown re-scans a successor created by an in-flight terminal handoff', {
     releaseFollowupAdmission.resolve();
     await closing;
     await messages.close();
+    continuity.close();
 
     assert.deepEqual(coordinator.readRootState(session.id), { kind: 'idle' });
     assert.equal(liveResidencies, 0);
@@ -807,10 +903,12 @@ async function createFailureFixture(options: {
   };
   let drainRequested = false;
   let coordinator: RootTurnCoordinator | undefined;
+  let continuity: SessionContinuityCoordinator | undefined;
   const rootPort: HostMessageRootPort = {
     readSessionHeader: (sessionId) => requireCoordinator(coordinator).readSessionHeader(sessionId),
     readRootState: (sessionId) => requireCoordinator(coordinator).readRootState(sessionId),
-    startFromMessage: (input) => requireCoordinator(coordinator).startFromMessage(input),
+    startFromMessage: (input, admission) =>
+      requireCoordinator(coordinator).startFromMessage(input, admission),
     claimStop: (input, commitQueueFence) =>
       requireCoordinator(coordinator).claimStop(input, commitQueueFence),
   };
@@ -832,7 +930,20 @@ async function createFailureFixture(options: {
     sessionAdmission,
     acquireResidency,
     requestDrain,
+    onProjectionChanged: (sessionId) =>
+      requireContinuity(continuity).enqueueCanonicalRefresh(sessionId),
   });
+  const canonicalProjection = new CanonicalSessionProjectionReader({
+    stores,
+    rootAdmissions: rootAdmissionOwner,
+    messages,
+  });
+  continuity = new SessionContinuityCoordinator(
+    hostEpoch,
+    (sessionId) => canonicalProjection.read(sessionId),
+    sessionAdmission,
+    requestDrain,
+  );
   const backends = new BackendRegistry();
   options.registerBackend(backends);
   const manager = new SessionManager({
@@ -850,6 +961,7 @@ async function createFailureFixture(options: {
     sessionAdmission,
     rootAdmissionOwner,
     messages,
+    continuity,
     acquireResidency,
     requestDrain,
   );
@@ -864,6 +976,7 @@ async function createFailureFixture(options: {
     liveResidencies: () => liveResidencies,
     drainRequested: () => drainRequested,
     dispose: async () => {
+      continuity.close();
       await owner.close();
       await rm(base, { recursive: true, force: true });
     },
@@ -875,10 +988,21 @@ function requireCoordinator(coordinator: RootTurnCoordinator | undefined): RootT
   return coordinator;
 }
 
-function operationContext(hostEpoch: string, acquireResidency: () => RuntimeHostResidency) {
+function requireContinuity(
+  continuity: SessionContinuityCoordinator | undefined,
+): SessionContinuityCoordinator {
+  if (!continuity) throw new Error('Continuity coordinator is not bound');
+  return continuity;
+}
+
+function operationContext(
+  hostEpoch: string,
+  acquireResidency: () => RuntimeHostResidency,
+  connectionId = 'connection-close-handoff',
+) {
   return {
     hostEpoch,
-    connectionId: 'connection-close-handoff',
+    connectionId,
     surface: 'tui' as const,
     principal: 'local_os_user' as const,
     acquireResidency,
@@ -1002,6 +1126,69 @@ class LinkedChildAuthorityBackend implements AgentBackend {
   }
 }
 
+class PermissionWaitingBackend implements AgentBackend {
+  readonly kind = 'fake' as const;
+  private stopped = false;
+  private releaseWait: (() => void) | undefined;
+
+  constructor(readonly sessionId: string) {}
+
+  async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    this.stopped = false;
+    yield {
+      type: 'permission_request',
+      id: randomUUID(),
+      turnId: input.turnId,
+      ts: Date.now(),
+      kind: 'tool_permission',
+      requestId: randomUUID(),
+      toolUseId: randomUUID(),
+      toolName: 'Bash',
+      category: 'shell_safe',
+      reason: 'custom',
+      args: {},
+      rememberForTurnAllowed: true,
+    };
+    await new Promise<void>((resolve) => {
+      this.releaseWait = resolve;
+      if (this.stopped) resolve();
+    });
+    yield {
+      type: 'abort',
+      id: randomUUID(),
+      turnId: input.turnId,
+      ts: Date.now(),
+      reason: 'user_stop',
+    };
+    yield {
+      type: 'complete',
+      id: randomUUID(),
+      turnId: input.turnId,
+      ts: Date.now(),
+      stopReason: 'user_stop',
+    };
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.releaseWait?.();
+  }
+
+  async respondToPermission(): Promise<void> {}
+
+  async dispose(): Promise<void> {
+    this.releaseWait?.();
+  }
+}
+
+class RecordingContinuitySink implements SessionContinuityFrameSink {
+  readonly frames: SubscriptionFrame[] = [];
+
+  async send(frame: SubscriptionFrame): Promise<void> {
+    this.frames.push(frame);
+  }
+}
+
 function testTool(name: string): MakaTool {
   return {
     name,
@@ -1010,4 +1197,46 @@ function testTool(name: string): MakaTool {
     permissionRequired: false,
     impl: async () => ({ ok: true }),
   };
+}
+
+async function completesWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  description: string,
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Timed out waiting for ${description}`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function waitForContinuityFrame(
+  sink: RecordingContinuitySink,
+  predicate: (frame: SubscriptionFrame) => boolean,
+): Promise<SubscriptionFrame> {
+  return completesWithin(
+    new Promise((resolve) => {
+      const check = (): void => {
+        const frame = sink.frames.find(predicate);
+        if (frame) {
+          resolve(frame);
+          return;
+        }
+        setImmediate(check);
+      };
+      check();
+    }),
+    5_000,
+    'Session continuity frame',
+  );
 }
