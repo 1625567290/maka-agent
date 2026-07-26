@@ -217,6 +217,8 @@ export const test = base.extend<{
   sessionWorkbarWindow: Page;
   botSettingsWindow: Page;
   permissionSettingsWindow: Page;
+  usageSettingsWindow: Page;
+  searchSettingsWindow: Page;
   zhLocaleWindow: Page;
   enLocaleWindow: Page;
   localeSwitchWindow: Page;
@@ -323,6 +325,38 @@ export const test = base.extend<{
         seed: false,
         readinessSelector: '.settingsOsPermissionRow',
         e2eFixtureScenario: 'settings-permissions',
+        locale: 'zh',
+      },
+      use,
+    );
+  },
+  // #1364: Usage with seeded request traffic + details-on settings, so the
+  // request-log DataTable actually renders (the default window fixture keeps
+  // `showDetails` false and has no logs — the table CSS could regress without
+  // failing anything).
+  usageSettingsWindow: async ({}, use) => {
+    await withE2eWindow(
+      {
+        seed: false,
+        // The tabs bar, not the table: the renderer's first stats fetch can
+        // race the fixture seeding, so the spec refreshes until the seeded
+        // request log lands.
+        readinessSelector: '.settingsUsageTabsBar',
+        e2eFixtureScenario: 'settings-usage',
+        locale: 'zh',
+      },
+      use,
+    );
+  },
+  // #1364: Web Search with a configured Tavily key; queries are answered by
+  // the typed fixture in `main/web-search-e2e-fixture.ts` (e2e runs offline),
+  // so the hostile-width result list is reachable deterministically.
+  searchSettingsWindow: async ({}, use) => {
+    await withE2eWindow(
+      {
+        seed: false,
+        readinessSelector: '.settingsWebSearchQueryInputRow',
+        e2eFixtureScenario: 'settings-search',
         locale: 'zh',
       },
       use,

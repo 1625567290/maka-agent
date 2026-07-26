@@ -266,6 +266,127 @@ test('capability diagnostics stay contained when expanded at the window floor', 
   ).toBe(true);
 });
 
+/**
+ * #1364 — list-page geometry at the window floor.
+ *
+ * Usage: the requests DataTable's nowrap column recipe gives it an intrinsic
+ * width wider than the settings column even at full window width; it must
+ * scroll inside its own container (#1360 fix) instead of dragging the page
+ * into horizontal scroll, and the five-tab bar scrolls within itself the same
+ * way. Web search: unbreakable tokens (env-var hint, result hostnames/URLs)
+ * must wrap instead of widening the page.
+ *
+ * Memory is asserted per-surface (the prompt-preview header), not as a
+ * whole-page containment check: its `.settingsFormRow` rows overflow at the
+ * floor through the shared settings-rows primitive — routed to #1360 and in
+ * #1362's row-wrapping scope, not patched per-page here.
+ */
+test('usage and web search stay contained at the window floor', async ({ window: page }) => {
+  await page.setViewportSize({ width: 480, height: 900 });
+  const settings = await openSettings(page);
+
+  await settings.getByRole('button', { name: '使用统计', exact: true }).click();
+  const tabsBar = settings.locator('.settingsUsageTabsBar');
+  await expect(tabsBar).toBeVisible();
+  await expect(tabsBar).toHaveCSS('overflow-x', 'auto');
+  await expect.poll(async () => {
+    const { trackCount, valuesContained } = await summaryGeometry(
+      settings.locator('.settingsUsageSummary'),
+    );
+    return { foldedToFewTracks: trackCount <= 2, valuesContained };
+  }).toEqual({ foldedToFewTracks: true, valuesContained: true });
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+
+  // Not `exact`: the nav entry's accessible name carries its Beta badge.
+  await settings.getByRole('button', { name: '联网搜索' }).click();
+  const disabledReason = settings.locator('.settingsWebSearchDisabledReason');
+  await expect(disabledReason).toBeVisible();
+  await expect(disabledReason).toHaveCSS('overflow-wrap', 'anywhere');
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+
+  await settings.getByRole('button', { name: '记忆', exact: true }).click();
+  const previewHeader = settings.locator('.settingsMemoryPromptPreviewHeader');
+  await expect(previewHeader).toBeVisible();
+  await expect(previewHeader).toHaveCSS('flex-wrap', 'wrap');
+  await expect.poll(
+    () =>
+      previewHeader.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
+/**
+ * #1364 review follow-up: the containment test above never reaches the two
+ * long-content branches — the default fixture has no request logs (so the
+ * requests DataTable never renders) and no Tavily key (so the page stops at
+ * the no-key message). These two lock the actual fixes against the states
+ * that broke: the request table scrolls inside its own container while the
+ * page stays put, and the hostile-width results (bare-URL title, long
+ * snippet) wrap inside their cards.
+ */
+test('usage request log scrolls inside its own container at the window floor', async ({
+  usageSettingsWindow: page,
+}) => {
+  await page.setViewportSize({ width: 480, height: 900 });
+  const settings = page.getByRole('main', { name: '设置内容' });
+  const scroller = settings.locator('.settingsUsageTable');
+  // The renderer's first stats fetch can race the fixture seeding on boot;
+  // refresh until the seeded request log lands.
+  await expect(async () => {
+    await settings.getByRole('button', { name: '刷新使用统计' }).click();
+    await expect(scroller).toBeVisible({ timeout: 1_000 });
+  }).toPass();
+  await expect(scroller).toHaveCSS('overflow-x', 'auto');
+  // The seeded log's nowrap columns are intrinsically wider than the floor
+  // column, so the scroller must actually be scrolling its table…
+  await expect.poll(
+    () => scroller.evaluate((element) => element.scrollWidth > element.clientWidth + 1),
+  ).toBe(true);
+  // …while the page around it stays contained.
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
+test('web search results wrap inside their cards at the window floor', async ({
+  searchSettingsWindow: page,
+}) => {
+  await page.setViewportSize({ width: 480, height: 900 });
+  const settings = page.getByRole('main', { name: '设置内容' });
+  await settings.getByLabel('联网搜索真实查询').fill('electron vibrancy 排查');
+  await settings.getByRole('button', { name: '搜索', exact: true }).click();
+
+  const results = settings.locator('.settingsWebSearchResult');
+  await expect(results).toHaveCount(3);
+  await expect.poll(
+    () =>
+      results.evaluateAll((elements) =>
+        elements.every((element) => element.scrollWidth <= element.clientWidth),
+      ),
+  ).toBe(true);
+  await expect.poll(
+    () => settings.evaluate((element) => element.scrollWidth <= element.clientWidth),
+  ).toBe(true);
+});
+
+test('usage keeps one summary track per metric when wide', async ({ window: page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const settings = await openSettings(page);
+  await settings.getByRole('button', { name: '使用统计', exact: true }).click();
+
+  // `auto-fit` must not cost the full-width layout: four metrics, four tracks.
+  await expect(settings.locator('.settingsUsageSummary')).toBeVisible();
+  await expect.poll(async () => {
+    const { trackCount, tileCount } = await summaryGeometry(
+      settings.locator('.settingsUsageSummary'),
+    );
+    return { trackCount, tileCount };
+  }).toEqual({ trackCount: 4, tileCount: 4 });
+});
+
 test('remote access opens a channel detail from the overview and returns', async ({ window: page }) => {
   await page.getByRole('button', { name: '展开侧边栏' }).click();
   await page.getByRole('button', { name: '设置' }).click();

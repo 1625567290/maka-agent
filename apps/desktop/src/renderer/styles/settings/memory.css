@@ -45,6 +45,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    /* #1364: the trailing cluster (injection Chip + copy button) is an
+       inline-flex that cannot shrink; at the 480px window floor it overflowed
+       the card by ~13px. Let it wrap under the title instead. */
+    flex-wrap: wrap;
     gap: var(--space-3);
   }
 .settingsMemoryPromptPreviewHeader strong {
