@@ -11,6 +11,7 @@ import re
 import secrets
 import shlex
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -123,6 +124,20 @@ _MAX_NODE_TIMER_MS = 2_147_483_647
 # ASCII decimal positive integer literal only; [0-9] (not \d) rejects Unicode
 # digits on both sides. Matches the TS host's lenientPositiveIntEnv.
 _POSITIVE_INT_RE = re.compile(r"[1-9][0-9]*")
+
+
+def _positive_int_literal(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    stripped = raw.strip()
+    if _POSITIVE_INT_RE.fullmatch(stripped) is None:
+        return None
+    try:
+        value = int(stripped)
+    except ValueError:
+        # CPython caps integer-string conversion length; an over-long value is malformed.
+        return None
+    return value if value <= _MAX_SAFE_INTEGER else None
 
 
 class MakaAgent(BaseInstalledAgent):
@@ -370,7 +385,22 @@ class MakaAgent(BaseInstalledAgent):
     ) -> None:
         if self._harbor_mode() == "task-run":
             if self._task_run_in_container():
-                await self._run_task_run_container(instruction, environment, context)
+                phase_started_monotonic = time.monotonic()
+                phase_timeout_sec = _positive_int_literal(
+                    self._get_env("MAKA_AGENT_PHASE_TIMEOUT_SEC")
+                )
+                model_deadline_at_ms = (
+                    time.time_ns() // 1_000_000 + self._cell_timeout_sec() * 1000
+                    if phase_timeout_sec is not None
+                    else None
+                )
+                await self._run_task_run_container(
+                    instruction,
+                    environment,
+                    context,
+                    phase_started_monotonic=phase_started_monotonic,
+                    model_deadline_at_ms=model_deadline_at_ms,
+                )
             else:
                 await self._run_task_run_host(instruction, environment, context)
             return
@@ -437,18 +467,7 @@ class MakaAgent(BaseInstalledAgent):
             if env is not None
             else self._get_env("MAKA_CELL_TIMEOUT_SEC")
         )
-        if not raw:
-            return self._DEFAULT_CELL_TIMEOUT_SEC
-        stripped = raw.strip()
-        if _POSITIVE_INT_RE.fullmatch(stripped) is None:
-            return self._DEFAULT_CELL_TIMEOUT_SEC
-        try:
-            value = int(stripped)
-        except ValueError:
-            # CPython caps integer-string conversion length; an over-long value
-            # is malformed, not a giant timeout.
-            return self._DEFAULT_CELL_TIMEOUT_SEC
-        return value if value <= _MAX_SAFE_INTEGER else self._DEFAULT_CELL_TIMEOUT_SEC
+        return _positive_int_literal(raw) or self._DEFAULT_CELL_TIMEOUT_SEC
 
     def _cell_settlement_grace_sec(self, env: dict[str, str] | None = None) -> int:
         raw = (
@@ -750,6 +769,9 @@ class MakaAgent(BaseInstalledAgent):
         instruction: str,
         environment: BaseEnvironment,
         context: AgentContext,
+        *,
+        phase_started_monotonic: float,
+        model_deadline_at_ms: int | None,
     ) -> None:
         """Run the full task-run controller inside Pier's task container."""
         self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -764,7 +786,11 @@ class MakaAgent(BaseInstalledAgent):
             str(getattr(getattr(environment, "task_env_config", None), "workdir", "") or ".")
         )
         out_dir = agent_dir / "maka-task-run"
-        env = self._container_task_run_env(instruction_path, out_dir)
+        env = self._container_task_run_env(
+            instruction_path,
+            out_dir,
+            model_deadline_at_ms=model_deadline_at_ms,
+        )
         command = _headless_harbor_command(
             cli_path=_CONTAINER_HEADLESS_CLI,
             instruction_path=instruction_path,
@@ -794,7 +820,7 @@ class MakaAgent(BaseInstalledAgent):
                 environment,
                 command=f"bash -lc {shlex.quote(shell_script)}",
                 env=env,
-                timeout_sec=self._cell_timeout_sec(env),
+                timeout_sec=self._task_run_hard_timeout_sec(env, phase_started_monotonic),
             )
         finally:
             await self._download_task_run_artifacts(environment)
@@ -806,6 +832,8 @@ class MakaAgent(BaseInstalledAgent):
         self,
         instruction_path: Path,
         out_dir: Path,
+        *,
+        model_deadline_at_ms: int | None,
     ) -> dict[str, str]:
         env = {
             key: value
@@ -819,7 +847,11 @@ class MakaAgent(BaseInstalledAgent):
         env["MAKA_OUTPUT_DIR"] = str(out_dir)
         env["MAKA_STORAGE_ROOT"] = str(out_dir / "runs")
         env["MAKA_CELL_ARTIFACT_DIR"] = EnvironmentPaths.agent_dir.as_posix()
-        env["MAKA_CELL_SOFT_TIMEOUT_MS"] = str(self._cell_soft_timeout_ms(env))
+        if model_deadline_at_ms is None:
+            env["MAKA_CELL_SOFT_TIMEOUT_MS"] = str(self._cell_soft_timeout_ms(env))
+        else:
+            env.pop("MAKA_CELL_SOFT_TIMEOUT_MS", None)
+            env["MAKA_CELL_DEADLINE_AT_MS"] = str(model_deadline_at_ms)
 
         proxy_url = self._get_env("MAKA_PROVIDER_PROXY_URL")
         proxy_token = self._get_env("MAKA_PROVIDER_PROXY_TOKEN")
@@ -832,6 +864,19 @@ class MakaAgent(BaseInstalledAgent):
             env["MAKA_HOST_API_KEY"] = proxy_token
             env["NODE_USE_ENV_PROXY"] = "1"
         return env
+
+    def _task_run_hard_timeout_sec(
+        self,
+        env: dict[str, str],
+        phase_started_monotonic: float,
+    ) -> float:
+        phase_timeout_sec = _positive_int_literal(env.get("MAKA_AGENT_PHASE_TIMEOUT_SEC"))
+        if phase_timeout_sec is None:
+            return float(self._cell_timeout_sec(env))
+        remaining = phase_timeout_sec - max(0.0, time.monotonic() - phase_started_monotonic)
+        if remaining <= 0:
+            raise asyncio.TimeoutError("Maka agent phase exhausted before task-run start")
+        return remaining
 
     async def _download_task_run_artifacts(self, environment: BaseEnvironment) -> None:
         await self._download_cell_output(environment)

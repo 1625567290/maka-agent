@@ -70,6 +70,7 @@ const PROVIDER_REQUEST_TELEMETRY = 'provider-request-telemetry.json';
  * container reaching the host proxy through Squid must present one of those.
  * 443 keeps the model endpoint on the conventional TLS port. */
 export const PIER_PROVIDER_PROXY_DEFAULT_PORT = 443;
+export const PIER_MAKA_SETTLEMENT_GRACE_SEC = 30;
 
 /** Compatibility fallback for callers that do not provide a run-scoped proxy
  * hub. Such callers still bind one fixed port per attempt, so concurrent binds
@@ -260,6 +261,21 @@ export function createPierTaskRunner(options: PierTaskRunnerOptions): TaskRunner
 
   const runner: TaskRunner = async (input: TaskRunInput): Promise<TaskRunOutput> => {
     const agent = options.agent ?? 'maka';
+    const timeoutMultiplier = options.timeoutMultiplier ?? 1;
+    const taskAgentTimeoutSec = input.task.metadata?.agentTimeoutSec;
+    const attemptAgentEnv = mergeAgentEnv(options.agentEnv, input.agentEnv);
+    const traceMode = harborTraceMode(attemptAgentEnv);
+    const makaDeadline =
+      agent === 'maka' &&
+      traceMode === 'task-run' &&
+      timeoutMultiplier === 1 &&
+      taskAgentTimeoutSec !== undefined
+        ? {
+            modelBudgetSec: taskAgentTimeoutSec,
+            settlementGraceSec: PIER_MAKA_SETTLEMENT_GRACE_SEC,
+            phaseTimeoutSec: taskAgentTimeoutSec + PIER_MAKA_SETTLEMENT_GRACE_SEC,
+          }
+        : undefined;
     const jobsDir = join(
       options.jobsDir,
       sanitize(input.runId),
@@ -273,13 +289,11 @@ export function createPierTaskRunner(options: PierTaskRunnerOptions): TaskRunner
     await rm(jobsDir, { recursive: true, force: true });
     await mkdir(jobsDir, { recursive: true });
 
-    const attemptAgentEnv = mergeAgentEnv(options.agentEnv, input.agentEnv);
     assertNoProviderSecretsInAgentEnv(attemptAgentEnv);
     // Same benchmark invariant as the Harbor runner (shared implementation):
     // agentEnv must not override experiment identity or MAKA_TRIAL_* pricing.
     assertNoExperimentIdentityOverrides(attemptAgentEnv);
 
-    const traceMode = harborTraceMode(attemptAgentEnv);
     const providerTelemetryPath = join(jobsDir, PROVIDER_REQUEST_TELEMETRY);
     let providerUsage: ProviderTokenUsage | null = null;
     let providerTelemetry: ProviderRequestTelemetry[] = [];
@@ -297,7 +311,13 @@ export function createPierTaskRunner(options: PierTaskRunnerOptions): TaskRunner
         // closes the proxy: a failure in this window (env-file write, arg
         // assembly) must not leak the listening socket.
         try {
-          const aeEnv = buildPierAgentEnv(input, options, agent, providerRuntime?.agentEnv ?? {});
+          const aeEnv = buildPierAgentEnv(
+            input,
+            options,
+            agent,
+            providerRuntime?.agentEnv ?? {},
+            makaDeadline,
+          );
           const processEnv: Record<string, string> = {
             PYTHONPATH: pythonPath,
             // MAKA_BACKEND is a CliFlag whose env_fallback reads os.environ only, so
@@ -325,7 +345,13 @@ export function createPierTaskRunner(options: PierTaskRunnerOptions): TaskRunner
             jobsDir,
             jobName,
             environment: options.environment ?? 'docker',
-            timeoutMultiplier: options.timeoutMultiplier ?? 1,
+            timeoutMultiplier,
+            ...(makaDeadline
+              ? {
+                  agentTimeoutMultiplier:
+                    makaDeadline.phaseTimeoutSec / makaDeadline.modelBudgetSec,
+                }
+              : {}),
             mounts,
             agentEnv: aeEnv,
             ...(usesEnvFile ? { envFile: envFilePath } : {}),
@@ -355,8 +381,10 @@ export function createPierTaskRunner(options: PierTaskRunnerOptions): TaskRunner
             timeoutMs:
               options.pierTimeoutMs ??
               resolveNativeTrialTimeoutMs({
-                nativePhasesSec: pierMaxTrialPhasesSec(input.task.metadata),
-                timeoutMultiplier: options.timeoutMultiplier ?? 1,
+                nativePhasesSec:
+                  pierMaxTrialPhasesSec(input.task.metadata) +
+                  (makaDeadline?.settlementGraceSec ?? 0),
+                timeoutMultiplier,
               }),
             env: processEnv,
           });
@@ -540,6 +568,7 @@ export interface BuildPierRunArgsInput {
   jobName: string;
   environment: string;
   timeoutMultiplier: number;
+  agentTimeoutMultiplier?: number;
   mounts: ReadonlyArray<Record<string, unknown>>;
   agentEnv: Record<string, string>;
   envFile?: string;
@@ -581,6 +610,9 @@ export function buildPierRunArgs(input: BuildPierRunArgsInput): string[] {
     '--yes',
     '--quiet',
   ];
+  if (input.agentTimeoutMultiplier !== undefined) {
+    args.push('--agent-timeout-multiplier', String(input.agentTimeoutMultiplier));
+  }
   if (input.envFile) args.push('--env-file', input.envFile);
   for (const [key, value] of Object.entries(input.agentKwargs ?? {})) {
     args.push('--ak', `${key}=${value}`);
@@ -640,6 +672,11 @@ function buildPierAgentEnv(
   options: PierTaskRunnerOptions,
   agent: PierAgent,
   providerAgentEnv: Record<string, string>,
+  makaDeadline?: {
+    modelBudgetSec: number;
+    settlementGraceSec: number;
+    phaseTimeoutSec: number;
+  },
 ): Record<string, string> {
   const provider = options.provider ?? 'deepseek';
   const makaModel = modelIdForProvider(options.model, provider);
@@ -676,6 +713,11 @@ function buildPierAgentEnv(
   }
   Object.assign(env, providerAgentEnv);
   Object.assign(env, mergeAgentEnv(options.agentEnv, input.agentEnv) ?? {});
+  if (makaDeadline) {
+    env.MAKA_CELL_TIMEOUT_SEC = String(makaDeadline.modelBudgetSec);
+    env.MAKA_CELL_SETTLEMENT_GRACE_SEC = String(makaDeadline.settlementGraceSec);
+    env.MAKA_AGENT_PHASE_TIMEOUT_SEC = String(makaDeadline.phaseTimeoutSec);
+  }
   // Lenient by shared contract with the Python adapter: a malformed value must
   // fall back to the task metadata rather than fail the run.
   const cellTimeoutSec =
