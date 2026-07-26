@@ -81,6 +81,7 @@ describe('Harbor adapter contract', () => {
       /economy_task_mode = True if economy_task_flag is True else economy_task_env == "true"/,
     );
     assert.match(source, /"MAKA_ECONOMY_TASK_MODE": "true" if economy_task_mode else "false"/);
+    assert.match(source, /"MAKA_AGENT_TOOLS"/);
     assert.doesNotMatch(
       source,
       /"MAKA_ECONOMY_TASK_MODE": "true" if self\._resolved_flags\.get\("economy_task_mode"\) else "false"/,
@@ -2303,6 +2304,12 @@ with tempfile.TemporaryDirectory() as tmp:
     economy_env_with_default_flag = economy_env_with_default_flag_agent._cell_env(Path("/logs/agent/instruction.txt"))
     assert economy_env_with_default_flag["MAKA_ECONOMY_TASK_MODE"] == "true", economy_env_with_default_flag
 
+    agent_tools_env = MakaAgent(Path(tmp), extra_env={
+        "MAKA_BACKEND": "fake",
+        "MAKA_AGENT_TOOLS": "true",
+    })._cell_env(Path("/logs/agent/instruction.txt"))
+    assert agent_tools_env["MAKA_AGENT_TOOLS"] == "true", agent_tools_env
+
     # Host-side LLM mode must not forward provider secrets into the task-cell env.
     host_agent = MakaAgent(Path(tmp), extra_env={
         "MAKA_HOST_API_KEY_FILE": "/host/secrets/deepseek-key",
@@ -2866,6 +2873,7 @@ try:
         cell = json.loads((Path(tmp) / "maka-cell-output.json").read_text(encoding="utf-8"))
         assert cell["executionIdentity"]["model"] == "glm-5.2", cell
         assert cell["executionIdentity"]["reasoningEffort"] == "max", cell
+        assert cell["executionIdentity"]["agentTools"] is False, cell
         assert cell["tokenSummary"]["cachedInput"] == 40, cell
         assert cell["tokenSummary"]["input"] == 110, cell
         assert cell["tokenSummary"]["output"] == 25, cell
@@ -3074,6 +3082,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cell = json.loads((logs / "maka-cell-output.json").read_text(encoding="utf-8"))
     assert cell["executionIdentity"]["model"] == "k3", cell
     assert cell["executionIdentity"]["reasoningEffort"] == "max", cell
+    assert cell["executionIdentity"]["agentTools"] is False, cell
     assert cell["runtimeRefs"]["sessionId"] == "session-1", cell
     assert cell["toolSummary"]["actualToolCallCounts"] == {"Shell": 1}, cell
     assert "tokenSummary" not in cell, cell
@@ -3429,6 +3438,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert cell["status"] == "completed", cell
     assert cell["executionIdentity"]["model"] == "gpt-5.6-sol", cell
     assert cell["executionIdentity"]["reasoningEffort"] == "max", cell
+    assert cell["executionIdentity"]["agentTools"] is False, cell
     assert cell["runtimeRefs"]["sessionId"] == "thread-1", cell
     assert cell["tokenSummary"]["input"] == 100, cell
     assert cell["tokenSummary"]["cachedInput"] == 40, cell

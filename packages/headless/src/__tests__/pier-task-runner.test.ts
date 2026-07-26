@@ -101,6 +101,7 @@ function cellOutput(overrides: Partial<HarborCellOutput> = {}): HarborCellOutput
       systemPromptMode: 'default',
       systemPromptHash: 'sha256:abc',
       pricingProfile: 'fake-structural',
+      agentTools: false,
     },
     toolSummary: {
       providerVisibleToolCount: 0,
@@ -390,6 +391,33 @@ test('createPierTaskRunner maps a completed fake trial to reward and host cell p
   });
 });
 
+test('createPierTaskRunner projects the Agent tool policy from the run config', async () => {
+  await withDirs(async ({ jobsDir, repo }) => {
+    const captured: FakeOptions['captured'] = {};
+    const runner = createPierTaskRunner(
+      baseOptions({
+        jobsDir,
+        makaRepoPath: repo,
+        runPier: fakePier({ reward: 0, captured }),
+      }),
+    );
+
+    await runner(
+      runInput({
+        config: {
+          id: 'cfg',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'fake',
+          model: 'fake',
+          agentTools: true,
+        },
+      }),
+    );
+
+    assert.ok(captured.request?.args.includes('MAKA_AGENT_TOOLS=true'));
+  });
+});
+
 test('createPierTaskRunner passes the provider-local bare model id to pier -m', async () => {
   await withDirs(async ({ jobsDir, repo }) => {
     const captured: FakeOptions['captured'] = {};
@@ -600,6 +628,7 @@ test('pier-graded failed cells stay scored through the fixed-prompt controller',
           systemPromptMode: 'default',
           systemPromptHash: promptHash,
           pricingProfile: 'fake-structural',
+          agentTools: false,
         },
       });
       const runner = createPierTaskRunner(
@@ -655,6 +684,7 @@ test('pier and harbor outputs drive identical controller events for an infra-fai
             systemPromptMode: 'default',
             systemPromptHash: promptHash,
             pricingProfile: 'fake-structural',
+            agentTools: false,
           },
         });
         const pierRunner = createPierTaskRunner(
@@ -748,6 +778,7 @@ test('createPierTaskRunner recovers execution identity from a budget-exhausted t
       systemPromptMode: 'default',
       systemPromptHash: 'sha256:abc',
       pricingProfile: 'fake-structural',
+      agentTools: false,
     };
     const runner = createPierTaskRunner(
       baseOptions({
@@ -1000,6 +1031,7 @@ test('createPierTaskRunner rejects experiment identity and pricing overrides in 
   await withDirs(async ({ jobsDir, repo }) => {
     const overrides: Array<Record<string, string>> = [
       { MAKA_MODEL: 'other-model' },
+      { MAKA_AGENT_TOOLS: 'true' },
       { MAKA_TRIAL_INPUT_USD_PER_1M: '9' },
     ];
     for (const env of overrides) {
