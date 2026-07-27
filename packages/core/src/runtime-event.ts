@@ -14,7 +14,13 @@
  * projection, or ledger logic lives here. Those arrive in later nodes.
  */
 
-import { isMessageContent, normalizeMessageContent, type MessageContent } from './events.js';
+import {
+  isMessageContent,
+  normalizeMessageContent,
+  type MessageContent,
+  type PermissionClosureReason,
+} from './events.js';
+import { INTERACTION_ID_MAX_BYTES, INTERACTION_TOOL_NAME_MAX_BYTES } from './interaction.js';
 import type { PermissionRequestPayload, PermissionResponse } from './permission.js';
 import type { UserQuestionRequest } from './user-question.js';
 import type {
@@ -32,8 +38,8 @@ import {
   isStringArray,
 } from './record-schema.js';
 import {
+  isPermissionDecisionFields,
   isPermissionRequestPayload,
-  isPermissionResponse,
   isUserQuestionRequest,
 } from './interaction-record-schema.js';
 import { isTokenUsageFields } from './usage-record-schema.js';
@@ -215,12 +221,12 @@ export interface RuntimeEventTokenUsage {
 }
 
 /**
- * Permission decision attached to an event. This is the same shape as
- * `PermissionResponse` (aliased as `PermissionDecision` in
- * ./backend-types.ts); the runtime records the decision as an action so
- * allow/deny is a first-class runtime fact, not just a UI echo.
+ * Permission decision attached to an event. Runtime history may retain the
+ * originating tool identity for self-contained conversation copies.
  */
-export type RuntimeEventPermissionDecision = PermissionResponse;
+export interface RuntimeEventPermissionDecision extends PermissionResponse {
+  toolName?: string;
+}
 
 export const TOOL_BOUNDARY_PROTOCOL_V1 = 't1_after_preflight_v1' as const;
 export type ToolBoundaryProtocol = typeof TOOL_BOUNDARY_PROTOCOL_V1;
@@ -243,6 +249,20 @@ export interface RuntimeEventProtocolMarker {
   toolBoundary: ToolBoundaryProtocol;
 }
 
+interface RuntimeEventAnswerAcceptedIdentity {
+  requestId: string;
+}
+
+export interface RuntimeEventUserQuestionAnswerAccepted
+  extends RuntimeEventAnswerAcceptedIdentity {}
+
+export interface RuntimeEventPermissionAnswerAccepted extends RuntimeEventAnswerAcceptedIdentity {}
+
+export interface RuntimeEventPermissionClosureAccepted {
+  requestId: string;
+  reason: PermissionClosureReason;
+}
+
 /**
  * Control and side-effect intent carried alongside content. An event may
  * carry content, actions, both, or (rarely) neither — but a terminal
@@ -257,8 +277,14 @@ export interface RuntimeEventActions {
   permissionRequest?: PermissionRequestPayload;
   /** A resolved permission decision (allow/deny) for a prior request. */
   permissionDecision?: RuntimeEventPermissionDecision;
+  /** Audit fact only; the canonical permission outcome remains in InteractionStore. */
+  permissionAnswerAccepted?: RuntimeEventPermissionAnswerAccepted;
+  /** Audit fact that an unanswered hosted permission request was durably closed. */
+  permissionClosureAccepted?: RuntimeEventPermissionClosureAccepted;
   /** A bounded in-turn question raised by a tool call. */
   userQuestionRequest?: UserQuestionRequest;
+  /** Audit fact only; the canonical answer remains in InteractionStore. */
+  userQuestionAnswerAccepted?: RuntimeEventUserQuestionAnswerAccepted;
   /** Hand off the invocation to another agent (multi-agent transfer). */
   transferToAgent?: string;
   /** Marks the event that closes the invocation. */
@@ -389,7 +415,10 @@ const RUNTIME_ACTIONS_SHAPE = defineObjectShape<RuntimeEventActions>()(
     'artifactDelta',
     'permissionRequest',
     'permissionDecision',
+    'permissionAnswerAccepted',
+    'permissionClosureAccepted',
     'userQuestionRequest',
+    'userQuestionAnswerAccepted',
     'transferToAgent',
     'endInvocation',
     'tokenUsage',
@@ -397,6 +426,17 @@ const RUNTIME_ACTIONS_SHAPE = defineObjectShape<RuntimeEventActions>()(
     'runtimeProtocol',
   ],
 );
+const ANSWER_ACCEPTED_IDENTITY_SHAPE = defineObjectShape<RuntimeEventAnswerAcceptedIdentity>()(
+  ['requestId'],
+  [],
+);
+const PERMISSION_CLOSURE_ACCEPTED_SHAPE =
+  defineObjectShape<RuntimeEventPermissionClosureAccepted>()(['requestId', 'reason'], []);
+const RUNTIME_PERMISSION_DECISION_SHAPE = defineObjectShape<RuntimeEventPermissionDecision>()(
+  ['requestId', 'decision'],
+  ['rememberForTurn', 'reviewer', 'rationale', 'riskLevel', 'toolName'],
+);
+const UTF8 = new TextEncoder();
 const RUNTIME_TOOL_DISPATCH_SHAPE = defineObjectShape<RuntimeEventToolDispatch>()(
   [
     'protocol',
@@ -542,6 +582,12 @@ function isRuntimeEventContent(value: unknown): value is RuntimeEventContent {
 
 function isRuntimeEventActions(value: unknown): value is RuntimeEventActions {
   if (!isRecord(value) || !hasExactShape(value, RUNTIME_ACTIONS_SHAPE)) return false;
+  if (
+    value.permissionClosureAccepted !== undefined &&
+    Object.keys(value).some((key) => key !== 'permissionClosureAccepted')
+  ) {
+    return false;
+  }
   return (
     (value.stateDelta === undefined || isRecord(value.stateDelta)) &&
     (value.artifactDelta === undefined ||
@@ -551,13 +597,58 @@ function isRuntimeEventActions(value: unknown): value is RuntimeEventActions {
         ))) &&
     (value.permissionRequest === undefined ||
       isPermissionRequestPayload(value.permissionRequest)) &&
-    (value.permissionDecision === undefined || isPermissionResponse(value.permissionDecision)) &&
+    (value.permissionDecision === undefined ||
+      isRuntimeEventPermissionDecision(value.permissionDecision)) &&
+    (value.permissionAnswerAccepted === undefined ||
+      isRuntimeEventAnswerAcceptedIdentity(value.permissionAnswerAccepted)) &&
+    (value.permissionClosureAccepted === undefined ||
+      isRuntimeEventPermissionClosureAccepted(value.permissionClosureAccepted)) &&
     (value.userQuestionRequest === undefined || isUserQuestionRequest(value.userQuestionRequest)) &&
+    (value.userQuestionAnswerAccepted === undefined ||
+      isRuntimeEventAnswerAcceptedIdentity(value.userQuestionAnswerAccepted)) &&
     isOptionalString(value.transferToAgent) &&
     (value.endInvocation === undefined || typeof value.endInvocation === 'boolean') &&
     (value.tokenUsage === undefined || isRuntimeTokenUsage(value.tokenUsage)) &&
     (value.toolDispatch === undefined || isRuntimeToolDispatch(value.toolDispatch)) &&
     (value.runtimeProtocol === undefined || isRuntimeProtocolMarker(value.runtimeProtocol))
+  );
+}
+
+function isRuntimeEventPermissionDecision(value: unknown): value is RuntimeEventPermissionDecision {
+  return (
+    isRecord(value) &&
+    hasExactShape(value, RUNTIME_PERMISSION_DECISION_SHAPE) &&
+    typeof value.requestId === 'string' &&
+    isPermissionDecisionFields(value) &&
+    (value.toolName === undefined ||
+      (typeof value.toolName === 'string' &&
+        value.toolName.length > 0 &&
+        UTF8.encode(value.toolName).byteLength <= INTERACTION_TOOL_NAME_MAX_BYTES))
+  );
+}
+
+function isRuntimeEventAnswerAcceptedIdentity(
+  value: unknown,
+): value is RuntimeEventAnswerAcceptedIdentity {
+  return (
+    isRecord(value) &&
+    hasExactShape(value, ANSWER_ACCEPTED_IDENTITY_SHAPE) &&
+    typeof value.requestId === 'string' &&
+    value.requestId.length > 0 &&
+    UTF8.encode(value.requestId).byteLength <= INTERACTION_ID_MAX_BYTES
+  );
+}
+
+function isRuntimeEventPermissionClosureAccepted(
+  value: unknown,
+): value is RuntimeEventPermissionClosureAccepted {
+  return (
+    isRecord(value) &&
+    hasExactShape(value, PERMISSION_CLOSURE_ACCEPTED_SHAPE) &&
+    typeof value.requestId === 'string' &&
+    value.requestId.length > 0 &&
+    UTF8.encode(value.requestId).byteLength <= INTERACTION_ID_MAX_BYTES &&
+    value.reason === 'timed_out'
   );
 }
 

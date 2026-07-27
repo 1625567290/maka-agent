@@ -21,7 +21,13 @@ describe('AgentRunStore', () => {
         createdAt: 1,
         updatedAt: 1,
       });
-      const second = makeHeader({ runId: 'run-2', turnId: 'turn-2', createdAt: 2, updatedAt: 2 });
+      const second = makeHeader({
+        runId: 'run-2',
+        turnId: 'turn-2',
+        status: 'waiting_for_user',
+        createdAt: 2,
+        updatedAt: 2,
+      });
 
       await store.createRun(second);
       await store.createRun(first);
@@ -35,6 +41,7 @@ describe('AgentRunStore', () => {
       assert.equal(read.status, 'completed');
       assert.equal(read.completedAt, 10);
       assert.equal(read.invocationId, 'invocation-1');
+      assert.equal((await store.readRun('session-1', 'run-2')).status, 'waiting_for_user');
       assert.deepEqual(
         (await store.listSessionRuns('session-1')).map((run) => run.runId),
         ['run-1', 'run-2'],
@@ -77,6 +84,33 @@ describe('AgentRunStore', () => {
         /Invalid AgentRun header for run run-1: malformed fields/,
       );
       assert.deepEqual(await store.listSessionRuns('session-1'), []);
+    });
+  });
+
+  it('decodes and lists legacy waiting_permission headers as waiting_for_user', async () => {
+    await withStore(async (store, root) => {
+      const runPath = join(root, 'sessions', 'session-1', 'runs', 'run-1', 'run.json');
+      await mkdir(dirname(runPath), { recursive: true });
+      await writeFile(
+        runPath,
+        JSON.stringify({ ...makeHeader(), status: 'waiting_permission' }) + '\n',
+        'utf8',
+      );
+
+      assert.equal((await store.readRun('session-1', 'run-1')).status, 'waiting_for_user');
+      assert.deepEqual(
+        (await store.listSessionRuns('session-1')).map((run) => [run.runId, run.status]),
+        [['run-1', 'waiting_for_user']],
+      );
+      assert.deepEqual(
+        (await store.listSessionRunsForRecovery('session-1')).map((run) => [run.runId, run.status]),
+        [['run-1', 'waiting_for_user']],
+      );
+      assert.equal(
+        JSON.parse(await readFile(runPath, 'utf8')).status,
+        'waiting_permission',
+        'read recovery must not rewrite legacy bytes',
+      );
     });
   });
 

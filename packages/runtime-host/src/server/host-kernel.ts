@@ -59,12 +59,15 @@ export interface RuntimeHostCompositionContext {
   owner: InteractiveRootOwner;
   hostEpoch: string;
   acquireResidency(): RuntimeHostResidency;
+  /** Irreversible fail-stop latch; normal residency still uses acquireResidency(). */
+  retainUntilProcessExit(): void;
   requestDrain(): void;
 }
 
 export interface RuntimeHostComposition {
   readonly handlers: DomainOperationHandlerMap;
   readonly continuity?: SessionContinuityService;
+  beginDrain(): void;
   recover(): Promise<void>;
   close(): Promise<void>;
 }
@@ -99,7 +102,10 @@ export class RuntimeHostKernel {
   #activeOperations = 0;
   #activeCommandOperations = 0;
   #activeResidencies = 0;
+  #retainedUntilProcessExit = false;
   #composition: RuntimeHostComposition | undefined;
+  #compositionDrainBegun = false;
+  #compositionStartup: Promise<void> | undefined;
   #operationHandlers: OperationHandlerMap;
   #idleTimer: NodeJS.Timeout | undefined;
   #shutdownRequested = false;
@@ -145,8 +151,20 @@ export class RuntimeHostKernel {
       await host.#start();
       return host;
     } catch (error) {
-      if (host) await host.#abortStartup();
-      else await owner.close();
+      if (host) {
+        if (host.#endpoint) {
+          host.#requestDrain();
+          try {
+            await host.closed;
+          } catch (shutdownError) {
+            throw shutdownError;
+          }
+        } else {
+          await host.#abortStartup();
+        }
+      } else {
+        await owner.close();
+      }
       throw error;
     }
   }
@@ -174,6 +192,7 @@ export class RuntimeHostKernel {
       this.#shutdownRequested = true;
       this.#cancelIdle();
       this.#armShutdownDeadline();
+      this.#beginCompositionDrain();
     }
     this.#commitRequestedShutdownIfQuiescent();
   }
@@ -187,17 +206,35 @@ export class RuntimeHostKernel {
     await listen(this.#server, this.#endpoint.path);
     await this.#endpoint.prepareAfterListen();
     await this.#publishRegistration();
-    if (this.#options.compositionFactory) {
+    const compositionFactory = this.#options.compositionFactory;
+    if (compositionFactory) {
       this.#state = 'recovering';
       await this.#publishRegistration();
-      this.#composition = await this.#options.compositionFactory({
-        owner: this.#options.owner,
-        hostEpoch: this.hostEpoch,
-        acquireResidency: () => this.#acquireResidency(),
-        requestDrain: () => this.#requestDrain(),
+      let settleCompositionStartup!: () => void;
+      this.#compositionStartup = new Promise((resolve) => {
+        settleCompositionStartup = resolve;
       });
-      this.#operationHandlers = this.#createOperationHandlers(this.#composition.handlers);
-      await this.#composition.recover();
+      const compositionStartup = (async () => {
+        try {
+          this.#composition = await compositionFactory({
+            owner: this.#options.owner,
+            hostEpoch: this.hostEpoch,
+            acquireResidency: () => this.#acquireResidency(),
+            retainUntilProcessExit: () => this.#retainUntilProcessExit(),
+            requestDrain: () => this.#requestDrain(),
+          });
+          if (this.#shutdownRequested) this.#beginCompositionDrain();
+          this.#operationHandlers = this.#createOperationHandlers(this.#composition.handlers);
+          await this.#composition.recover();
+        } finally {
+          settleCompositionStartup();
+        }
+      })();
+      await Promise.race([compositionStartup, this.closed]);
+    }
+    if (this.#shutdownRequested) {
+      this.#commitRequestedShutdownIfQuiescent();
+      return;
     }
     this.#state = 'ready';
     await this.#publishRegistration();
@@ -387,6 +424,13 @@ export class RuntimeHostKernel {
     };
   }
 
+  #retainUntilProcessExit(): void {
+    if (this.#retainedUntilProcessExit) return;
+    this.#retainedUntilProcessExit = true;
+    this.#activeResidencies += 1;
+    this.#cancelIdle();
+  }
+
   #createOperationHandlers(domainHandlers: DomainOperationHandlerMap): OperationHandlerMap {
     return composeOperationHandlers(
       {
@@ -403,6 +447,12 @@ export class RuntimeHostKernel {
       },
       domainHandlers,
     );
+  }
+
+  #beginCompositionDrain(): void {
+    if (!this.#composition || this.#compositionDrainBegun) return;
+    this.#compositionDrainBegun = true;
+    this.#composition.beginDrain();
   }
 
   #waitForOperations(): Promise<void> {
@@ -459,6 +509,7 @@ export class RuntimeHostKernel {
       if (!this.#shutdownRequested) {
         this.#shutdownRequested = true;
         this.#armShutdownDeadline();
+        this.#beginCompositionDrain();
       }
       this.#state = 'draining';
       this.#cancelIdle();
@@ -516,6 +567,8 @@ export class RuntimeHostKernel {
     for (const transport of handshaking) transport.destroy();
     await operationDrain;
     this.#assertShutdownCanContinue();
+    await this.#compositionStartup;
+    this.#assertShutdownCanContinue();
     await this.#composition?.close().catch((error: unknown) => errors.push(error));
     this.#assertShutdownCanContinue();
     await this.#waitForResidencies();
@@ -543,7 +596,6 @@ export class RuntimeHostKernel {
     for (const transport of this.#handshakingTransports) transport.destroy();
     for (const transport of this.#acceptedTransports) transport.destroy();
     await closeServer(this.#server).catch(() => undefined);
-    await this.#composition?.close().catch(() => undefined);
     await this.#endpoint?.cleanup().catch(() => undefined);
     await removeHostRegistration(this.#options.owner.controlDirectory, this.hostEpoch).catch(
       () => undefined,

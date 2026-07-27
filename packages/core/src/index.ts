@@ -15,6 +15,7 @@ export * from './plan.js';
 export * from './agent-graph-control.js';
 export * from './agent-graph-schedule.js';
 export * from './runtime-policy.js';
+export * from './interaction.js';
 
 // events.ts
 export type {
@@ -41,6 +42,9 @@ export type {
   SandboxEscalationRequestEvent,
   AnyPermissionRequestEvent,
   PermissionRequestEvent,
+  PermissionAnswerAckEvent,
+  PermissionClosureAckEvent,
+  PermissionClosureReason,
   PermissionDecisionAckEvent,
   UserQuestionRequestEvent,
   PlanSubmittedEvent,
@@ -117,6 +121,9 @@ export type {
   RuntimeEventContentKind,
   RuntimeEventTokenUsage,
   RuntimeEventPermissionDecision,
+  RuntimeEventPermissionAnswerAccepted,
+  RuntimeEventPermissionClosureAccepted,
+  RuntimeEventUserQuestionAnswerAccepted,
   RuntimeEventProtocolMarker,
   RuntimeEventToolDispatch,
   RuntimeEventActions,
@@ -225,7 +232,10 @@ export {
   decodeStoredMessageForRecovery,
   userFacingText,
 } from './session.js';
-export { decodeCanonicalToolResultContent } from './tool-result-record-schema.js';
+export {
+  decodeCanonicalToolResultContent,
+  normalizeToolResultContentForRead,
+} from './tool-result-record-schema.js';
 
 // model-thinking.ts
 export type { ThinkingLevel } from './model-thinking.js';

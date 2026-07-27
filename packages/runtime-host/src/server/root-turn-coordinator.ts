@@ -36,11 +36,13 @@ import type {
   TurnStopInput,
 } from '../protocol/index.js';
 import type { RuntimeHostResidency } from './host-kernel.js';
+import type { HostInteractionCoordinator } from './interaction-coordinator.js';
 import {
   type HostMessageRootState,
   type HostMessageSessionHeader,
   type HostMessageStartInput,
   type HostMessageStopClaim,
+  type HostMessageStopFence,
   HostMessageCoordinator,
   type QueueFenceResult,
   type RootFollowupBatch,
@@ -53,12 +55,17 @@ import {
   SessionContinuityCoordinator,
 } from './session-continuity-coordinator.js';
 
+type RootTerminalInteractionFence = Pick<
+  HostInteractionCoordinator,
+  'assertTerminalFence' | 'claimRunClosure'
+>;
+
 interface ActiveRootTurn {
   turnId: string;
   runId: string;
   userMessageId: string | null;
   execution?: RuntimeHostedRootExecutionInput;
-  started: Promise<void>;
+  started: Deferred;
   done: Promise<void>;
   residency: RuntimeHostResidency;
   stopRequested: boolean;
@@ -78,9 +85,14 @@ type TurnStopDisposition =
   | { kind: 'request_stop'; active: ActiveRootTurn }
   | { kind: 'await_terminal'; active: ActiveRootTurn };
 
+interface DeclaredStopFence {
+  readonly active: ActiveRootTurn;
+  deliverStop(): Promise<void>;
+}
+
 interface Deferred {
   readonly promise: Promise<void>;
-  readonly settled: boolean;
+  readonly phase: 'pending' | 'resolved' | 'rejected';
   resolve(): void;
   reject(error: unknown): void;
 }
@@ -108,6 +120,7 @@ export class RootTurnCoordinator {
     stores: ExecutionStoresWriter<'interactive'>,
     private readonly sessionAdmission: SessionAdmissionGate,
     private readonly rootAdmissionOwner: RootAdmissionOwner,
+    private readonly interactions: RootTerminalInteractionFence,
     private readonly messages: HostMessageCoordinator,
     private readonly continuity: SessionContinuityCoordinator,
     private readonly acquireRecoveryResidency: () => RuntimeHostResidency,
@@ -426,7 +439,7 @@ export class RootTurnCoordinator {
         }
         return;
       }
-      await disposition.active.started;
+      await disposition.active.started.promise;
       await disposition.active.done;
     });
   }
@@ -439,16 +452,25 @@ export class RootTurnCoordinator {
     } = {},
   ): Promise<void> {
     return this.runCommand(async () => {
-      await this.awaitExactActiveStart(identity);
-      const disposition = await this.sessionAdmission.run(identity.sessionId, () =>
-        this.prepareStopDisposition(identity, () => this.messages.commitStopFence(identity)),
+      const declared = await this.sessionAdmission.run(identity.sessionId, (lease) =>
+        this.declareStopFence(
+          identity,
+          () => this.messages.commitStopFence(identity),
+          lease,
+          input,
+        ),
+      );
+      await declared?.deliverStop();
+      await declared?.active.started.promise;
+      const disposition = await this.sessionAdmission.run(identity.sessionId, (lease) =>
+        this.prepareStopDisposition(identity, () => this.messages.commitStopFence(identity), lease),
       );
       if (disposition.kind === 'complete') {
         if (!disposition.outcome.ok) throw new Error(disposition.outcome.error.message);
         return;
       }
       if (disposition.kind === 'request_stop') {
-        await this.deliverRuntimeStop(identity.sessionId, disposition.active, input);
+        await this.deliverRuntimeStopIntent(identity.sessionId, input);
       }
       await disposition.active.done;
     });
@@ -462,11 +484,31 @@ export class RootTurnCoordinator {
     } = {},
   ): Promise<void> {
     return this.runCommand(async () => {
-      const disposition = await this.sessionAdmission.run(sessionId, async () => {
+      const declared = await this.sessionAdmission.run(sessionId, (lease) => {
         const active = this.#activeBySession.get(sessionId);
         if (!active) return undefined;
         const identity = { sessionId, turnId: active.turnId, runId: active.runId };
-        return this.prepareStopDisposition(identity, () => this.messages.commitStopFence(identity));
+        return this.declareStopFence(
+          identity,
+          () => this.messages.commitStopFence(identity),
+          lease,
+          input,
+        );
+      });
+      await declared?.deliverStop();
+      await declared?.active.started.promise;
+      const disposition = await this.sessionAdmission.run(sessionId, async (lease) => {
+        if (!declared) return undefined;
+        const identity = {
+          sessionId,
+          turnId: declared.active.turnId,
+          runId: declared.active.runId,
+        };
+        return this.prepareStopDisposition(
+          identity,
+          () => this.messages.commitStopFence(identity),
+          lease,
+        );
       });
       if (!disposition || disposition.kind === 'complete') {
         if (disposition && !disposition.outcome.ok) {
@@ -475,7 +517,7 @@ export class RootTurnCoordinator {
         return;
       }
       if (disposition.kind === 'request_stop') {
-        await this.deliverRuntimeStop(sessionId, disposition.active, input);
+        await this.deliverRuntimeStopIntent(sessionId, input);
       }
       await disposition.active.done;
     });
@@ -535,10 +577,10 @@ export class RootTurnCoordinator {
   claimStop(
     input: Pick<TurnStopInput, 'sessionId' | 'turnId' | 'runId'>,
     commitQueueFence: () => QueueFenceResult,
+    admission: SessionAdmissionLease,
   ): Promise<HostMessageStopClaim> {
     return this.runCommand(async () => {
-      await this.awaitExactActiveStart(input);
-      const disposition = await this.prepareStopDisposition(input, commitQueueFence);
+      const disposition = await this.prepareStopDisposition(input, commitQueueFence, admission);
       if (disposition.kind === 'complete') {
         if (!disposition.outcome.ok) {
           throw new RuntimeMessageAuthorityInvariantError(
@@ -553,13 +595,24 @@ export class RootTurnCoordinator {
       return {
         deliverStop: () =>
           disposition.kind === 'request_stop'
-            ? this.deliverRuntimeStop(input.sessionId, disposition.active)
+            ? this.deliverRuntimeStopIntent(input.sessionId)
             : Promise.resolve(),
         terminal: disposition.active.done.then(() =>
           this.readCanonicalSnapshot(input.sessionId, input.turnId, input.runId),
         ),
       };
     });
+  }
+
+  claimStopFence(
+    input: Pick<TurnStopInput, 'sessionId' | 'turnId' | 'runId'>,
+    commitQueueFence: () => QueueFenceResult,
+    admission: SessionAdmissionLease,
+  ): Promise<HostMessageStopFence> {
+    return this.declareStopFence(input, commitQueueFence, admission).then((declared) => ({
+      ready: declared?.active.started.promise ?? Promise.resolve(),
+      deliverStop: declared?.deliverStop ?? (() => Promise.resolve()),
+    }));
   }
 
   private startTurn(input: TurnStartInput, context: ConnectionContext): Promise<TurnStartOutcome> {
@@ -668,13 +721,17 @@ export class RootTurnCoordinator {
 
   private stopTurn(input: TurnStopInput): Promise<OperationOutcome<'turn.stop'>> {
     return this.runCommand(async () => {
-      await this.awaitExactActiveStart(input);
-      const disposition = await this.sessionAdmission.run(input.sessionId, () =>
-        this.prepareStopDisposition(input, () => this.messages.commitStopFence(input)),
+      const declared = await this.sessionAdmission.run(input.sessionId, (lease) =>
+        this.declareStopFence(input, () => this.messages.commitStopFence(input), lease),
+      );
+      await declared?.deliverStop();
+      await declared?.active.started.promise;
+      const disposition = await this.sessionAdmission.run(input.sessionId, (lease) =>
+        this.prepareStopDisposition(input, () => this.messages.commitStopFence(input), lease),
       );
       if (disposition.kind === 'complete') return disposition.outcome;
       if (disposition.kind === 'request_stop') {
-        await this.deliverRuntimeStop(input.sessionId, disposition.active);
+        await this.deliverRuntimeStopIntent(input.sessionId);
       }
       await disposition.active.done;
       return {
@@ -684,9 +741,39 @@ export class RootTurnCoordinator {
     });
   }
 
+  private async declareStopFence(
+    input: Pick<TurnStopInput, 'sessionId' | 'turnId' | 'runId'>,
+    commitQueueFence: () => QueueFenceResult,
+    admission: SessionAdmissionLease,
+    stopInput: {
+      source?: 'stop_button' | 'benchmark_deadline';
+      mode?: BackendStopMode;
+    } = {},
+  ): Promise<DeclaredStopFence | undefined> {
+    const active = this.#activeBySession.get(input.sessionId);
+    if (!active || active.turnId !== input.turnId || active.runId !== input.runId) {
+      return undefined;
+    }
+    if (active.started.phase === 'rejected') {
+      return { active, deliverStop: () => Promise.resolve() };
+    }
+    commitQueueFence();
+    await this.interactions.claimRunClosure(input, 'turn_stopped', admission);
+    const shouldDeliverStop = !active.stopRequested;
+    active.stopRequested = true;
+    return {
+      active,
+      deliverStop: () =>
+        shouldDeliverStop
+          ? this.deliverRuntimeStopIntent(input.sessionId, stopInput)
+          : Promise.resolve(),
+    };
+  }
+
   private async prepareStopDisposition(
     input: Pick<TurnStopInput, 'sessionId' | 'turnId' | 'runId'>,
     commitQueueFence: () => QueueFenceResult,
+    admissionLease: SessionAdmissionLease,
   ): Promise<TurnStopDisposition> {
     const admission = await this.stores.agentRunStore.readRootTurnAdmission(
       input.sessionId,
@@ -722,6 +809,7 @@ export class RootTurnCoordinator {
     }
 
     commitQueueFence();
+    await this.interactions.claimRunClosure(input, 'turn_stopped', admissionLease);
     const shouldRequestStop = !active.stopRequested;
     active.stopRequested = true;
     return shouldRequestStop
@@ -799,7 +887,7 @@ export class RootTurnCoordinator {
       runId,
       userMessageId: admission.userMessageId,
       ...(execution ? { execution } : {}),
-      started: started.promise,
+      started,
       done: Promise.resolve(),
       residency,
       stopRequested: false,
@@ -822,7 +910,7 @@ export class RootTurnCoordinator {
     disposition: TurnStartDisposition,
   ): Promise<TurnStartOutcome> {
     if (disposition.kind === 'complete') return disposition.outcome;
-    await disposition.active.started;
+    await disposition.active.started.promise;
     let result = await this.readCanonicalSnapshot(
       input.sessionId,
       input.turnId,
@@ -885,7 +973,9 @@ export class RootTurnCoordinator {
         }
         if (isRuntimeSessionTransientEvent(event)) {
           await this.continuity.acceptRuntimeEvent(input.sessionId, active.runId, event);
-        } else if (event.type === 'permission_request') {
+        } else if (isInteractionAnswerAck(event)) {
+          await this.continuity.refreshCanonical(input.sessionId);
+        } else if (event.type === 'permission_request' || event.type === 'user_question_request') {
           this.continuity.enqueueCanonicalRefresh(input.sessionId);
         }
       }
@@ -909,7 +999,7 @@ export class RootTurnCoordinator {
       terminalTransitionStarted = true;
       await this.completeTerminalTransition(input.sessionId, active);
     } catch (error) {
-      if (started.settled && !terminalTransitionStarted) {
+      if (started.phase !== 'pending' && !terminalTransitionStarted) {
         try {
           const snapshot = await this.readCanonicalSnapshot(
             input.sessionId,
@@ -959,6 +1049,7 @@ export class RootTurnCoordinator {
         );
       }
       const identity = { sessionId, turnId: active.turnId, runId: active.runId };
+      await this.interactions.assertTerminalFence(identity, lease);
       const batch = this.messages.beginTerminalTransition(identity);
       await this.continuity.publishTerminalProjection(
         sessionId,
@@ -1028,25 +1119,14 @@ export class RootTurnCoordinator {
     }
   }
 
-  private async deliverRuntimeStop(
+  private async deliverRuntimeStopIntent(
     sessionId: string,
-    active: ActiveRootTurn,
     input: {
       source?: 'stop_button' | 'benchmark_deadline';
       mode?: BackendStopMode;
     } = { source: 'stop_button' },
   ): Promise<void> {
-    await active.started;
     await this.manager.deliverHostedRootStop(sessionId, input);
-  }
-
-  private async awaitExactActiveStart(
-    input: Pick<TurnStopInput, 'sessionId' | 'turnId' | 'runId'>,
-  ): Promise<void> {
-    const active = this.#activeBySession.get(input.sessionId);
-    if (active && active.turnId === input.turnId && active.runId === input.runId) {
-      await active.started;
-    }
   }
 
   private async stopActiveTurn(sessionId: string, active: ActiveRootTurn): Promise<void> {
@@ -1222,7 +1302,7 @@ function appendIndexed<K, V>(index: Map<K, V[]>, key: K, value: V): void {
 }
 
 function deferred(): Deferred {
-  let settled = false;
+  let phase: Deferred['phase'] = 'pending';
   let resolvePromise!: () => void;
   let rejectPromise!: (error: unknown) => void;
   const promise = new Promise<void>((resolve, reject) => {
@@ -1232,17 +1312,17 @@ function deferred(): Deferred {
   void promise.catch(() => undefined);
   return {
     promise,
-    get settled() {
-      return settled;
+    get phase() {
+      return phase;
     },
     resolve: () => {
-      if (settled) return;
-      settled = true;
+      if (phase !== 'pending') return;
+      phase = 'resolved';
       resolvePromise();
     },
     reject: (error) => {
-      if (settled) return;
-      settled = true;
+      if (phase !== 'pending') return;
+      phase = 'rejected';
       rejectPromise(error);
     },
   };
@@ -1285,6 +1365,15 @@ function isRuntimeSessionTransientEvent(
     event.type === 'tool_output_delta' ||
     event.type === 'tool_progress' ||
     event.type === 'tool_result'
+  );
+}
+
+function isInteractionAnswerAck(event: SessionEvent): boolean {
+  return (
+    event.type === 'permission_answer_ack' ||
+    event.type === 'permission_closure_ack' ||
+    event.type === 'permission_decision_ack' ||
+    event.type === 'user_question_answer_ack'
   );
 }
 

@@ -324,8 +324,11 @@ export type SessionEvent =
   | ToolProgressEvent
   | ToolResultEvent
   | AnyPermissionRequestEvent
+  | PermissionAnswerAckEvent
+  | PermissionClosureAckEvent
   | PermissionDecisionAckEvent
   | UserQuestionRequestEvent
+  | UserQuestionAnswerAckEvent
   | PlanSubmittedEvent
   | TokenUsageEvent
   | SteeringMessageEvent
@@ -585,7 +588,7 @@ export type ToolResultContent =
       agentName: string;
       turnId: string;
       runId?: string;
-      status: 'completed' | 'failed' | 'cancelled' | 'running' | 'waiting_permission';
+      status: 'completed' | 'failed' | 'cancelled' | 'running' | 'waiting_for_user';
       permissionMode: PermissionMode;
       summary: string;
       artifactIds: readonly string[];
@@ -707,9 +710,41 @@ export interface UserQuestionRequestEvent extends BaseEvent, UserQuestionRequest
 }
 
 /**
- * Echo of the user's permission decision back through the event stream so
- * all UI observers (and JSONL audit) see the same outcome. Mirrors the
- * PermissionDecisionMessage that storage appends.
+ * Echo that the backend accepted a user-question answer.
+ * The canonical answer remains owned by InteractionStore.
+ */
+export interface UserQuestionAnswerAckEvent extends BaseEvent {
+  type: 'user_question_answer_ack';
+  requestId: string;
+  toolUseId: string;
+}
+
+/**
+ * Echo that the hosted runtime accepted a permission answer.
+ * The canonical decision remains owned by the Interaction outcome.
+ */
+export interface PermissionAnswerAckEvent extends BaseEvent {
+  type: 'permission_answer_ack';
+  requestId: string;
+  toolUseId: string;
+}
+
+export type PermissionClosureReason = 'timed_out';
+
+/**
+ * Echo that the hosted runtime durably closed an unanswered permission request.
+ * This acknowledgement carries identity and closure reason only.
+ */
+export interface PermissionClosureAckEvent extends BaseEvent {
+  type: 'permission_closure_ack';
+  requestId: string;
+  toolUseId: string;
+  reason: PermissionClosureReason;
+}
+
+/**
+ * Embedded/legacy echo of a permission decision. Hosted execution uses the
+ * identity-only PermissionAnswerAckEvent instead.
  */
 export interface PermissionDecisionAckEvent extends BaseEvent {
   type: 'permission_decision_ack';

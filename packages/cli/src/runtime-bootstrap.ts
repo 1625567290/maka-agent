@@ -778,7 +778,7 @@ export async function createMakaCliRuntimeContext(
           runs.some(
             (run) =>
               run.parentRunId !== undefined &&
-              ['created', 'running', 'waiting_permission'].includes(run.status),
+              ['created', 'running', 'waiting_for_user'].includes(run.status),
           )
         );
       },

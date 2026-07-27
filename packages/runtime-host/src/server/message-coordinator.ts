@@ -30,6 +30,7 @@ import {
   type QueueRetractResult,
   type QueuedMessageSnapshot,
   type RetractedMessageSnapshot,
+  type SessionInteractionProjection,
   type SessionMessageQueueProjection,
   type SteeringMessageSnapshot,
   type TurnInterruptInput,
@@ -39,6 +40,7 @@ import {
   type TurnSnapshot,
 } from '../protocol/index.js';
 import type { RuntimeHostResidency } from './host-kernel.js';
+import { worstCaseMessageQueueProjection } from './message-queue-capacity.js';
 import type { MessageOperationHandlerMap } from './operation-dispatcher.js';
 import { type SessionAdmissionLease, SessionAdmissionGate } from './session-admission-gate.js';
 
@@ -78,10 +80,20 @@ export interface HostMessageStopClaim {
   readonly terminal: Promise<TurnSnapshot>;
 }
 
+export interface HostMessageStopFence {
+  readonly ready: Promise<void>;
+  deliverStop(): Promise<void>;
+}
+
 /** Root execution operations that must share the message coordinator's Session gate. */
 export interface HostMessageRootPort {
   readSessionHeader(sessionId: string): Promise<HostMessageSessionHeader | null>;
   readRootState(sessionId: string): Promise<HostMessageRootState> | HostMessageRootState;
+  claimStopFence(
+    input: Omit<TurnInterruptInput, 'originHostEpoch' | 'interruptId'>,
+    commitQueueFence: () => QueueFenceResult,
+    admission: SessionAdmissionLease,
+  ): Promise<HostMessageStopFence>;
   startFromMessage(
     input: HostMessageStartInput,
     admission: SessionAdmissionLease,
@@ -89,6 +101,7 @@ export interface HostMessageRootPort {
   claimStop(
     input: Omit<TurnInterruptInput, 'originHostEpoch' | 'interruptId'>,
     commitQueueFence: () => QueueFenceResult,
+    admission: SessionAdmissionLease,
   ): Promise<HostMessageStopClaim>;
 }
 
@@ -112,9 +125,18 @@ export interface HostMessageCoordinatorOptions {
   readonly sessionAdmission: SessionAdmissionGate;
   readonly acquireResidency: () => RuntimeHostResidency;
   readonly requestDrain?: () => void;
+  readonly preflightSessionSnapshot: CandidateSnapshotPreflight;
   readonly onProjectionChanged?: (sessionId: string) => void;
   readonly createId?: () => string;
 }
+
+export type CandidateSnapshotPreflight = (
+  sessionId: string,
+  candidate: {
+    readonly queue?: SessionMessageQueueProjection;
+    readonly interactions?: SessionInteractionProjection;
+  },
+) => Promise<boolean> | boolean;
 
 interface LiveEntry {
   readonly entryId: string;
@@ -215,6 +237,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
   readonly #requestDrain: () => void;
   readonly #onProjectionChanged: (sessionId: string) => void;
   readonly #createId: () => string;
+  readonly #preflightSessionSnapshot: CandidateSnapshotPreflight;
   readonly #sessions = new Map<string, SessionState>();
   readonly #pendingSubmits = new Map<string, PendingSubmit>();
   readonly #pendingRetracts = new Map<string, PendingRetract>();
@@ -234,6 +257,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
     this.#requestDrain = options.requestDrain ?? (() => undefined);
     this.#onProjectionChanged = options.onProjectionChanged ?? (() => undefined);
     this.#createId = options.createId ?? randomUUID;
+    this.#preflightSessionSnapshot = options.preflightSessionSnapshot;
   }
 
   projection(sessionId: string): SessionMessageQueueProjection {
@@ -548,6 +572,9 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
       if (!projectionFitsEveryEntryState(candidate)) {
         return failure('session_busy', 'Message queue projection capacity is full');
       }
+      if (!(await this.#preflightSessionSnapshot(input.sessionId, { queue: candidate }))) {
+        return failure('session_busy', 'Session projection capacity is full');
+      }
       if (!interruptResultFits(candidate, rootState)) {
         return failure('session_busy', 'Message queue interrupt result capacity is full');
       }
@@ -696,7 +723,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
         ? durableReceipt.result
         : failure('operation_conflict', 'Interrupt identity has a different payload');
     }
-    const admitted = await this.#sessionAdmission.run(input.sessionId, async () => {
+    const admitted = await this.#sessionAdmission.run(input.sessionId, async (admission) => {
       if (this.#failStopped) {
         return {
           kind: 'conflict' as const,
@@ -762,7 +789,7 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
           return { kind: 'receipt' as const, result: deferred.promise };
         }
         let fence: QueueFenceResult | undefined;
-        const claim = await this.#root.claimStop(
+        const stopFence = await this.#root.claimStopFence(
           { sessionId: input.sessionId, turnId: input.turnId, runId: input.runId },
           () => {
             if (this.#failStopped) {
@@ -773,13 +800,20 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
             fence ??= this.#commitQueueFence(rootState);
             return fence;
           },
+          admission,
         );
         if (!fence) {
           throw new RuntimeMessageAuthorityInvariantError(
-            'Root stop claim omitted queue fence commit',
+            'Root stop declaration omitted queue fence commit',
           );
         }
-        return { kind: 'owner' as const, claim, fence, deferred };
+        return {
+          kind: 'owner' as const,
+          ready: stopFence.ready,
+          deliverStop: stopFence.deliverStop,
+          fence,
+          deferred,
+        };
       } catch (error) {
         this.#deleteInterruptReceipt(input.sessionId, state, input.interruptId);
         deferred.reject(error);
@@ -789,14 +823,35 @@ export class HostMessageCoordinator implements RuntimeMessageAuthority {
 
     if (admitted.kind === 'conflict') return admitted.result;
     if (admitted.kind === 'receipt') return admitted.result;
+    let claim: HostMessageStopClaim;
     try {
       try {
-        await admitted.claim.deliverStop();
+        await admitted.deliverStop();
       } catch (error) {
         this.#failStop();
         throw error;
       }
-      const turn = await admitted.claim.terminal;
+      await admitted.ready;
+      claim = await this.#sessionAdmission.run(input.sessionId, (admission) => {
+        if (this.#failStopped) {
+          throw new RuntimeMessageAuthorityInvariantError(
+            'Message authority failed before the exact stop claim',
+          );
+        }
+        return this.#root.claimStop(
+          { sessionId: input.sessionId, turnId: input.turnId, runId: input.runId },
+          () => admitted.fence,
+          admission,
+        );
+      });
+    } catch (error) {
+      const state = this.#sessions.get(input.sessionId);
+      if (state) this.#deleteInterruptReceipt(input.sessionId, state, input.interruptId);
+      admitted.deferred.reject(error);
+      throw error;
+    }
+    try {
+      const turn = await claim.terminal;
       const result = success({ ...admitted.fence, turn });
       try {
         await this.#commitReceipt('interrupt', input.sessionId, input.interruptId, input, result);
@@ -1324,12 +1379,10 @@ function queuedEntryCount(state: SessionState): number {
 }
 
 function projectionFitsEveryEntryState(projection: SessionMessageQueueProjection): boolean {
-  const worstCase: SessionMessageQueueProjection = {
-    ...projection,
-    queueRevision: Number.MAX_SAFE_INTEGER,
-    steering: projection.steering.map((entry) => ({ ...entry, state: 'in_flight' as const })),
-  };
-  return fitsEncodedByteLimit(worstCase, MESSAGE_QUEUE_PROJECTION_MAX_BYTES);
+  return fitsEncodedByteLimit(
+    worstCaseMessageQueueProjection(projection),
+    MESSAGE_QUEUE_PROJECTION_MAX_BYTES,
+  );
 }
 
 function retractionResultFits(

@@ -8,8 +8,14 @@ import {
   openInteractiveExecutionStoresForWrite,
   type ExecutionStoresWriter,
 } from '@maka/storage/execution-stores';
+import type { StoredInteractionRequest } from '@maka/storage/interaction-store';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
-import { CanonicalSessionProjectionReader } from '../server/canonical-session-projection.js';
+import { type SessionMessageQueueProjection } from '../protocol/index.js';
+import {
+  type CanonicalSessionProjection,
+  CanonicalSessionProjectionReader,
+  createSessionContinuitySnapshot,
+} from '../server/canonical-session-projection.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from '../server/message-coordinator.js';
 import { RootAdmissionOwner } from '../server/root-admission-owner.js';
 import { SessionAdmissionGate } from '../server/session-admission-gate.js';
@@ -36,6 +42,7 @@ test('projects the canonical root lifecycle and the attachment queue from real S
       },
       rootTurn: null,
       queue: { hostEpoch: 'epoch-1', queueRevision: 0, steering: [], followup: [] },
+      interactions: { pending: [] },
     });
 
     const admitted = await rootAdmissions.admitRootTurn({
@@ -116,6 +123,178 @@ test('projects the canonical root lifecycle and the attachment queue from real S
   });
 });
 
+test('projects pending Interactions and preflights their combined snapshot capacity', async () => {
+  await withStores(async (root, stores) => {
+    const session = await stores.sessionStore.create(sessionInput(root));
+    const messages = createMessages(session.id, stores);
+    const reader = new CanonicalSessionProjectionReader({
+      stores,
+      rootAdmissions: new RootAdmissionOwner(stores.agentRunStore),
+      messages,
+    });
+    for (let index = 0; index < 5; index += 1) {
+      const established = await stores.interactionStore.establishRequest(
+        largePendingInteraction(session.id, index),
+      );
+      assert.equal(established.status, 'stable');
+    }
+
+    const canonical = await reader.read(session.id);
+    assert.ok(canonical);
+    assert.equal(canonical.interactions.pending.length, 5);
+    assert.deepEqual(
+      canonical.interactions.pending.map((interaction) => interaction.interactionId),
+      Array.from({ length: 5 }, (_, index) => `interaction-${index}`),
+    );
+
+    const emptyQueue = messages.projection(session.id);
+    const largeQueue = {
+      ...emptyQueue,
+      queueRevision: 1,
+      followup: [
+        {
+          entryId: 'large-entry',
+          messageId: 'large-message',
+          content: { text: 'q'.repeat(8 * 1024) },
+          placement: 'next_turn' as const,
+          state: 'queued' as const,
+        },
+      ],
+    };
+    assert.equal(
+      await reader.fitsCandidate(session.id, {
+        queue: largeQueue,
+        interactions: { pending: [] },
+      }),
+      true,
+    );
+    assert.equal(
+      await reader.fitsCandidate(session.id, {
+        queue: emptyQueue,
+        interactions: canonical.interactions,
+      }),
+      true,
+    );
+    assert.equal(
+      await reader.fitsCandidate(session.id, {
+        queue: largeQueue,
+        interactions: canonical.interactions,
+      }),
+      false,
+    );
+  });
+});
+
+test('preflights queued steering at the exact in-flight snapshot boundary', async () => {
+  await withStores(async (root, stores) => {
+    const session = await stores.sessionStore.create(sessionInput(root));
+    for (let index = 0; index < 5; index += 1) {
+      const established = await stores.interactionStore.establishRequest(
+        largePendingInteraction(session.id, index),
+      );
+      assert.equal(established.status, 'stable');
+    }
+
+    let currentQueue: SessionMessageQueueProjection = {
+      hostEpoch: 'epoch-1',
+      queueRevision: 1,
+      steering: [],
+      followup: [],
+    };
+    const reader = new CanonicalSessionProjectionReader({
+      stores,
+      rootAdmissions: new RootAdmissionOwner(stores.agentRunStore),
+      messages: { projection: () => currentQueue },
+    });
+    const canonical = await reader.read(session.id);
+    assert.ok(canonical);
+
+    const inFlightBoundary = largestFittingInFlightSteeringText(canonical);
+    const rejectedQueued = {
+      ...steeringQueue(inFlightBoundary + 1, 'queued'),
+      queueRevision: 1,
+    };
+    assert.deepEqual(
+      createSessionContinuitySnapshot(
+        { ...canonical, queue: rejectedQueued },
+        Number.MAX_SAFE_INTEGER,
+      ).queue,
+      rejectedQueued,
+    );
+    assert.throws(() =>
+      createSessionContinuitySnapshot(
+        { ...canonical, queue: steeringQueue(inFlightBoundary + 1, 'in_flight') },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    );
+
+    currentQueue = rejectedQueued;
+    assert.equal(
+      await reader.fitsCandidate(session.id, { interactions: canonical.interactions }),
+      false,
+    );
+    assert.equal(
+      await reader.fitsCandidate(session.id, {
+        queue: rejectedQueued,
+        interactions: canonical.interactions,
+      }),
+      false,
+    );
+
+    const allowedQueued = { ...steeringQueue(inFlightBoundary, 'queued'), queueRevision: 1 };
+    const allowedInFlight = steeringQueue(inFlightBoundary, 'in_flight');
+    assert.deepEqual(
+      createSessionContinuitySnapshot(
+        { ...canonical, queue: allowedInFlight },
+        Number.MAX_SAFE_INTEGER,
+      ).queue,
+      allowedInFlight,
+    );
+
+    currentQueue = allowedQueued;
+    assert.equal(
+      await reader.fitsCandidate(session.id, { interactions: canonical.interactions }),
+      true,
+    );
+    assert.equal(
+      await reader.fitsCandidate(session.id, {
+        queue: allowedQueued,
+        interactions: canonical.interactions,
+      }),
+      true,
+    );
+  });
+});
+
+test('propagates canonical Store read failures during candidate preflight', async () => {
+  await withStores(async (root, stores) => {
+    const session = await stores.sessionStore.create(sessionInput(root));
+    const readFailure = new Error('interaction list read failed');
+    const failingStores: ExecutionStoresWriter<'interactive'> = {
+      ...stores,
+      interactionStore: {
+        ...stores.interactionStore,
+        listSessionPending: async () => {
+          throw readFailure;
+        },
+      },
+    };
+    const reader = new CanonicalSessionProjectionReader({
+      stores: failingStores,
+      rootAdmissions: new RootAdmissionOwner(stores.agentRunStore),
+      messages: createMessages(session.id, stores),
+    });
+
+    await assert.rejects(
+      () => reader.fitsCandidate(session.id, {}),
+      (error) => {
+        assert.equal(error, readFailure);
+        return true;
+      },
+    );
+  });
+});
+
 test('fails closed when the owned tip durable identity changes', async () => {
   await withStores(async (root, stores) => {
     const session = await stores.sessionStore.create(sessionInput(root));
@@ -161,6 +340,10 @@ function createMessages(
   const root: HostMessageRootPort = {
     readSessionHeader: async () => ({ isArchived: false }),
     readRootState: () => ({ kind: 'active', sessionId, turnId: 'turn-1', runId: 'run-1' }),
+    claimStopFence: async () => ({
+      ready: Promise.resolve(),
+      deliverStop: () => Promise.resolve(),
+    }),
     startFromMessage: async () => {
       throw new Error('unexpected root start');
     },
@@ -180,6 +363,7 @@ function createMessages(
     receipts: stores.messageReceiptStore,
     sessionAdmission: new SessionAdmissionGate(),
     acquireResidency: () => ({ release: () => undefined }),
+    preflightSessionSnapshot: () => true,
     createId: () => 'entry-1',
   });
 }
@@ -256,4 +440,68 @@ async function withStores(
     await owner.close();
     await rm(base, { recursive: true, force: true });
   }
+}
+
+function largePendingInteraction(sessionId: string, index: number): StoredInteractionRequest {
+  return {
+    sessionId,
+    turnId: 'turn-1',
+    runId: 'run-1',
+    requestId: `interaction-${index}`,
+    createdAt: index,
+    request: {
+      kind: 'question',
+      toolUseId: `tool-${index}`,
+      questions: Array.from({ length: 3 }, (_, questionIndex) => ({
+        question: `${questionIndex}${'x'.repeat(1023)}`,
+        options: Array.from({ length: 3 }, (_, optionIndex) => ({
+          label: `${optionIndex}${'l'.repeat(255)}`,
+          description: 'z'.repeat(512),
+        })),
+      })),
+    },
+  };
+}
+
+function steeringQueue(
+  textBytes: number,
+  state: 'queued' | 'in_flight',
+): SessionMessageQueueProjection {
+  return {
+    hostEpoch: 'epoch-1',
+    queueRevision: Number.MAX_SAFE_INTEGER,
+    steering: [
+      {
+        entryId: 'boundary-entry',
+        messageId: 'boundary-message',
+        content: { text: 'q'.repeat(textBytes) },
+        placement: 'current_turn',
+        state,
+      },
+    ],
+    followup: [],
+  };
+}
+
+function largestFittingInFlightSteeringText(canonical: CanonicalSessionProjection): number {
+  let lower = 0;
+  let upper = 1;
+  const fits = (textBytes: number): boolean => {
+    try {
+      createSessionContinuitySnapshot(
+        { ...canonical, queue: steeringQueue(textBytes, 'in_flight') },
+        Number.MAX_SAFE_INTEGER,
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  while (fits(upper)) upper *= 2;
+  while (lower + 1 < upper) {
+    const midpoint = Math.floor((lower + upper) / 2);
+    if (fits(midpoint)) lower = midpoint;
+    else upper = midpoint;
+  }
+  return lower;
 }
