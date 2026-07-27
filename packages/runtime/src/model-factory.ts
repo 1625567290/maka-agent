@@ -96,7 +96,7 @@ export function getAIModel(input: ModelFactoryInput): LanguageModelV4 {
       const apiProtocol =
         adapter.apiProtocol ??
         connection.models?.find((model) => model.id === modelId)?.apiProtocol ??
-        openAiAdapterApiProtocol(modelId);
+        openAiAdapterApiProtocol(modelId, connection.providerType);
       return apiProtocol === 'openai-responses' ? openai.responses(modelId) : openai.chat(modelId);
     }
 
@@ -115,6 +115,11 @@ export function getAIModel(input: ModelFactoryInput): LanguageModelV4 {
         throw new Error(
           `${connection.providerType} connection ${connection.slug} requires a base URL`,
         );
+      }
+      const resolvedApiProtocol =
+        apiProtocol ?? openAiAdapterApiProtocol(modelId, connection.providerType);
+      if (adapter.supportsOpenAiResponses === true && resolvedApiProtocol === 'openai-responses') {
+        return createOpenAI({ apiKey, baseURL, fetch }).responses(modelId);
       }
       const name = adapter.name === 'connection' ? connection.slug : connection.providerType;
       const kimiTransport =
@@ -368,6 +373,19 @@ export function buildProviderOptions(
           ...(level ? { reasoningEffort: level === 'off' ? 'none' : level } : {}),
         },
       };
+    case 'xai':
+    case 'xai-oauth':
+      return modelId === 'grok-4.5'
+        ? {
+            openai: {
+              store: false,
+              forceReasoning: true,
+              reasoningSummary: null,
+              include: ['reasoning.encrypted_content'],
+              ...(level ? { reasoningEffort: level } : {}),
+            },
+          }
+        : {};
     case 'cohere':
       return {
         cohere:
@@ -439,7 +457,6 @@ export function buildProviderOptions(
     case 'groq':
     case 'deepseek':
     case 'moonshot':
-    case 'xai':
     case 'tencent-token-plan':
     case 'zai-coding-plan':
     case 'stepfun-step-plan':
