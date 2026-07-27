@@ -25,11 +25,14 @@ import { chainWrite } from './write-queue.js';
 import {
   DurableStoreWriteError,
   decodeMessageContent,
+  encodeCanonicalRuntimeEvent,
   isCanonicalAttachmentRef,
   isTerminalRuntimeEvent,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_COUNT,
   messageContentsEqual,
+  validateGenericToolLedgerAppend,
+  validateToolLedgerTransition,
   type AgentRunEvent,
   type AgentRunEventType,
   type AgentRunHeader,
@@ -821,6 +824,31 @@ function historyCompactProjectionIsSourceBound(event: AgentRunEvent): boolean {
   return (source as { kind?: unknown }).kind === 'runtime_event_projection';
 }
 
+function assertNoReservedToolLedgerFact(event: RuntimeEvent): void {
+  const validation = validateGenericToolLedgerAppend(event);
+  if (validation.ok) return;
+  if (validation.code === 'reserved_recovery_fact') {
+    throw new Error('Tool recovery facts require the atomic recovery bundle writer');
+  }
+  if (validation.code === 'reserved_tool_boundary_fact') {
+    throw new Error('Durable tool facts require the atomic tool boundary writer');
+  }
+  throw new Error(`RuntimeEvent ${event.id} violates its semantic lane`);
+}
+
+function canonicalizeRuntimeEventForStorage(event: RuntimeEvent): RuntimeEvent {
+  return encodeCanonicalRuntimeEvent(event).event;
+}
+
+function isToolLedgerBearingEvent(event: RuntimeEvent): boolean {
+  return (
+    event.content?.kind === 'function_call' ||
+    event.content?.kind === 'function_response' ||
+    event.actions?.toolDispatch !== undefined ||
+    event.actions?.toolRecovery !== undefined
+  );
+}
+
 function historyCompactProjectionCoverage(event: AgentRunEvent): number | undefined {
   const checkpoint = event.data?.checkpoint;
   if (!checkpoint || typeof checkpoint !== 'object') return undefined;
@@ -849,17 +877,19 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     event: RuntimeEvent,
     options: { durable?: boolean } = {},
   ): Promise<void> {
+    const canonicalEvent = canonicalizeRuntimeEventForStorage(event);
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
-    const steeringMessageId = immutableSteeringMessageId(event);
+    assertNoReservedToolLedgerFact(canonicalEvent);
+    const steeringMessageId = immutableSteeringMessageId(canonicalEvent);
     if (steeringMessageId) {
       await this.withImmutableSteeringQueue(sessionId, async () => {
-        if (await this.preflightImmutableSteeringMessage(event, steeringMessageId)) return;
-        await this.appendRuntimeEventForRun(sessionId, runId, event, options);
+        if (await this.preflightImmutableSteeringMessage(canonicalEvent, steeringMessageId)) return;
+        await this.appendRuntimeEventForRun(sessionId, runId, canonicalEvent, options);
       });
       return;
     }
-    await this.appendRuntimeEventForRun(sessionId, runId, event, options);
+    await this.appendRuntimeEventForRun(sessionId, runId, canonicalEvent, options);
   }
 
   private async appendRuntimeEventForRun(
@@ -869,7 +899,8 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     options: { durable?: boolean },
   ): Promise<void> {
     await this.withQueue(sessionId, runId, async () => {
-      await mkdir(this.runDir(sessionId, runId), { recursive: true });
+      const header = await this.readRunHeader(sessionId, runId);
+      decodeRuntimeEvent(event, header);
       const partial = partialRuntimeStream(event);
       if (partial) {
         const partialPath = this.runtimePartialPath(sessionId, runId, partial.key);
@@ -879,7 +910,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
           const immutableEvents = await readRuntimeEventJsonl(
             this.runtimeEventsPath(sessionId, runId),
-            await this.readRunHeader(sessionId, runId),
+            header,
           );
           if (
             immutableEvents.some((item) => completedPartialRuntimeStreamKey(item) === partial.key)
@@ -905,36 +936,98 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
         }
         return;
       }
+      const existingEvents = await readRuntimeEventJsonl(
+        this.runtimeEventsPath(sessionId, runId),
+        header,
+      );
+      const matching = existingEvents.filter((item) => item.id === event.id);
+      if (matching.length > 1) {
+        throw new Error(`RuntimeEvent ${event.id} appears more than once in run ${runId}`);
+      }
+      if (matching.length === 1) {
+        if (!isDeepStrictEqual(matching[0], event)) {
+          throw new Error(`RuntimeEvent identity conflict for ${event.id}`);
+        }
+        await this.settleImmutableRuntimeEventPostEffects({
+          sessionId,
+          runId,
+          event,
+          path: this.runtimeEventsPath(sessionId, runId),
+          ensureDurability:
+            options.durable === true || immutableSteeringMessageId(event) !== undefined,
+        });
+        return;
+      }
+      if (isToolLedgerBearingEvent(event)) {
+        const validation = validateToolLedgerTransition({
+          existingEvents,
+          candidateEvents: [event],
+          expectedTransition: 'generic_append',
+        });
+        if (!validation.ok) {
+          throw new Error(
+            `Tool ledger transition rejected: ${validation.code} at ${validation.eventId}`,
+          );
+        }
+      }
       const steeringMessageId = immutableSteeringMessageId(event);
       await appendJsonl(
         this.runtimeEventsPath(sessionId, runId),
-        JSON.stringify(event, sanitizeJson) + '\n',
+        encodeCanonicalRuntimeEvent(event).json + '\n',
         {
           ...options,
           ...(steeringMessageId ? { durable: true } : {}),
           durabilityRoot: this.durabilityRoot,
         },
       );
-      if (steeringMessageId) {
-        try {
-          await this.ensureImmutableSteeringMessageProof(event, steeringMessageId);
-        } catch (error) {
-          if (!(error instanceof DurableStoreWriteError)) throw error;
-          throw new RuntimeEventPostEffectError(
-            `RuntimeEvent ${event.id} is durable but its steering proof was not published`,
-            error,
-          );
-        }
-      }
-      const completedPartialKey = completedPartialRuntimeStreamKey(event);
-      if (completedPartialKey) {
-        await rm(this.runtimePartialPath(sessionId, runId, completedPartialKey), {
-          force: true,
-        }).catch(() => {
-          // The immutable final is already durable. Reads suppress any stale snapshot.
-        });
-      }
+      await this.settleImmutableRuntimeEventPostEffects({
+        sessionId,
+        runId,
+        event,
+        path: this.runtimeEventsPath(sessionId, runId),
+        ensureDurability: false,
+      });
     });
+  }
+
+  private async settleImmutableRuntimeEventPostEffects(input: {
+    sessionId: string;
+    runId: string;
+    event: RuntimeEvent;
+    path: string;
+    ensureDurability: boolean;
+  }): Promise<void> {
+    if (input.ensureDurability) {
+      try {
+        await syncFile(input.path);
+        await syncDirectoryChain(dirname(input.path), this.durabilityRoot);
+      } catch (error) {
+        throw new DurableStoreWriteError(
+          `RuntimeEvent did not reach stable storage: ${input.path}`,
+          error,
+        );
+      }
+    }
+    const steeringMessageId = immutableSteeringMessageId(input.event);
+    if (steeringMessageId) {
+      try {
+        await this.ensureImmutableSteeringMessageProof(input.event, steeringMessageId);
+      } catch (error) {
+        if (!(error instanceof DurableStoreWriteError)) throw error;
+        throw new RuntimeEventPostEffectError(
+          `RuntimeEvent ${input.event.id} is durable but its steering proof was not published`,
+          error,
+        );
+      }
+    }
+    const completedPartialKey = completedPartialRuntimeStreamKey(input.event);
+    if (completedPartialKey) {
+      await rm(this.runtimePartialPath(input.sessionId, input.runId, completedPartialKey), {
+        force: true,
+      }).catch(() => {
+        // The immutable final is already durable. Reads suppress any stale snapshot.
+      });
+    }
   }
 
   async ensureTerminalRuntimeEventDurable(
@@ -942,9 +1035,11 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     runId: string,
     event: RuntimeEvent,
   ): Promise<void> {
+    const canonicalEvent = canonicalizeRuntimeEventForStorage(event);
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
-    if (event.partial || !isTerminalRuntimeEvent(event)) {
+    assertNoReservedToolLedgerFact(canonicalEvent);
+    if (canonicalEvent.partial || !isTerminalRuntimeEvent(canonicalEvent)) {
       throw new Error(
         'Only a final terminal RuntimeEvent can cross the terminal durability barrier',
       );
@@ -952,15 +1047,17 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     await this.withQueue(sessionId, runId, async () => {
       const path = this.runtimeEventsPath(sessionId, runId);
       const header = await this.readRunHeader(sessionId, runId);
+      decodeRuntimeEvent(canonicalEvent, header);
       const existing = await readRuntimeEventJsonl(path, header);
-      const matching = existing.filter((candidate) => candidate.id === event.id);
+      const matching = existing.filter((candidate) => candidate.id === canonicalEvent.id);
       if (matching.length > 1) {
-        throw new Error(`RuntimeEvent ${event.id} appears more than once in run ${runId}`);
+        throw new Error(`RuntimeEvent ${canonicalEvent.id} appears more than once in run ${runId}`);
       }
       if (matching.length === 1) {
-        const canonical = JSON.parse(JSON.stringify(event, sanitizeJson)) as RuntimeEvent;
-        if (!isDeepStrictEqual(matching[0], canonical)) {
-          throw new Error(`RuntimeEvent ${event.id} does not match the durable ledger record`);
+        if (!isDeepStrictEqual(matching[0], canonicalEvent)) {
+          throw new Error(
+            `RuntimeEvent ${canonicalEvent.id} does not match the durable ledger record`,
+          );
         }
         try {
           await syncFile(path);
@@ -977,7 +1074,7 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
       if (existingTerminal) {
         throw new Error(`Run ${runId} already has terminal RuntimeEvent ${existingTerminal.id}`);
       }
-      await appendJsonl(path, JSON.stringify(event, sanitizeJson) + '\n', {
+      await appendJsonl(path, encodeCanonicalRuntimeEvent(canonicalEvent).json + '\n', {
         durable: true,
         durabilityRoot: this.durabilityRoot,
       });

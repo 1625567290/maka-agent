@@ -634,6 +634,210 @@ describe('AgentRunStore', () => {
     });
   });
 
+  it('keeps authoritative tool facts out of the JSONL generic writer', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+      const dispatch = makeRuntimeEvent({
+        id: 'dispatch-reserved',
+        role: 'system',
+        author: 'system',
+        content: undefined,
+        actions: {
+          toolDispatch: {
+            protocol: 't1_after_preflight_v1',
+            operationId: 'operation-1',
+            providerToolCallId: 'call-1',
+            toolName: 'Write',
+            canonicalArgsHash: 'sha256:reserved',
+            recoveryMode: 'reconcile',
+          },
+        },
+        refs: { operationId: 'operation-1', toolCallId: 'call-1' },
+      });
+      const outcome = makeRuntimeEvent({
+        id: 'outcome-reserved',
+        role: 'tool',
+        author: 'tool',
+        content: {
+          kind: 'function_response',
+          id: 'call-1',
+          name: 'Write',
+          result: 'ok',
+        },
+        refs: { operationId: 'operation-1', toolCallId: 'call-1' },
+      });
+      const recovery = makeRuntimeEvent({
+        id: 'recovery-reserved',
+        role: 'system',
+        author: 'system',
+        content: undefined,
+        actions: {
+          toolRecovery: {
+            kind: 'maka.tool.reconcile_result',
+            version: 1,
+            payload: {
+              protocol: 'tool_reconcile_v1',
+              operationId: 'operation-1',
+              observation: 'unreadable',
+              observationSchema: 'state_identity_v1',
+              observationDigest:
+                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            },
+          },
+        },
+        refs: { operationId: 'operation-1', toolCallId: 'call-1' },
+      });
+
+      for (const event of [dispatch, outcome, recovery]) {
+        await assert.rejects(
+          runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', event),
+          /atomic tool|atomic recovery/,
+        );
+      }
+      assert.deepEqual(
+        await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1'),
+        [],
+      );
+    });
+  });
+
+  it('keeps an exact ordinary RuntimeEvent retry idempotent in JSONL', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+      const event = makeRuntimeEvent({ id: 'ordinary-event-1' });
+
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', event);
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', event);
+
+      assert.deepEqual(
+        (await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1')).map(
+          (item) => item.id,
+        ),
+        ['ordinary-event-1'],
+      );
+    });
+  });
+
+  it('re-establishes stable storage on an exact durable RuntimeEvent retry', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+      const event = makeRuntimeEvent({ id: 'ordinary-event-1' });
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', event);
+
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', event, {
+        durable: true,
+      });
+
+      assert.deepEqual(
+        (await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1')).map(
+          (item) => item.id,
+        ),
+        ['ordinary-event-1'],
+      );
+    });
+  });
+
+  it('keeps an exact tool call retry idempotent in JSONL', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+      const call = makeRuntimeEvent({
+        id: 'call-event-1',
+        role: 'model',
+        author: 'agent',
+        content: {
+          kind: 'function_call',
+          id: 'provider-call-1',
+          name: 'Write',
+          args: { path: 'note.txt', content: 'hello' },
+        },
+        refs: { toolCallId: 'provider-call-1' },
+      });
+
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', call);
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', call);
+
+      assert.deepEqual(
+        (await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1')).map(
+          (item) => item.id,
+        ),
+        ['call-event-1'],
+      );
+    });
+  });
+
+  it('rejects a conflicting RuntimeEvent retry without changing JSONL', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+      const original = makeRuntimeEvent({ id: 'ordinary-event-1' });
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', original);
+
+      await assert.rejects(
+        runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', {
+          ...original,
+          ts: original.ts + 1,
+        }),
+        /RuntimeEvent identity conflict/,
+      );
+      assert.deepEqual(await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1'), [
+        original,
+      ]);
+    });
+  });
+
+  it('rejects a RuntimeEvent whose identity does not match the target run header', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader({ invocationId: 'turn-1' }));
+
+      for (const event of [
+        makeRuntimeEvent({ sessionId: 'other-session' }),
+        makeRuntimeEvent({ runId: 'other-run' }),
+        makeRuntimeEvent({ turnId: 'other-turn' }),
+        makeRuntimeEvent({ invocationId: 'other-invocation' }),
+      ]) {
+        await assert.rejects(
+          runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', event),
+          /RuntimeEvent identity does not match its run/,
+        );
+      }
+      assert.deepEqual(
+        await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1'),
+        [],
+      );
+    });
+  });
+
+  it('rejects a duplicate provider call identity in the JSONL ledger', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+      const call = makeRuntimeEvent({
+        id: 'call-event-1',
+        role: 'model',
+        author: 'agent',
+        content: {
+          kind: 'function_call',
+          id: 'provider-call-1',
+          name: 'Write',
+          args: { path: 'notes.txt', content: 'after' },
+        },
+      });
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', call);
+
+      await assert.rejects(
+        runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', {
+          ...call,
+          id: 'call-event-duplicate',
+        }),
+        /duplicate_call/,
+      );
+      assert.deepEqual(
+        (await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1')).map(
+          ({ id }) => id,
+        ),
+        ['call-event-1'],
+      );
+    });
+  });
+
   it('returns an empty runtime event list when the runtime ledger is missing', async () => {
     await withStores(async (runStore, runtimeEventStore) => {
       await runStore.createRun(makeHeader());
@@ -812,6 +1016,22 @@ describe('AgentRunStore', () => {
   it('coalesces tool stream heartbeats until the durable tool result arrives', async () => {
     await withStores(async (runStore, runtimeEventStore) => {
       await runStore.createRun(makeHeader());
+      await runtimeEventStore.appendRuntimeEvent(
+        'session-1',
+        'run-1',
+        makeRuntimeEvent({
+          id: 'runtime-tool-call',
+          role: 'model',
+          author: 'agent',
+          content: {
+            kind: 'function_call',
+            id: 'tool-call-1',
+            name: 'Bash',
+            args: { command: 'echo done' },
+          },
+          refs: { toolCallId: 'tool-call-1' },
+        }),
+      );
       for (let index = 0; index < 100; index += 1) {
         await runtimeEventStore.appendRuntimeEvent(
           'session-1',
@@ -827,7 +1047,7 @@ describe('AgentRunStore', () => {
         );
       }
 
-      assert.equal((await runtimeEventStore.readRuntimeEvents('session-1', 'run-1')).length, 1);
+      assert.equal((await runtimeEventStore.readRuntimeEvents('session-1', 'run-1')).length, 2);
 
       await runtimeEventStore.appendRuntimeEvent(
         'session-1',
@@ -850,7 +1070,7 @@ describe('AgentRunStore', () => {
       const events = await runtimeEventStore.readRuntimeEvents('session-1', 'run-1');
       assert.deepEqual(
         events.map((event) => event.id),
-        ['runtime-tool-result'],
+        ['runtime-tool-call', 'runtime-tool-result'],
       );
     });
   });
@@ -925,6 +1145,55 @@ describe('AgentRunStore', () => {
         ['runtime-final'],
       );
       assert.deepEqual(events[0]?.content, { kind: 'text', text: 'hello world' });
+    });
+  });
+
+  it('cleans a retained partial snapshot on an exact final-event retry', async () => {
+    await withStores(async (runStore, runtimeEventStore, root) => {
+      await runStore.createRun(makeHeader());
+      const partial = makeRuntimeEvent({
+        id: 'runtime-partial',
+        partial: true,
+        role: 'model',
+        author: 'agent',
+        content: { kind: 'text', text: 'hello' },
+        refs: { providerEventId: 'message-1' },
+      });
+      const final = makeRuntimeEvent({
+        id: 'runtime-final',
+        ts: 2,
+        role: 'model',
+        author: 'agent',
+        content: { kind: 'text', text: 'hello world' },
+        refs: { providerEventId: 'message-1' },
+      });
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', partial);
+      const partialsDirectory = join(
+        root,
+        'sessions',
+        'session-1',
+        'runs',
+        'run-1',
+        'runtime-partials',
+      );
+      const [partialFilename] = await readdir(partialsDirectory);
+      assert.ok(partialFilename);
+      const partialPath = join(partialsDirectory, partialFilename);
+      const retainedSnapshot = await readFile(partialPath);
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', final);
+
+      // Simulate a crash after the immutable append but before replaceable
+      // partial cleanup, then drive recovery through the public exact retry.
+      await writeFile(partialPath, retainedSnapshot);
+      await runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', final);
+
+      assert.deepEqual(await readdir(partialsDirectory), []);
+      assert.deepEqual(
+        (await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1')).map(
+          (event) => event.id,
+        ),
+        ['runtime-final'],
+      );
     });
   });
 
@@ -1138,6 +1407,41 @@ describe('AgentRunStore', () => {
     });
   });
 
+  it('rejects a terminal event whose identity does not match the target run', async () => {
+    for (const mismatch of [
+      { sessionId: 'other-session' },
+      { runId: 'other-run' },
+      { turnId: 'other-turn' },
+      { invocationId: 'other-invocation' },
+    ] satisfies Array<Partial<RuntimeEvent>>) {
+      await withStores(async (runStore, runtimeEventStore, root) => {
+        await runStore.createRun(makeHeader({ invocationId: 'turn-1' }));
+        const terminal = makeRuntimeEvent({
+          id: 'runtime-terminal',
+          role: 'system',
+          author: 'system',
+          status: 'completed',
+          content: undefined,
+          actions: { endInvocation: true },
+          ...mismatch,
+        });
+
+        await assert.rejects(
+          runtimeEventStore.ensureTerminalRuntimeEventDurable('session-1', 'run-1', terminal),
+          /RuntimeEvent identity does not match its run/,
+        );
+        const ledger = await readFile(
+          join(root, 'sessions', 'session-1', 'runs', 'run-1', 'runtime-events.jsonl'),
+          'utf8',
+        ).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+          throw error;
+        });
+        assert.equal(ledger, '');
+      });
+    }
+  });
+
   it('rejects complete schema-invalid and path-mismatched runtime events', async () => {
     await withStores(async (runStore, runtimeEventStore, root) => {
       await runStore.createRun(makeHeader({ invocationId: 'turn-1' }));
@@ -1255,8 +1559,11 @@ describe('AgentRunStore', () => {
         join(root, 'sessions', 'session-1', 'message-proofs', 'steering', 'message-steering.json'),
       );
       const reopened = createRuntimeEventStore(root);
-      await reopened.repairImmutableSteeringMessageProofsForRecovery('session-1');
       await reopened.appendRuntimeEvent('session-1', 'run-1', steering);
+      assert.deepEqual(
+        await reopened.readImmutableSteeringMessageProof('session-1', 'message-steering'),
+        { event: steering },
+      );
 
       const conflicting = makeRuntimeEvent({
         ...steering,
@@ -1283,7 +1590,9 @@ describe('AgentRunStore', () => {
     });
   });
 
-  it('reports a durable canonical steering event when proof publication fails', async () => {
+  it('reports a durable canonical steering event when proof publication fails', {
+    skip: process.platform === 'win32',
+  }, async () => {
     await withStores(async (runStore, runtimeEventStore, root) => {
       await runStore.createRun(makeHeader());
       const steering = makeRuntimeEvent({

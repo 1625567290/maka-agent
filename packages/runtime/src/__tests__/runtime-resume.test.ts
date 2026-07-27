@@ -113,7 +113,7 @@ describe('runtime resume phase 0 projection', () => {
     assert.deepEqual(plan.rejectionReasons, ['dangling_tool_state']);
     assert.deepEqual(
       plan.diagnostics.map((diagnostic) => diagnostic.code),
-      ['unmatched_tool_result'],
+      ['tool_ledger_corruption', 'unmatched_tool_result'],
     );
     assert.deepEqual(
       buildResumeReplayRuntimeEvents(plan.runtimeEvents).map((event) => event.id),
@@ -456,7 +456,7 @@ describe('runtime resume phase 1 safe-boundary continuation', () => {
       ],
       safeBoundaryFacts(),
     );
-    assert.deepEqual(mixed.rejectionReasons, ['runtime_identity_mismatch']);
+    assert.deepEqual(mixed.rejectionReasons, ['dangling_tool_state', 'runtime_identity_mismatch']);
 
     const reused = buildSafeBoundaryContinuationPlan([textEvent('user-1', 'user', 'continue')], {
       ...safeBoundaryFacts(),
