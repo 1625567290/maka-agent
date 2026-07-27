@@ -525,6 +525,7 @@ export {
   buildSeatbeltPolicy,
   createDefaultSandboxManager,
   createBuiltinSandboxManager,
+  isBuiltinFilesystemWorkerSandboxAvailable,
   createSandboxDiagnosticsProvider,
   createSeatbeltExecArgs,
   escapeSeatbeltRegex,

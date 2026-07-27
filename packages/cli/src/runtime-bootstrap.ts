@@ -18,6 +18,7 @@ import {
   buildRuntimeEventModelReplayPlan,
   buildChildAgentTools,
   createBuiltinSandboxManager,
+  isBuiltinFilesystemWorkerSandboxAvailable,
   createSandboxDiagnosticsProvider,
   createProviderRequestCaptureRecorder,
   createFilesystemWorkerLaunchSpecProvider,
@@ -247,9 +248,10 @@ export async function createMakaCliRuntimeContext(
   });
   const sandboxManager = createBuiltinSandboxManager();
   const filesystemWorkerLaunchSpecProvider =
-    process.platform === 'darwin'
+    sandboxManager && isBuiltinFilesystemWorkerSandboxAvailable()
       ? createFilesystemWorkerLaunchSpecProvider({
           runtime: 'node',
+          platform: process.platform,
           resourceLocation: { kind: 'runtime' },
         })
       : undefined;
