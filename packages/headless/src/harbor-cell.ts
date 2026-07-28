@@ -27,6 +27,7 @@ import {
   type SynthesisCacheArtifactStore,
   type SynthesisCacheLoader,
   type SynthesisCacheWriter,
+  type TurnStartOptions,
 } from '@maka/runtime';
 import {
   createAttachmentByteReader,
@@ -138,6 +139,10 @@ export interface RunHarborCellInput {
   settleAfterMs?: number;
   now?: () => number;
   newId?: () => string;
+  /** Resume one already-materialized session instead of creating a fresh session. */
+  resumeSessionId?: string;
+  /** Optional measurement hook passed through Runtime's run-start boundary. */
+  onRunStarted?: TurnStartOptions['onRunStarted'];
 }
 
 export interface HarborCellContinuationPolicy {
@@ -292,6 +297,9 @@ export async function runHarborCellWithStorage(
   const sessionStore = storage.executionStores.sessionStore;
   const agentRunStore = storage.executionStores.agentRunStore;
   const runtimeEventStore = storage.executionStores.runtimeEventStore;
+  const resumedSession = input.resumeSessionId
+    ? await sessionStore.readHeaderSnapshot(input.resumeSessionId)
+    : undefined;
   const backends = new BackendRegistry();
   const sessionCapabilities = createHeadlessSessionCapabilityBridge();
   const task: Task = {
@@ -303,6 +311,23 @@ export async function runHarborCellWithStorage(
   const economyTaskMode = resolveEconomyTaskMode(input.config, task);
   const prompt = resolveHeadlessSystemPrompt(input.config, { heavyTaskMode, economyTaskMode });
   const config = { ...input.config, systemPrompt: prompt.systemPrompt };
+  if (resumedSession) {
+    const executionFacts = [
+      ['cwd', input.cwd, resumedSession.cwd],
+      ['backend', input.config.backend, resumedSession.backend],
+      ['llmConnectionSlug', config.llmConnectionSlug, resumedSession.llmConnectionSlug],
+      ['model', config.model, resumedSession.model],
+      ['thinkingLevel', config.thinkingLevel, resumedSession.thinkingLevel],
+      ['permissionMode', 'execute', resumedSession.permissionMode],
+    ] as const;
+    for (const [name, expected, observed] of executionFacts) {
+      if (expected !== observed) {
+        throw new Error(
+          `Harbor resume session ${name} expected ${String(expected)}, observed ${String(observed)}`,
+        );
+      }
+    }
+  }
   const registerBackends =
     input.registerBackends ?? ((registry: BackendRegistry) => registerFakeBackend(registry));
   await registerBackends(backends, {
@@ -354,16 +379,17 @@ export async function runHarborCellWithStorage(
   });
   sessionCapabilities.bind(manager);
 
-  const session = await manager.createSession({
-    cwd: input.cwd,
-    backend: input.config.backend,
-    llmConnectionSlug: config.llmConnectionSlug,
-    model: config.model,
-    ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
-    permissionMode: 'execute',
-    name: `harbor-cell:${input.config.id}`,
-  });
-
+  const session =
+    resumedSession ??
+    (await manager.createSession({
+      cwd: input.cwd,
+      backend: input.config.backend,
+      llmConnectionSlug: config.llmConnectionSlug,
+      model: config.model,
+      ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
+      permissionMode: 'execute',
+      name: `harbor-cell:${input.config.id}`,
+    }));
   let deadlineReached = false;
   let settlementError: unknown;
   let settlementAttempt: Promise<void> | undefined;
@@ -405,7 +431,10 @@ export async function runHarborCellWithStorage(
       for await (const event of manager.sendMessage(
         session.id,
         { turnId, text: nextText },
-        { runId },
+        {
+          runId,
+          ...(input.onRunStarted ? { onRunStarted: input.onRunStarted } : {}),
+        },
       )) {
         if ((event as { type?: string }).type === 'permission_request') {
           const { requestId } = event as { requestId: string };

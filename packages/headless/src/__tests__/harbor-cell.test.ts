@@ -181,6 +181,35 @@ class CellChildAdmissionProbeBackend implements AgentBackend {
   async dispose(): Promise<void> {}
 }
 
+class RunStartOrderingProbeBackend implements AgentBackend {
+  readonly kind: BackendKind = 'fake';
+  readonly sessionId: string;
+
+  constructor(
+    sessionId: string,
+    private readonly events: string[],
+    private readonly delayMs: number,
+  ) {
+    this.sessionId = sessionId;
+  }
+
+  async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    this.events.push('backend-send');
+    await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+    yield {
+      type: 'complete',
+      id: 'run-start-ordering-complete',
+      turnId: input.turnId,
+      ts: Date.now(),
+      stopReason: 'end_turn',
+    };
+  }
+
+  async stop(): Promise<void> {}
+  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
 const registerCellBackend = (registry: BackendRegistry): void => {
   registry.register(
     'fake',
@@ -1003,6 +1032,54 @@ describe('runHarborCell', () => {
 
       assert.equal(observed.spawned, false);
       assert.match(observed.error ?? '', /missing tools/i);
+    });
+  });
+
+  test('fires onRunStarted after run.begin and before provider execution', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const events: string[] = [];
+      await runHarborCell({
+        config,
+        instruction: 'measure run start ordering',
+        cwd: workspaceDir,
+        outputDir,
+        storageRoot,
+        onRunStarted: () => {
+          events.push('run-started');
+        },
+        registerBackends: (registry) => {
+          registry.register(
+            'fake',
+            (ctx) => new RunStartOrderingProbeBackend(ctx.sessionId, events, 50),
+          );
+        },
+      });
+
+      assert.deepEqual(events.slice(0, 2), ['run-started', 'backend-send']);
+    });
+  });
+
+  test('rejects resume input that disagrees with the stored execution config', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const first = await runHarborCell({
+        config,
+        instruction: 'create resumable session',
+        cwd: workspaceDir,
+        outputDir,
+        storageRoot,
+      });
+
+      await assert.rejects(
+        runHarborCell({
+          config: { ...config, model: 'different-model' },
+          instruction: 'resume with conflicting config',
+          cwd: workspaceDir,
+          outputDir: join(outputDir, 'resume'),
+          storageRoot,
+          resumeSessionId: first.invocation.sessionId,
+        }),
+        /resume session model.*different-model.*fake-model/i,
+      );
     });
   });
 
