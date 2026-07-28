@@ -9,6 +9,7 @@ import {
   type StoredMessage,
 } from '@maka/core';
 import {
+  AgentGraphCoordinator,
   AgentRun,
   AiSdkFlow,
   BackendRegistry,
@@ -20,6 +21,7 @@ import {
   type InvocationResult,
   type SessionStore,
 } from '@maka/runtime';
+import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import type { Config, ResultRecord, Task } from './contracts.js';
 import { registerFakeBackend } from './backends.js';
 import {
@@ -263,6 +265,8 @@ export async function runTaskOnceWithStorage(
   }
 
   const workspace = await prepareWorkspace(task.workspaceDir);
+  let graphCoordinator: AgentGraphCoordinator | undefined;
+  let graphControlStore: ReturnType<typeof createAgentGraphControlStore> | undefined;
   try {
     const agentWorkspaceDir = deps.realBackendIsolation?.workspaceDir ?? workspace.dir;
     await appendTaskEvent(taskRunStore, taskRunId, {
@@ -342,8 +346,6 @@ export async function runTaskOnceWithStorage(
       now,
       runtimeSource: 'test',
     });
-    sessionCapabilities.bind(sessionCapabilityManager);
-
     const header = await sessionStore.create({
       cwd: agentWorkspaceDir,
       backend: config.backend,
@@ -356,6 +358,17 @@ export async function runTaskOnceWithStorage(
       ...(deps.orchestrationMode ? { orchestrationMode: deps.orchestrationMode } : {}),
       name: `task:${config.id}:${task.id}`,
     });
+    graphControlStore = createAgentGraphControlStore(deps.storageRoot);
+    graphCoordinator = new AgentGraphCoordinator({
+      sessionStore,
+      runStore: agentRunStore,
+      runtimeEventStore,
+      controlStore: graphControlStore,
+      runtime: sessionCapabilityManager,
+      newId,
+      rootSessionId: header.id,
+    });
+    sessionCapabilities.bind(sessionCapabilityManager, graphCoordinator);
     const turnId = newId();
     const active = createSingleRunActiveSession(
       backends,
@@ -825,7 +838,15 @@ export async function runTaskOnceWithStorage(
       settledByDeadline,
     };
   } finally {
-    await workspace.cleanup();
+    try {
+      await graphCoordinator?.close();
+    } finally {
+      try {
+        graphControlStore?.close();
+      } finally {
+        await workspace.cleanup();
+      }
+    }
   }
 }
 

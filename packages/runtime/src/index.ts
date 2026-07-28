@@ -66,6 +66,29 @@ export type {
   ReadCommittedAgentGraphProjectionInput,
 } from './stream-graph-projection.js';
 export {
+  AGENT_GRAPH_TIMELINE_DEFAULT_PAGE_SIZE,
+  AGENT_GRAPH_TIMELINE_MAX_PAGE_SIZE,
+  AGENT_GRAPH_TIMELINE_SCHEMA_VERSION,
+  buildAgentGraphTimeline,
+  buildAgentGraphTimelineCurrentState,
+  decodeAgentGraphTimelineCursor,
+  encodeAgentGraphTimelineCursor,
+  paginateAgentGraphTimeline,
+  readAgentGraphTimelinePage,
+} from './agent-graph-timeline.js';
+export type {
+  AgentGraphTimelineCoverageLimitation,
+  AgentGraphTimelineCurrentAdmission,
+  AgentGraphTimelineCurrentState,
+  AgentGraphTimelineCurrentSupervisorWake,
+  AgentGraphTimelineEvent,
+  AgentGraphTimelinePage,
+  AgentGraphTimelinePageOptions,
+  AgentGraphTimelineRunRef,
+  BuildAgentGraphTimelineInput,
+  ReadAgentGraphTimelinePageInput,
+} from './agent-graph-timeline.js';
+export {
   AGENT_GRAPH_TRACE_SCHEMA_VERSION,
   buildAgentGraphTraceSnapshot,
 } from './stream-graph-trace.js';
@@ -98,6 +121,18 @@ export type {
   ResolveAgentGraphPoliciesInput,
   RunAgentGraphToQuiescenceInput,
 } from './stream-graph-dispatch.js';
+export { reconcileAgentGraphSchedule } from './stream-graph-schedule-reconcile.js';
+export type {
+  AgentGraphScheduleDeferredWork,
+  AgentGraphScheduleReconciliationFailure,
+  AgentGraphScheduleReconciliationResult,
+  AgentGraphScheduleStopController,
+  AgentGraphScheduleStopResult,
+  ReconcileAgentGraphScheduleInput,
+  RenderAgentGraphScheduledWorkPromptInput,
+} from './stream-graph-schedule-reconcile.js';
+export { AgentGraphSupervisorWakeCoordinator } from './agent-graph-supervisor-wake.js';
+export type { AgentGraphSupervisorWakeInput } from './agent-graph-supervisor-wake.js';
 export {
   AGENT_GRAPH_SUPERVISOR_TOOL_NAMES,
   UPDATE_AGENT_GRAPH_TOOL_NAME,
@@ -122,6 +157,53 @@ export type {
   ViewAgentGraphToolInput,
   ViewAgentGraphToolResult,
 } from './stream-graph-supervisor-tools.js';
+export {
+  AGENT_GRAPH_CLIENT_TERMINAL_PAGE_SIZE,
+  AGENT_GRAPH_CLIENT_SNAPSHOT_SCHEMA_VERSION,
+  advanceMaterializedAgentGraphClientProjection,
+  buildAgentGraphClientSnapshot,
+  decodeAgentGraphTerminalCursor,
+  decodeMaterializedAgentGraphClientActivity,
+  decodeMaterializedAgentGraphClientSnapshot,
+  decodeMaterializedAgentGraphOperatorInspection,
+  encodeAgentGraphTerminalCursor,
+  inspectAgentGraphOperator,
+  materializeAgentGraphClientProjection,
+  materializedAgentGraphTerminalHistoryPage,
+} from './stream-graph-read-model.js';
+export type {
+  AgentGraphClientActivity,
+  AdvancedAgentGraphClientProjection,
+  AgentGraphClientClaimRef,
+  AgentGraphClientControlDecision,
+  AgentGraphClientEdge,
+  AgentGraphClientFinish,
+  AgentGraphClientMaterialization,
+  AgentGraphClientOperator,
+  AgentGraphClientOperatorStatus,
+  AgentGraphClientRunRef,
+  AgentGraphClientScheduledWork,
+  AgentGraphClientSnapshot,
+  AgentGraphClientSnapshotOptions,
+  AgentGraphClientStatus,
+  AgentGraphClientStoppedTarget,
+  AgentGraphClientTerminalHistoryPage,
+  AgentGraphOperatorInspection,
+  BuildAgentGraphClientReadModelInput,
+} from './stream-graph-read-model.js';
+export {
+  AgentGraphCoordinator,
+  agentGraphIdForRootSession,
+  topologyFromProvisions,
+} from './stream-graph-coordinator.js';
+export type {
+  AgentGraphClientChangedEvent,
+  AgentGraphClientChangedListener,
+  AgentGraphClientChangedReason,
+  AgentGraphCoordinatorInput,
+  AgentGraphCoordinatorRuntime,
+  AgentGraphCoordinatorSessionStore,
+} from './stream-graph-coordinator.js';
 export type {
   AgentGraphAllSettledReadinessPolicy,
   AgentGraphMapReadinessPolicy,
@@ -130,6 +212,7 @@ export type {
   AgentGraphReadinessSnapshot,
   AgentGraphReadinessWait,
   AgentGraphRunnableIntent,
+  AgentGraphRunnableIntentPolicyKind,
   AgentGraphSealedActivationInput,
   AgentGraphSupervisorReadinessObservation,
   BuildAgentGraphReadinessSnapshotInput,
@@ -138,6 +221,7 @@ export type {
 export { PermissionEngine, createDefaultPermissionEngineDeps } from './permission-engine.js';
 export type { EvaluateResult, EvaluateInput, PermissionEngineDeps } from './permission-engine.js';
 export { renderSwarmModePrompt } from './swarm-mode.js';
+export { renderGraphModePrompt } from './graph-mode.js';
 export {
   RuntimeHostedRootConflictError,
   RuntimeMessageAuthorityInvariantError,

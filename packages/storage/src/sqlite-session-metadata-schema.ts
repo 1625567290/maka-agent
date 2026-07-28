@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 7;
+export const SQLITE_SESSION_METADATA_SCHEMA_VERSION = 12;
 
 const MIGRATIONS: ReadonlyMap<number, string> = new Map([
   [
@@ -228,6 +228,199 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
 
     CREATE INDEX agent_graph_schedule_updates_by_graph
       ON agent_graph_schedule_updates(graph_id, committed_at, update_id);
+  `,
+  ],
+  [
+    8,
+    `
+    ALTER TABLE agent_graph_intent_claims
+      ADD COLUMN admission_status TEXT NOT NULL DEFAULT 'executing'
+      CHECK (admission_status IN ('claimed', 'executing', 'cancelled'));
+    ALTER TABLE agent_graph_intent_claims
+      ADD COLUMN admission_updated_at INTEGER NOT NULL DEFAULT 0
+      CHECK (admission_updated_at >= 0);
+    ALTER TABLE agent_graph_intent_claims
+      ADD COLUMN cancellation_reason TEXT;
+
+    UPDATE agent_graph_intent_claims
+    SET admission_updated_at = claimed_at;
+  `,
+  ],
+  [
+    9,
+    `
+    CREATE TABLE agent_graph_operator_provisions (
+      graph_id TEXT NOT NULL,
+      work_id TEXT NOT NULL,
+      provision_id TEXT NOT NULL UNIQUE,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      provision_fingerprint TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      operator_id TEXT NOT NULL,
+      target_session_id TEXT NOT NULL UNIQUE,
+      payload_json TEXT NOT NULL,
+      provisioned_at INTEGER NOT NULL CHECK (provisioned_at >= 0),
+      PRIMARY KEY(graph_id, work_id),
+      UNIQUE(graph_id, operator_id)
+    );
+
+    CREATE INDEX agent_graph_operator_provisions_by_graph
+      ON agent_graph_operator_provisions(graph_id, provisioned_at, operator_id);
+  `,
+  ],
+  [
+    10,
+    `
+    CREATE TABLE agent_graph_client_projections (
+      graph_id TEXT PRIMARY KEY,
+      root_session_id TEXT NOT NULL,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      snapshot_version TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      materialized_at INTEGER NOT NULL CHECK (materialized_at >= 0)
+    );
+
+    CREATE TABLE agent_graph_client_operator_projections (
+      graph_id TEXT NOT NULL,
+      operator_id TEXT NOT NULL,
+      snapshot_version TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      materialized_at INTEGER NOT NULL CHECK (materialized_at >= 0),
+      PRIMARY KEY(graph_id, operator_id)
+    );
+
+    CREATE TABLE agent_graph_client_terminal_activity (
+      graph_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      event_time INTEGER NOT NULL CHECK (event_time >= 0),
+      payload_json TEXT NOT NULL,
+      PRIMARY KEY(graph_id, record_id)
+    );
+
+    CREATE TABLE agent_graph_client_applied_records (
+      graph_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      event_time INTEGER NOT NULL CHECK (event_time >= 0),
+      PRIMARY KEY(graph_id, record_id)
+    );
+
+    CREATE INDEX agent_graph_client_terminal_activity_page
+      ON agent_graph_client_terminal_activity(
+        graph_id,
+        event_time DESC,
+        record_id DESC
+      );
+  `,
+  ],
+  [
+    11,
+    `
+    CREATE TABLE agent_graph_supervisor_wakes (
+      graph_id TEXT NOT NULL,
+      wake_id TEXT NOT NULL,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      snapshot_version TEXT NOT NULL,
+      root_session_id TEXT NOT NULL,
+      status TEXT NOT NULL
+        CHECK (status IN ('pending', 'running', 'delivered', 'retryable_failed')),
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      current_attempt_id TEXT,
+      current_turn_id TEXT,
+      failure_reason TEXT,
+      created_at INTEGER NOT NULL CHECK (created_at >= 0),
+      updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+      PRIMARY KEY(graph_id, wake_id)
+    );
+
+    CREATE TABLE agent_graph_supervisor_wake_attempts (
+      graph_id TEXT NOT NULL,
+      wake_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL UNIQUE,
+      turn_id TEXT NOT NULL,
+      status TEXT NOT NULL
+        CHECK (status IN ('running', 'delivered', 'retryable_failed')),
+      failure_reason TEXT,
+      started_at INTEGER NOT NULL CHECK (started_at >= 0),
+      completed_at INTEGER,
+      PRIMARY KEY(graph_id, wake_id, attempt_id),
+      FOREIGN KEY(graph_id, wake_id)
+        REFERENCES agent_graph_supervisor_wakes(graph_id, wake_id)
+        ON DELETE CASCADE
+    );
+
+    CREATE INDEX agent_graph_supervisor_wakes_by_status
+      ON agent_graph_supervisor_wakes(status, updated_at, graph_id, wake_id);
+  `,
+  ],
+  [
+    12,
+    `
+    DROP INDEX agent_graph_supervisor_wakes_by_status;
+
+    CREATE TABLE agent_graph_supervisor_wakes_v12 (
+      graph_id TEXT NOT NULL,
+      wake_id TEXT NOT NULL,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      snapshot_version TEXT NOT NULL,
+      root_session_id TEXT NOT NULL,
+      status TEXT NOT NULL
+        CHECK (
+          status IN (
+            'pending',
+            'running',
+            'waiting_permission',
+            'delivered',
+            'retryable_failed'
+          )
+        ),
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      current_attempt_id TEXT,
+      current_turn_id TEXT,
+      failure_reason TEXT,
+      created_at INTEGER NOT NULL CHECK (created_at >= 0),
+      updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+      PRIMARY KEY(graph_id, wake_id)
+    );
+
+    CREATE TABLE agent_graph_supervisor_wake_attempts_v12 (
+      graph_id TEXT NOT NULL,
+      wake_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL UNIQUE,
+      turn_id TEXT NOT NULL,
+      status TEXT NOT NULL
+        CHECK (
+          status IN (
+            'running',
+            'waiting_permission',
+            'delivered',
+            'retryable_failed'
+          )
+        ),
+      failure_reason TEXT,
+      started_at INTEGER NOT NULL CHECK (started_at >= 0),
+      completed_at INTEGER,
+      PRIMARY KEY(graph_id, wake_id, attempt_id),
+      FOREIGN KEY(graph_id, wake_id)
+        REFERENCES agent_graph_supervisor_wakes_v12(graph_id, wake_id)
+        ON DELETE CASCADE
+    );
+
+    INSERT INTO agent_graph_supervisor_wakes_v12
+    SELECT * FROM agent_graph_supervisor_wakes;
+
+    INSERT INTO agent_graph_supervisor_wake_attempts_v12
+    SELECT * FROM agent_graph_supervisor_wake_attempts;
+
+    DROP TABLE agent_graph_supervisor_wake_attempts;
+    DROP TABLE agent_graph_supervisor_wakes;
+
+    ALTER TABLE agent_graph_supervisor_wakes_v12
+      RENAME TO agent_graph_supervisor_wakes;
+    ALTER TABLE agent_graph_supervisor_wake_attempts_v12
+      RENAME TO agent_graph_supervisor_wake_attempts;
+
+    CREATE INDEX agent_graph_supervisor_wakes_by_status
+      ON agent_graph_supervisor_wakes(status, updated_at, graph_id, wake_id);
   `,
   ],
 ]);

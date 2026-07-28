@@ -88,7 +88,14 @@ import type {
   McpServerStatus,
   McpTestResult,
 } from '@maka/core/mcp';
-import type { BotStatus, WechatBridgeQrCodeResult } from '@maka/runtime';
+import type {
+  AgentGraphClientChangedEvent,
+  AgentGraphClientSnapshot,
+  AgentGraphClientSnapshotOptions,
+  AgentGraphOperatorInspection,
+  BotStatus,
+  WechatBridgeQrCodeResult,
+} from '@maka/runtime';
 import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry, SkillGovernanceDetails } from '@maka/ui';
 import type { ConfigCategory } from '@maka/storage';
 import type {
@@ -210,6 +217,21 @@ export interface MakaBridge {
   deepResearch: {
     get(sessionId: string): Promise<DeepResearchRun | undefined>;
     subscribeChanges(handler: (event: DeepResearchChangedEvent) => void): () => void;
+  };
+  graphs: {
+    getSnapshot(
+      rootSessionId: string,
+      options?: AgentGraphClientSnapshotOptions,
+    ): Promise<AgentGraphClientSnapshot>;
+    inspectOperator(
+      rootSessionId: string,
+      operatorId: string,
+    ): Promise<AgentGraphOperatorInspection>;
+    stop(rootSessionId: string): Promise<void>;
+    subscribe(
+      rootSessionId: string,
+      handler: (event: AgentGraphClientChangedEvent) => void,
+    ): () => void;
   };
   sessions: {
     list(filter?: SessionListFilter): Promise<SessionSummary[]>;

@@ -191,6 +191,8 @@ async function openExecutionStoresForWrite<K extends StorageRootKind, E extends 
     sessionStore: {
       create: (input) => run(() => sessionStore.create(input)),
       createSubagent: (input) => run(() => sessionStore.createSubagent(input)),
+      createAgentGraphOperator: (input, request, expectedRevision) =>
+        run(() => sessionStore.createAgentGraphOperator(input, request, expectedRevision)),
       list: (filter) => run(() => sessionStore.list(filter)),
       listHeaders: () => run(() => sessionStore.listHeaders()),
       listForRecovery: () => run(() => sessionStore.listForRecovery()),

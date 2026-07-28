@@ -14,6 +14,8 @@ import type {
   QueueEnqueueOutcome,
   AgentGraphIntentClaim,
   AgentGraphIntentClaimStore,
+  AgentGraphOperatorProvisionRequest,
+  AgentGraphOperatorProvisionResult,
   AgentRunEvent,
   AgentRunHeader,
   AgentRunStore,
@@ -131,6 +133,72 @@ describe('SessionManager child-session read model', () => {
     expect((await manager.listChildSessions(parent.id)).map((session) => session.id)).toEqual([
       child.id,
     ]);
+  });
+});
+
+describe('SessionManager graph operator provisioning', () => {
+  test('snapshots a catalog agent into a metadata-only child with reserved activation ids', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends: new BackendRegistry(),
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(30),
+    });
+    const parent = await manager.createSession(
+      makeInput({
+        cwd: '/tmp/graph-project',
+        llmConnectionSlug: 'graph-connection',
+        model: 'graph-model',
+        thinkingLevel: 'medium',
+        permissionMode: 'ask',
+      }),
+    );
+    await runStore.createRun(
+      makeRunHeader({
+        sessionId: parent.id,
+        runId: 'supervisor-run',
+        turnId: 'supervisor-turn',
+        cwd: '/tmp/graph-project',
+      }),
+    );
+
+    const result = await manager.provisionAgentGraphOperator({
+      graphId: 'graph-1',
+      workId: `graph_work_${'1'.repeat(32)}`,
+      agentId: LOCAL_READ_AGENT_ID,
+      operatorId: `graph_operator_${'2'.repeat(32)}`,
+      source: {
+        sessionId: parent.id,
+        runId: 'supervisor-run',
+        turnId: 'supervisor-turn',
+        toolCallId: 'schedule-tool',
+      },
+      edges: [
+        {
+          edgeId: `graph_edge_${'3'.repeat(32)}`,
+          fromOperatorId: 'writer',
+          toOperatorId: `graph_operator_${'2'.repeat(32)}`,
+        },
+      ],
+      expectedScheduleRevision: 1,
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.header.subagentParent?.graph).toEqual({
+      graphId: 'graph-1',
+      workId: `graph_work_${'1'.repeat(32)}`,
+      operatorId: `graph_operator_${'2'.repeat(32)}`,
+    });
+    expect(result.header.subagentRuntime?.agentId).toBe(LOCAL_READ_AGENT_ID);
+    expect(result.header.permissionMode).toBe('explore');
+    expect(result.provision.initialTurnId).toBe(result.header.subagentSpawn?.initialTurnId);
+    expect(result.provision.initialRunId).toBe(result.header.subagentSpawn?.initialRunId);
+    expect(await runStore.listSessionRuns(result.header.id)).toEqual([]);
   });
 });
 
@@ -380,6 +448,119 @@ describe('SessionManager claimed graph intent execution', () => {
     expect(third.status).toBe('completed');
     expect(backend?.sendInputs.length).toBe(2);
     expect((await runStore.listSessionRuns(child.id)).length).toBe(2);
+  });
+
+  test('evaluates execution admission only after a claimed child-session slot is available', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const firstGate = makeGate();
+    const firstReady = makeGate();
+    let backend: TestBackend | undefined;
+    backends.register('fake', (ctx) => {
+      backend = new TestBackend(ctx, firstGate);
+      return backend;
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(75),
+    });
+    const parent = await manager.createSession(makeInput());
+    const child = await createGraphOperatorSession(store, parent.id);
+    const firstClaim = graphIntentClaim({ targetSessionId: child.id });
+    const queuedClaim = graphIntentClaim({
+      claimId: `graph_claim_${'7'.repeat(32)}`,
+      intentId: `graph_intent_${'8'.repeat(32)}`,
+      targetSessionId: child.id,
+      targetTurnId: 'queued-turn',
+      targetRunId: 'queued-run',
+    });
+    const first = manager.runClaimedAgentGraphIntent({
+      ...graphExecutionInput(firstClaim, 'first activation'),
+      onReady: () => firstReady.release(),
+    });
+    await firstReady.promise;
+
+    let admissionChecks = 0;
+    const queued = manager.runClaimedAgentGraphIntent({
+      ...graphExecutionInput(queuedClaim, 'cancelled queued activation'),
+      async admitExecution() {
+        admissionChecks += 1;
+        return 'cancelled';
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(admissionChecks).toBe(0);
+
+    firstGate.release();
+    expect((await first).status).toBe('completed');
+    await expectRejects(queued, /cancelled before runtime admission/);
+    expect(admissionChecks).toBe(1);
+    expect(backend?.sendInputs.length).toBe(1);
+    expect((await runStore.listSessionRuns(child.id)).length).toBe(1);
+  });
+
+  test('keeps a stop pending across graph admission with an idle cached backend', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const admissionStarted = makeGate();
+    const releaseAdmission = makeGate();
+    let backend: TestBackend | undefined;
+    backends.register('fake', (ctx) => {
+      backend = new TestBackend(ctx);
+      return backend;
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(77),
+    });
+    const parent = await manager.createSession(makeInput());
+    const child = await createGraphOperatorSession(store, parent.id);
+    await drain(
+      manager.sendMessage(child.id, {
+        turnId: 'completed-before-admission',
+        text: 'warm the cached operator backend',
+      }),
+    );
+    expect(backend?.sendInputs).toHaveLength(1);
+    const claim = graphIntentClaim({ targetSessionId: child.id });
+    const execution = manager.runClaimedAgentGraphIntent({
+      ...graphExecutionInput(claim, 'activation stopped during admission'),
+      async admitExecution() {
+        admissionStarted.release();
+        await releaseAdmission.promise;
+        return 'executing';
+      },
+    });
+    await admissionStarted.promise;
+
+    let stopSettled = false;
+    const stop = manager.stopSession(child.id, { source: 'graph_supervisor' }).finally(() => {
+      stopSettled = true;
+    });
+    await Promise.resolve();
+    expect(stopSettled).toBe(false);
+    expect(backend?.sendInputs).toHaveLength(1);
+
+    releaseAdmission.release();
+    await stop;
+    const result = await execution;
+
+    expect(result.status).toBe('cancelled');
+    expect(backend?.stopCalls).toBe(1);
+    expect(backend?.sendInputs).toHaveLength(1);
+    expect((await runStore.readRun(child.id, claim.targetRunId)).status).toBe('cancelled');
   });
 
   test('recovers an existing nonterminal claimed run without invoking the backend again', async () => {
@@ -17817,6 +17998,24 @@ class MemorySessionStore implements SessionStore {
       return { header: existing, created: false };
     }
     return { header: await this.create(input), created: true };
+  }
+
+  async createAgentGraphOperator(
+    input: CreateSessionInput,
+    request: AgentGraphOperatorProvisionRequest,
+    _expectedRevision: number,
+  ): Promise<{ header: SessionHeader } & AgentGraphOperatorProvisionResult> {
+    const header = await this.create(input);
+    return {
+      header,
+      created: true,
+      provision: {
+        ...request,
+        edges: request.edges.map((edge) => ({ ...edge })),
+        targetSessionId: header.id,
+        provisionedAt: 1,
+      },
+    };
   }
 
   async create(input: CreateSessionInput): Promise<SessionHeader> {

@@ -101,6 +101,10 @@ export interface AgentRunHeader {
   continuationSource?: AgentRunContinuationSource;
   /** Non-user trigger for this run (e.g. a scheduled automation fire). */
   automationId?: string;
+  /** Durable graph milestone that caused this host-authored supervisor turn. */
+  agentGraphWakeId?: string;
+  /** Durable delivery attempt for this host-authored supervisor turn. */
+  agentGraphWakeAttemptId?: string;
   failureClass?: string;
   failureMessage?: string;
   abortSource?: string;
@@ -210,6 +214,8 @@ const AGENT_RUN_HEADER_SHAPE = defineObjectShape<AgentRunHeader>()(
     'workspaceIdentity',
     'continuationSource',
     'automationId',
+    'agentGraphWakeId',
+    'agentGraphWakeAttemptId',
     'failureClass',
     'failureMessage',
     'abortSource',
@@ -265,6 +271,8 @@ export function decodeAgentRunHeader(value: unknown): AgentRunHeader {
       value.parentSessionId,
       value.workspaceIdentity,
       value.automationId,
+      value.agentGraphWakeId,
+      value.agentGraphWakeAttemptId,
       value.failureClass,
       value.failureMessage,
       value.abortSource,

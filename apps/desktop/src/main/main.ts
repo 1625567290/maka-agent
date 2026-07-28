@@ -30,6 +30,8 @@ import { AntigravitySubscriptionService } from './oauth/antigravity-subscription
 import type { WorkspacePrivacyContext } from '@maka/core/incognito';
 import { ok } from '@maka/core/result';
 import {
+  AgentGraphCoordinator,
+  AgentGraphSupervisorWakeCoordinator,
   BackendRegistry,
   FakeBackend,
   PermissionEngine,
@@ -72,6 +74,7 @@ import {
   createShellRunStore,
   createTelemetryRepo,
 } from '@maka/storage';
+import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
 import { McpClientManager } from '@maka/mcp';
 import { registerMcpIpcMain } from './mcp-ipc-main.js';
@@ -137,6 +140,7 @@ import {
 } from './desktop-backend-tool-surface.js';
 import { registerGatewayIpc } from './gateway-ipc-main.js';
 import { registerSessionsIpc } from './sessions-ipc-main.js';
+import { registerAgentGraphIpc } from './agent-graph-ipc-main.js';
 import {
   assertSessionCanSendFromHeader,
   isSessionLifecycleError,
@@ -260,6 +264,7 @@ async function confirmDesktopStorageRootRepair(): Promise<boolean> {
 // process, so quit needs no special teardown.
 const keepSystemAwake = createKeepSystemAwakeController(powerSaveBlocker);
 const store = createSessionStore(workspaceRoot);
+const agentGraphControlStore = createAgentGraphControlStore(workspaceRoot);
 const projectCatalog = createProjectCatalog(workspaceRoot);
 const planStore = createPlanStore(workspaceRoot);
 const runStore = createAgentRunStore(workspaceRoot);
@@ -449,6 +454,7 @@ const automationWiring = createMainAutomationWiring({
     // do not accumulate an unbounded pile of active sessions. The session (with
     // its run/trace) is preserved under the archive, labelled automation/cron.
     try {
+      await agentGraphCoordinator.stop(session.id);
       await goalWiring.archiveSession(session.id, () => runtime.archive(session.id));
       desktopSessionSkillHosts.delete(session.id);
       emitSessionsChanged('archived', session.id);
@@ -678,6 +684,8 @@ const {
   getWorkspacePrivacyContext,
   resolveDesktopSkillHost,
 });
+let agentGraphCoordinator: AgentGraphCoordinator;
+let agentGraphSupervisorWakeCoordinator: AgentGraphSupervisorWakeCoordinator;
 const desktopBackendToolSurfaceDeps = {
   isComputerUseRealModelE2e,
   ensureMcpReady,
@@ -690,6 +698,8 @@ const desktopBackendToolSurfaceDeps = {
   builtinTools,
   toolAvailability,
   planStore,
+  getAgentGraphSupervisorTools: (sessionId: string) =>
+    agentGraphCoordinator.toolsForSession(sessionId),
 };
 // Cursor-overlay teardown assigns a module-scoped `let`, so it stays in main.ts.
 onMainWindowClose = () => computerUseOverlay.destroyAll();
@@ -892,6 +902,62 @@ const runtime = new SessionManager({
   newId: randomUUID,
   now: Date.now,
 });
+agentGraphSupervisorWakeCoordinator = new AgentGraphSupervisorWakeCoordinator({
+  activityRegistry: sessionActivities,
+  wakeStore: agentGraphControlStore,
+  readSnapshot: (rootSessionId) => agentGraphCoordinator.getSnapshot(rootSessionId),
+  startTurn: async (sessionId, input, activity, abortSignal) => {
+    let stopPromise: Promise<void> | undefined;
+    const stop = () => {
+      stopPromise ??= runtime.stopSession(sessionId, { source: 'graph_supervisor' });
+    };
+    abortSignal.addEventListener('abort', stop, { once: true });
+    if (abortSignal.aborted) stop();
+    try {
+      await ensureSessionCanSend(sessionId);
+      if (abortSignal.aborted) {
+        return { kind: 'aborted', turnId: input.turnId };
+      }
+      const iterator = runtime.sendMessage(sessionId, input);
+      return (
+        await streamEvents(sessionId, iterator, {
+          turnId: input.turnId,
+          goalBoundary: 'none',
+          activity,
+        })
+      ).outcome;
+    } finally {
+      abortSignal.removeEventListener('abort', stop);
+      await stopPromise;
+    }
+  },
+  inspectAttempt: async (rootSessionId, attemptId, turnId) => {
+    const runs = (await runStore.listSessionRuns(rootSessionId)).filter(
+      (run) => run.agentGraphWakeAttemptId === attemptId && run.turnId === turnId,
+    );
+    if (runs.length > 1) {
+      throw new Error(
+        `Agent graph supervisor wake attempt ${attemptId} has multiple AgentRuns`,
+      );
+    }
+    return runs[0]?.status ?? 'missing';
+  },
+  newId: randomUUID,
+  onError: (rootSessionId) => {
+    emitSessionsChanged('status-change', rootSessionId);
+  },
+});
+agentGraphCoordinator = new AgentGraphCoordinator({
+  sessionStore: store,
+  runStore,
+  runtimeEventStore,
+  controlStore: agentGraphControlStore,
+  runtime,
+  newId: randomUUID,
+  onReconciliation: (rootSessionId, result) => {
+    agentGraphSupervisorWakeCoordinator.notify(rootSessionId, result);
+  },
+});
 let settingsIpc: SettingsIpcHandle | undefined;
 let mcpToolSnapshot = JSON.stringify(mcpManager.tools());
 mcpManager.onChange(() => {
@@ -991,6 +1057,10 @@ function registerIpc(): void {
   registerWorkspaceSearchIpc({ getProjectRoot: resolveProjectRootForContext });
   registerGitIpc({ getProjectRoot: resolveProjectRootForContext });
   registerPlanReminderIpc({ planReminders, getWorkspacePrivacyContext });
+  registerAgentGraphIpc({
+    coordinator: agentGraphCoordinator,
+    sendToRenderer: safeSendToRenderer,
+  });
   registerSessionsIpc({
     runtime,
     store,
@@ -1010,6 +1080,13 @@ function registerIpc(): void {
     prepareSkillInvocation: prepareDesktopSkillInvocation,
     invalidateSessionBindings: (sessionId) => botIncoming.invalidateSessionBindings(sessionId),
     clearSkillHost: (sessionId) => desktopSessionSkillHosts.delete(sessionId),
+    stopAgentGraph: async (sessionId) => {
+      const header = await store.readHeader(sessionId);
+      if (!header.subagentParent) await agentGraphCoordinator.stop(sessionId);
+    },
+    notifyAgentGraphPermissionResponse: (sessionId) => {
+      agentGraphSupervisorWakeCoordinator.notifyPermissionResponse(sessionId);
+    },
     ensureSessionWorkspaceAvailable,
     createSession: createDesktopSession,
     getReadyConnection,
@@ -1317,6 +1394,9 @@ wireAppLifecycle({
   runtimePersistence,
   mainWindowController,
   runtime,
+  agentGraphCoordinator,
+  agentGraphSupervisorWakeCoordinator,
+  agentGraphControlStore,
   streamEvents,
   focusOrCreateMainWindow,
   emitConnectionListChanged,

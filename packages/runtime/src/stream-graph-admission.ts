@@ -10,8 +10,11 @@ const AGENT_GRAPH_EXECUTION_INPUT_SCHEMA_VERSION = 1 as const;
 
 export interface ClaimAgentGraphRunnableIntentInput {
   intent: AgentGraphRunnableIntent;
-  store: AgentGraphIntentClaimStore;
+  store: Pick<AgentGraphIntentClaimStore, 'claimAgentGraphIntent'>;
   newId: () => string;
+  /** Reuse topology-provisioned identities for a newly materialized operator. */
+  targetTurnId?: string;
+  targetRunId?: string;
   /**
    * Stable execution input resolved before admission.
    *
@@ -55,7 +58,7 @@ export function claimAgentGraphRunnableIntent(
     readinessContextFingerprint: input.intent.readinessContextFingerprint,
     targetOperatorId: input.intent.operatorId,
     targetSessionId: input.intent.targetSessionId,
-    targetTurnId: input.newId(),
-    targetRunId: input.newId(),
+    targetTurnId: input.targetTurnId ?? input.newId(),
+    targetRunId: input.targetRunId ?? input.newId(),
   });
 }

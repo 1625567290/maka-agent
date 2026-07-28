@@ -220,6 +220,10 @@ export const Composer = forwardRef<
     swarmModePending?: boolean;
     swarmModeDisabledReason?: string;
     onSwarmModeChange?(active: boolean): void | Promise<void>;
+    graphModeActive?: boolean;
+    graphModePending?: boolean;
+    graphModeDisabledReason?: string;
+    onGraphModeChange?(active: boolean): void | Promise<void>;
     /**
      * Composer mention popups. Both are optional and the whole feature no-ops
      * when absent (SSR contracts render Composer with minimal props):
@@ -773,7 +777,7 @@ export const Composer = forwardRef<
                 actions still no-op mid-turn (`runImportAction` / drop
                 target), so the attach item is disabled rather than
                 vanishing the whole menu (and Plan/Swarm / expert teams). */}
-            {(props.onPickAttachments || (props.expertTeams?.length ?? 0) > 0 || props.onPlanModeChange || props.onSwarmModeChange) ? (
+            {(props.onPickAttachments || (props.expertTeams?.length ?? 0) > 0 || props.onPlanModeChange || props.onSwarmModeChange || props.onGraphModeChange) ? (
               <Menu>
                 <MenuTrigger
                   render={({ onClick: menuToggleClick, ...triggerRest }) => (
@@ -827,7 +831,7 @@ export const Composer = forwardRef<
                   {/* #1433 subtraction: Plan/Swarm live here as switch
                       items instead of standalone toolbar switches — the
                       toolbar keeps only add / permission / model / send. */}
-                  {props.onPlanModeChange || props.onSwarmModeChange ? (
+                  {props.onPlanModeChange || props.onSwarmModeChange || props.onGraphModeChange ? (
                     <>
                       {/* Separator only when an attachment/expert-team group
                           precedes it — a modes-only menu must not lead with
@@ -873,6 +877,26 @@ export const Composer = forwardRef<
                           }
                         >
                           {copy.swarmModeLabel}
+                        </MenuCheckboxItem>
+                      ) : null}
+                      {props.onGraphModeChange ? (
+                        <MenuCheckboxItem
+                          variant="switch"
+                          checked={props.graphModeActive === true}
+                          disabled={
+                            props.disabled
+                            || props.graphModePending === true
+                            || Boolean(props.graphModeDisabledReason)
+                          }
+                          onCheckedChange={(checked) => {
+                            void props.onGraphModeChange?.(checked);
+                          }}
+                          title={
+                            props.graphModeDisabledReason
+                            ?? (props.graphModeActive ? copy.disableGraphMode : copy.enableGraphMode)
+                          }
+                        >
+                          {copy.graphModeLabel}
                         </MenuCheckboxItem>
                       ) : null}
                     </>
@@ -949,6 +973,26 @@ export const Composer = forwardRef<
                 }
               >
                 {copy.swarmModeLabel}
+                <X size={12} aria-hidden="true" />
+              </button>
+            ) : null}
+            {props.graphModeActive ? (
+              <button
+                type="button"
+                className="maka-composer-mode-indicator"
+                data-mode="graph"
+                disabled={
+                  props.disabled
+                  || props.graphModePending === true
+                  || Boolean(props.graphModeDisabledReason)
+                }
+                onClick={() => {
+                  void props.onGraphModeChange?.(false);
+                }}
+                aria-label={copy.graphModeOnTitle}
+                title={props.graphModeDisabledReason ?? copy.graphModeOnTitle}
+              >
+                {copy.graphModeLabel}
                 <X size={12} aria-hidden="true" />
               </button>
             ) : null}

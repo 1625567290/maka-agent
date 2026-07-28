@@ -22,6 +22,7 @@ import {
 } from './events.js';
 import { INTERACTION_ID_MAX_BYTES, INTERACTION_TOOL_NAME_MAX_BYTES } from './interaction.js';
 import type { PermissionRequestPayload, PermissionResponse } from './permission.js';
+import type { TurnOrigin } from './runtime-inputs.js';
 import type { UserQuestionRequest } from './user-question.js';
 import type {
   CacheMissInputSource,
@@ -70,7 +71,7 @@ export function isRuntimeEventRole(value: unknown): value is RuntimeEventRole {
  * Not every (author, role) combination is meaningful, but the runtime —
  * not this type module — owns the policy that constrains them.
  */
-export const RUNTIME_EVENT_AUTHORS = ['user', 'agent', 'tool', 'system'] as const;
+export const RUNTIME_EVENT_AUTHORS = ['user', 'host', 'agent', 'tool', 'system'] as const;
 export type RuntimeEventAuthor = (typeof RUNTIME_EVENT_AUTHORS)[number];
 
 export function isRuntimeEventAuthor(value: unknown): value is RuntimeEventAuthor {
@@ -117,6 +118,8 @@ export function isTerminalRuntimeEventStatus(value: unknown): boolean {
 
 export interface RuntimeEventTextContent extends MessageContent {
   kind: 'text';
+  /** Durable provenance for a host-authored user-role turn. */
+  origin?: TurnOrigin;
   /**
    * Marks a user message steered into a running turn at a step boundary.
    * `text` stays raw for UI/transcript projections; model-replay projections
@@ -393,7 +396,7 @@ const RUNTIME_EVENT_SHAPE = defineObjectShape<RuntimeEvent>()(
 );
 const TEXT_CONTENT_SHAPE = defineObjectShape<RuntimeEventTextContent>()(
   ['kind', 'text'],
-  ['displayText', 'attachments', 'quotes', 'steering'],
+  ['displayText', 'origin', 'attachments', 'quotes', 'steering'],
 );
 const THINKING_CONTENT_SHAPE = defineObjectShape<RuntimeEventThinkingContent>()(
   ['kind', 'text'],
@@ -525,6 +528,9 @@ export function decodeRuntimeEvent(value: unknown): RuntimeEvent {
       content: {
         kind: 'text',
         ...normalizeMessageContent(value.content as unknown as MessageContent),
+        ...(value.content.origin !== undefined
+          ? { origin: value.content.origin as TurnOrigin }
+          : {}),
         ...(value.content.steering === true ? { steering: true as const } : {}),
       },
     } as unknown as RuntimeEvent;
@@ -538,6 +544,7 @@ function isRuntimeEventContent(value: unknown): value is RuntimeEventContent {
     case 'text':
       if (
         !hasExactShape(value, TEXT_CONTENT_SHAPE) ||
+        (value.origin !== undefined && !isTurnOrigin(value.origin)) ||
         (value.steering !== undefined && value.steering !== true)
       ) {
         return false;
@@ -582,6 +589,20 @@ function isRuntimeEventContent(value: unknown): value is RuntimeEventContent {
     default:
       return false;
   }
+}
+
+function isTurnOrigin(value: unknown): value is TurnOrigin {
+  if (!isRecord(value)) return false;
+  if (value.kind === 'automation') {
+    return Object.keys(value).length === 2 && typeof value.automationId === 'string';
+  }
+  return (
+    value.kind === 'agent_graph' &&
+    Object.keys(value).length === 4 &&
+    typeof value.graphId === 'string' &&
+    typeof value.wakeId === 'string' &&
+    typeof value.attemptId === 'string'
+  );
 }
 
 function isRuntimeEventActions(value: unknown): value is RuntimeEventActions {

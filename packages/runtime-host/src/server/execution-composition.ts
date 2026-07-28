@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import {
+  AgentGraphCoordinator,
   BackendRegistry,
   FakeBackend,
   SessionManager,
   type RuntimeHostedRootAuthority,
 } from '@maka/runtime';
+import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import { openInteractiveArtifactStoreForWrite } from '@maka/storage/artifact-stores';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
@@ -138,6 +140,15 @@ export async function createExecutionRuntimeHostComposition(
       interactionAuthority: interactions,
       canonicalPermissionOutcomes,
     });
+    const graphControlStore = createAgentGraphControlStore(context.owner.capability.canonicalPath);
+    const graphCoordinator = new AgentGraphCoordinator({
+      sessionStore: stores.sessionStore,
+      runStore: stores.agentRunStore,
+      runtimeEventStore: stores.runtimeEventStore,
+      controlStore: graphControlStore,
+      runtime: manager,
+      newId: randomUUID,
+    });
     rootCoordinator = new RootTurnCoordinator(
       manager,
       stores,
@@ -184,6 +195,7 @@ export async function createExecutionRuntimeHostComposition(
         await openedArtifactStore.recover();
         await interactions.recoverPendingAfterHostRestart();
         await manager.recoverInterruptedSessionsStrict(stores);
+        await graphCoordinator.recover();
         await coordinator.recover();
       })();
       return recoveryTask;
@@ -206,6 +218,16 @@ export async function createExecutionRuntimeHostComposition(
           } catch (error) {
             errors.push(error);
           }
+        }
+        try {
+          await graphCoordinator.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          graphControlStore.close();
+        } catch (error) {
+          errors.push(error);
         }
         try {
           await messages.close();

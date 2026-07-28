@@ -636,6 +636,7 @@ export class AgentRun {
       ...(this.input.userInput.displayText !== undefined
         ? { displayText: this.input.userInput.displayText }
         : {}),
+      ...(this.input.userInput.origin !== undefined ? { origin: this.input.userInput.origin } : {}),
       ...(this.input.userInput.attachments !== undefined
         ? { attachments: this.input.userInput.attachments }
         : {}),
@@ -954,6 +955,12 @@ export class AgentRun {
       ...(this.input.userInput.agentName ? { agentName: this.input.userInput.agentName } : {}),
       ...(this.input.userInput.origin?.kind === 'automation'
         ? { automationId: this.input.userInput.origin.automationId }
+        : {}),
+      ...(this.input.userInput.origin?.kind === 'agent_graph'
+        ? {
+            agentGraphWakeId: this.input.userInput.origin.wakeId,
+            agentGraphWakeAttemptId: this.input.userInput.origin.attemptId,
+          }
         : {}),
     };
     try {

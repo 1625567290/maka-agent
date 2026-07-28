@@ -98,6 +98,11 @@ export interface SubagentSessionParent {
     swarmId: string;
     itemId: string;
   };
+  graph?: {
+    graphId: string;
+    workId: string;
+    operatorId: string;
+  };
   lifecycle: SubagentSessionLifecycle;
 }
 
@@ -295,7 +300,7 @@ export interface LinkedSessionTreeProjectionOptions {
 
 const SUBAGENT_SESSION_PARENT_SHAPE = defineObjectShape<SubagentSessionParent>()(
   ['kind', 'parentSessionId', 'spawnedBy', 'lifecycle'],
-  ['swarm'],
+  ['swarm', 'graph'],
 );
 const SUBAGENT_SESSION_SPAWN_SHAPE = defineObjectShape<SubagentSessionParent['spawnedBy']>()(
   ['parentRunId', 'parentTurnId', 'toolCallId'],
@@ -304,6 +309,9 @@ const SUBAGENT_SESSION_SPAWN_SHAPE = defineObjectShape<SubagentSessionParent['sp
 const SUBAGENT_SESSION_SWARM_SHAPE = defineObjectShape<
   NonNullable<SubagentSessionParent['swarm']>
 >()(['swarmId', 'itemId'], []);
+const SUBAGENT_SESSION_GRAPH_SHAPE = defineObjectShape<
+  NonNullable<SubagentSessionParent['graph']>
+>()(['graphId', 'workId', 'operatorId'], []);
 const SUBAGENT_SESSION_RUNTIME_SHAPE = defineObjectShape<SubagentSessionRuntime>()(
   [
     'schemaVersion',
@@ -345,13 +353,20 @@ export function isSubagentSessionParent(value: unknown): value is SubagentSessio
   ) {
     return false;
   }
-  return (
+  const swarmValid =
     value.swarm === undefined ||
     (isRecord(value.swarm) &&
       hasExactShape(value.swarm, SUBAGENT_SESSION_SWARM_SHAPE) &&
       isSessionLineageId(value.swarm.swarmId) &&
-      isSessionLineageId(value.swarm.itemId))
-  );
+      isSessionLineageId(value.swarm.itemId));
+  const graphValid =
+    value.graph === undefined ||
+    (isRecord(value.graph) &&
+      hasExactShape(value.graph, SUBAGENT_SESSION_GRAPH_SHAPE) &&
+      isSessionLineageId(value.graph.graphId) &&
+      isSessionLineageId(value.graph.workId) &&
+      isSessionLineageId(value.graph.operatorId));
+  return swarmValid && graphValid && !(value.swarm && value.graph);
 }
 
 /** Strict decoder guard for the persisted child execution snapshot. */
@@ -573,9 +588,11 @@ export interface UserMessage extends MessageContent {
   id: string;
   turnId: string;
   ts: number;
-  /** Non-user trigger source (automation fire). Lets the chat mark turns the
-   *  user did not hand-type. Mirrors TurnOrigin in runtime-inputs. */
-  origin?: { kind: 'automation'; automationId: string };
+  /** Non-user trigger source. Lets the chat mark turns the user did not
+   * hand-type. Mirrors TurnOrigin in runtime-inputs. */
+  origin?:
+    | { kind: 'automation'; automationId: string }
+    | { kind: 'agent_graph'; graphId: string; wakeId: string; attemptId: string };
 }
 
 /** Prefer the human-facing view of a user message when one was stored. */
@@ -815,8 +832,14 @@ const ASSISTANT_THINKING_SHAPE = defineObjectShape<AssistantThinking>()(
   ['text'],
   ['signature', 'providerOptions'],
 );
-type AutomationOrigin = NonNullable<UserMessage['origin']>;
+type MessageOrigin = NonNullable<UserMessage['origin']>;
+type AutomationOrigin = Extract<MessageOrigin, { kind: 'automation' }>;
+type AgentGraphOrigin = Extract<MessageOrigin, { kind: 'agent_graph' }>;
 const AUTOMATION_ORIGIN_SHAPE = defineObjectShape<AutomationOrigin>()(['kind', 'automationId'], []);
+const AGENT_GRAPH_ORIGIN_SHAPE = defineObjectShape<AgentGraphOrigin>()(
+  ['kind', 'graphId', 'wakeId', 'attemptId'],
+  [],
+);
 
 const SYSTEM_NOTE_KINDS = new Set([
   'session_start',
@@ -849,7 +872,7 @@ function decodeStoredMessage(
       if (
         hasExactShape(message, USER_MESSAGE_SHAPE) &&
         hasMessageEnvelope(message, true) &&
-        (message.origin === undefined || isAutomationOrigin(message.origin))
+        (message.origin === undefined || isMessageOrigin(message.origin))
       ) {
         const { displayText, attachments, quotes, origin, ...envelope } = message;
         try {
@@ -988,6 +1011,21 @@ function isAutomationOrigin(value: unknown): value is AutomationOrigin {
     value.kind === 'automation' &&
     typeof value.automationId === 'string'
   );
+}
+
+function isAgentGraphOrigin(value: unknown): value is AgentGraphOrigin {
+  return (
+    isRecord(value) &&
+    hasExactShape(value, AGENT_GRAPH_ORIGIN_SHAPE) &&
+    value.kind === 'agent_graph' &&
+    typeof value.graphId === 'string' &&
+    typeof value.wakeId === 'string' &&
+    typeof value.attemptId === 'string'
+  );
+}
+
+function isMessageOrigin(value: unknown): value is MessageOrigin {
+  return isAutomationOrigin(value) || isAgentGraphOrigin(value);
 }
 
 function isOptionalFiniteDuration(value: unknown): boolean {

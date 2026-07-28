@@ -447,7 +447,7 @@ export class RootTurnCoordinator {
   stopRoot(
     identity: RuntimeMessageRunIdentity,
     input: {
-      source?: 'stop_button' | 'benchmark_deadline';
+      source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
       mode?: BackendStopMode;
     } = {},
   ): Promise<void> {
@@ -479,7 +479,7 @@ export class RootTurnCoordinator {
   stopSession(
     sessionId: string,
     input: {
-      source?: 'stop_button' | 'benchmark_deadline';
+      source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
       mode?: BackendStopMode;
     } = {},
   ): Promise<void> {
@@ -746,7 +746,7 @@ export class RootTurnCoordinator {
     commitQueueFence: () => QueueFenceResult,
     admission: SessionAdmissionLease,
     stopInput: {
-      source?: 'stop_button' | 'benchmark_deadline';
+      source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
       mode?: BackendStopMode;
     } = {},
   ): Promise<DeclaredStopFence | undefined> {
@@ -1122,7 +1122,7 @@ export class RootTurnCoordinator {
   private async deliverRuntimeStopIntent(
     sessionId: string,
     input: {
-      source?: 'stop_button' | 'benchmark_deadline';
+      source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
       mode?: BackendStopMode;
     } = { source: 'stop_button' },
   ): Promise<void> {

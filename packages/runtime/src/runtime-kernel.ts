@@ -134,6 +134,11 @@ export interface TurnStartOptions {
   runId?: string;
   userMessageId?: string;
   durability?: AgentRunDurability;
+  /**
+   * Resolve turn admission after this Session has registered a pending start
+   * and immediately before AgentRun begins durable/Backend activation.
+   */
+  admitTurn?: () => Promise<'admitted' | 'cancelled'>;
   onRunStarted?: (runId: string, initialHeader: SessionHeader) => void | Promise<void>;
   execution?: RuntimeExecutionClaim;
 }
@@ -550,6 +555,9 @@ export class RuntimeKernel implements RuntimeKernelLike {
             this.appendTurnState(targetSessionId, turnId, status, lineage, options),
         },
       });
+      if (options.admitTurn && (await options.admitTurn()) === 'cancelled') {
+        throw new Error('Turn start was cancelled before runtime admission');
+      }
       this.attachExecutionClaim(execution, run);
       yield* this.runAgentTurn(
         sessionId,

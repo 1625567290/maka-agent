@@ -34,6 +34,7 @@ const allowedServerExternalImports = new Set([
   '@maka/core/session',
   '@maka/core/task-ledger',
   '@maka/runtime',
+  '@maka/storage/agent-graph-control-store',
   '@maka/storage/artifact-stores',
   '@maka/storage/execution-stores',
   '@maka/storage/interaction-store',

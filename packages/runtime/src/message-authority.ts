@@ -40,11 +40,17 @@ export interface RuntimeHostedRootAuthority extends RuntimeMessageAuthority {
   executeRoot(input: RuntimeHostedRootExecutionInput): Promise<void>;
   stopRoot(
     identity: RuntimeMessageRunIdentity,
-    input?: { source?: 'stop_button' | 'benchmark_deadline'; mode?: BackendStopMode },
+    input?: {
+      source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
+      mode?: BackendStopMode;
+    },
   ): Promise<void>;
   stopSession(
     sessionId: string,
-    input?: { source?: 'stop_button' | 'benchmark_deadline'; mode?: BackendStopMode },
+    input?: {
+      source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
+      mode?: BackendStopMode;
+    },
   ): Promise<void>;
 }
 

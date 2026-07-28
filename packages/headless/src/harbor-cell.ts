@@ -11,6 +11,7 @@ import type {
 } from '@maka/core';
 import { isTerminalRuntimeEvent, isThinkingLevel, resolveModelVisionSupport } from '@maka/core';
 import {
+  AgentGraphCoordinator,
   AiSdkBackend,
   BackendRegistry,
   PermissionEngine,
@@ -35,6 +36,7 @@ import {
   createReadImageSnapshotter,
   persistProviderRequestCaptureArtifact,
 } from '@maka/storage';
+import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import { registerFakeBackend } from './backends.js';
 import {
   buildHarborCellOutput,
@@ -378,8 +380,6 @@ export async function runHarborCellWithStorage(
       invocation = result;
     },
   });
-  sessionCapabilities.bind(manager);
-
   const session =
     resumedSession ??
     (await manager.createSession({
@@ -391,6 +391,17 @@ export async function runHarborCellWithStorage(
       permissionMode: 'execute',
       name: `harbor-cell:${input.config.id}`,
     }));
+  const graphControlStore = createAgentGraphControlStore(input.storageRoot);
+  const graphCoordinator = new AgentGraphCoordinator({
+    sessionStore,
+    runStore: agentRunStore,
+    runtimeEventStore,
+    controlStore: graphControlStore,
+    runtime: manager,
+    newId,
+    rootSessionId: session.id,
+  });
+  sessionCapabilities.bind(manager, graphCoordinator);
   let deadlineReached = false;
   let settlementError: unknown;
   let settlementAttempt: Promise<void> | undefined;
@@ -399,10 +410,9 @@ export async function runHarborCellWithStorage(
       ? undefined
       : setTimeout(() => {
           deadlineReached = true;
-          settlementAttempt = manager
-            .stopSession(session.id, {
+          settlementAttempt = sessionCapabilities
+            .settle(session.id, {
               source: 'benchmark_deadline',
-              mode: 'immediate',
             })
             .catch((error) => {
               settlementError = error;
@@ -461,6 +471,22 @@ export async function runHarborCellWithStorage(
     sendMessageError = error;
   } finally {
     if (settlementTimer) clearTimeout(settlementTimer);
+    try {
+      if (settlementAttempt) {
+        await settlementAttempt;
+      } else {
+        await sessionCapabilities.settle(
+          session.id,
+          deadlineReached ? { source: 'benchmark_deadline' } : undefined,
+        );
+      }
+    } finally {
+      try {
+        await graphCoordinator.close();
+      } finally {
+        graphControlStore.close();
+      }
+    }
   }
   await settlementAttempt;
   if (settlementError) throw settlementError;

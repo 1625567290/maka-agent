@@ -4,8 +4,14 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import type { DatabaseSync } from 'node:sqlite';
 import {
+  AGENT_GRAPH_CLIENT_PROJECTION_SCHEMA_VERSION,
+  AgentGraphClientProjectionConflictError,
   assertAgentGraphScheduleUpdateRequest,
+  AgentGraphScheduleClosedError,
+  AgentGraphScheduleRevisionConflictError,
+  assertAgentGraphOperatorProvisionRequest,
   assertAgentGraphIntentClaimRequest,
+  decodeAgentGraphOperatorProvision,
   decodeAgentGraphScheduleUpdate,
   decodeAgentGraphIntentClaim,
   isSubagentSessionParent,
@@ -14,9 +20,28 @@ import {
   type AgentGraphScheduleUpdate,
   type AgentGraphScheduleUpdateRequest,
   type AgentGraphScheduleUpdateResult,
+  type AgentGraphIntentAdmissionState,
+  type AgentGraphIntentAdmissionTransition,
+  type AgentGraphIntentAdmissionSnapshot,
   type AgentGraphIntentClaim,
   type AgentGraphIntentClaimRequest,
   type AgentGraphIntentClaimResult,
+  type AgentGraphOperatorProvision,
+  type AgentGraphOperatorProvisionRequest,
+  type AgentGraphOperatorProvisionResult,
+  type AgentGraphClientClaimAdmission,
+  type AgentGraphClientProjectionRecord,
+  type AgentGraphClientProjectionWithOperator,
+  type AgentGraphClientOperatorProjectionRecord,
+  type AgentGraphClientTerminalActivityPage,
+  AGENT_GRAPH_SUPERVISOR_WAKE_SCHEMA_VERSION,
+  type AgentGraphSupervisorWakeAttemptRecord,
+  type AgentGraphSupervisorWakeRecord,
+  type AgentGraphTimelineMetadataSnapshot,
+  type BeginAgentGraphSupervisorWakeAttemptRequest,
+  type ClaimAgentGraphSupervisorWakeRequest,
+  type CompleteAgentGraphSupervisorWakeAttemptRequest,
+  type CommitAgentGraphClientProjectionRequest,
   type SessionHeader,
   type SessionListFilter,
   type SubagentSessionParent,
@@ -60,7 +85,8 @@ export type SqliteSessionMetadataStoreFailpoint =
   | 'after_session_labels_write'
   | 'after_session_import_marker_write'
   | 'after_agent_graph_intent_claim_write'
-  | 'after_agent_graph_schedule_update_write';
+  | 'after_agent_graph_schedule_update_write'
+  | 'after_agent_graph_operator_provision_write';
 
 export interface SqliteSessionMetadataStoreOptions {
   now?: () => number;
@@ -76,6 +102,11 @@ export interface SessionMetadataRecord {
 export interface IdempotentSubagentSessionMetadataResult {
   record: SessionMetadataRecord;
   created: boolean;
+}
+
+export interface IdempotentAgentGraphOperatorMetadataResult
+  extends AgentGraphOperatorProvisionResult {
+  record: SessionMetadataRecord;
 }
 
 export interface SessionMetadataImportEntry {
@@ -184,6 +215,9 @@ export class SqliteSessionMetadataStore {
     this.assertOpen();
     const normalized = normalizeSessionHeader(header);
     assertSafeSessionId(normalized.id);
+    if (normalized.subagentParent?.graph) {
+      throw new Error('Graph operator metadata requires atomic topology provisioning');
+    }
     const identity = requireSubagentSpawnIdentity(normalized);
     return this.transaction(() => {
       if (this.hasTombstone(normalized.id)) {
@@ -217,6 +251,102 @@ export class SqliteSessionMetadataStore {
       }
       this.assertMatchingSubagentSpawnClaim(existing.header);
       return { record: existing, created: false };
+    });
+  }
+
+  async createAgentGraphOperator(
+    header: SessionHeader,
+    request: AgentGraphOperatorProvisionRequest,
+    expectedRevision: number,
+  ): Promise<IdempotentAgentGraphOperatorMetadataResult> {
+    this.assertOpen();
+    const normalized = normalizeSessionHeader(header);
+    assertSafeSessionId(normalized.id);
+    assertAgentGraphOperatorProvisionRequest(request);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error('Agent graph schedule expected revision must be a non-negative safe integer');
+    }
+    const identity = requireSubagentSpawnIdentity(normalized);
+    if (
+      !identity.parent.graph ||
+      identity.parent.graph.graphId !== request.graphId ||
+      identity.parent.graph.workId !== request.workId ||
+      identity.parent.graph.operatorId !== request.operatorId ||
+      normalized.subagentRuntime?.agentId !== request.agentId ||
+      identity.spawn.initialTurnId !== request.initialTurnId ||
+      identity.spawn.initialRunId !== request.initialRunId
+    ) {
+      throw new Error('Graph operator Session metadata does not match its provision request');
+    }
+    return this.transaction(() => {
+      const existing = this.readAgentGraphOperatorProvisionSync(request.graphId, request.workId);
+      if (existing) return this.matchAgentGraphOperatorProvision(existing, request);
+      const currentRevision = this.currentAgentGraphScheduleRevision(request.graphId);
+      if (currentRevision !== expectedRevision) {
+        throw new AgentGraphScheduleRevisionConflictError(
+          request.graphId,
+          expectedRevision,
+          currentRevision,
+        );
+      }
+      if (this.hasClosedAgentGraphSchedule(request.graphId)) {
+        throw new AgentGraphScheduleClosedError(request.graphId);
+      }
+      if (this.hasTombstone(normalized.id)) {
+        throw new SessionMetadataConflictError(
+          `Session metadata id is tombstoned: ${normalized.id}`,
+        );
+      }
+      if (this.readRecordSync(normalized.id)) {
+        throw new SessionMetadataConflictError(`Session metadata already exists: ${normalized.id}`);
+      }
+      const provisionedAt = this.now();
+      const claim = this.tryClaimSubagentSpawn(normalized, provisionedAt);
+      if (!claim.created) {
+        throw new SessionMetadataConflictError(
+          'Graph operator spawn identity exists without its topology provision',
+        );
+      }
+      const record = this.insertHeader(normalized, 1, provisionedAt);
+      const provision: AgentGraphOperatorProvision = {
+        ...request,
+        edges: request.edges.map((edge) => ({ ...edge })),
+        targetSessionId: normalized.id,
+        provisionedAt,
+      };
+      this.db
+        .prepare(`
+          INSERT INTO agent_graph_operator_provisions(
+            graph_id,
+            work_id,
+            provision_id,
+            schema_version,
+            provision_fingerprint,
+            agent_id,
+            operator_id,
+            target_session_id,
+            payload_json,
+            provisioned_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        .run(
+          provision.graphId,
+          provision.workId,
+          provision.provisionId,
+          provision.schemaVersion,
+          provision.provisionFingerprint,
+          provision.agentId,
+          provision.operatorId,
+          provision.targetSessionId,
+          JSON.stringify(provision),
+          provision.provisionedAt,
+        );
+      this.options.failpoint?.('after_agent_graph_operator_provision_write');
+      return {
+        record,
+        provision: decodeAgentGraphOperatorProvision(provision),
+        created: true,
+      };
     });
   }
 
@@ -286,58 +416,111 @@ export class SqliteSessionMetadataStore {
   ): Promise<AgentGraphIntentClaimResult> {
     this.assertOpen();
     assertAgentGraphIntentClaimRequest(request);
+    return this.transaction(() => this.claimAgentGraphIntentSync(request));
+  }
+
+  async claimAgentGraphIntentAtScheduleRevision(
+    request: AgentGraphIntentClaimRequest,
+    expectedRevision: number,
+  ): Promise<AgentGraphIntentClaimResult> {
+    this.assertOpen();
+    assertAgentGraphIntentClaimRequest(request);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error('Agent graph schedule expected revision must be a non-negative safe integer');
+    }
     return this.transaction(() => {
-      const claimedAt = this.now();
-      const inserted = this.db
-        .prepare(`
-          INSERT OR IGNORE INTO agent_graph_intent_claims(
-            claim_id,
-            schema_version,
-            graph_id,
-            intent_id,
-            intent_fingerprint,
-            readiness_context_fingerprint,
-            target_operator_id,
-            target_session_id,
-            target_turn_id,
-            target_run_id,
-            claimed_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `)
-        .run(
-          request.claimId,
-          request.schemaVersion,
+      const currentRevision = this.currentAgentGraphScheduleRevision(request.graphId);
+      if (currentRevision !== expectedRevision) {
+        throw new AgentGraphScheduleRevisionConflictError(
           request.graphId,
-          request.intentId,
-          request.intentFingerprint,
-          request.readinessContextFingerprint,
-          request.targetOperatorId,
-          request.targetSessionId,
-          request.targetTurnId,
-          request.targetRunId,
-          claimedAt,
+          expectedRevision,
+          currentRevision,
         );
-      if (inserted.changes === 1) {
-        this.options.failpoint?.('after_agent_graph_intent_claim_write');
       }
-      const claim = this.readAgentGraphIntentClaimSync(request.graphId, request.intentId);
-      if (!claim) {
+      const existing = this.readAgentGraphIntentClaimSync(request.graphId, request.intentId);
+      if (!existing && this.hasClosedAgentGraphSchedule(request.graphId)) {
+        throw new AgentGraphScheduleClosedError(request.graphId);
+      }
+      return this.claimAgentGraphIntentSync(request);
+    });
+  }
+
+  async beginAgentGraphIntentExecutionAtScheduleRevision(
+    graphId: string,
+    intentId: string,
+    expectedRevision: number,
+  ): Promise<AgentGraphIntentAdmissionTransition> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    assertGraphIntentId(intentId);
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error('Agent graph schedule expected revision must be a non-negative safe integer');
+    }
+    return this.transaction(() => {
+      const currentRevision = this.currentAgentGraphScheduleRevision(graphId);
+      if (currentRevision !== expectedRevision) {
+        throw new AgentGraphScheduleRevisionConflictError(
+          graphId,
+          expectedRevision,
+          currentRevision,
+        );
+      }
+      const previousState = this.readAgentGraphIntentAdmissionStateSync(graphId, intentId);
+      if (previousState !== 'claimed') {
+        return { state: previousState, previousState, changed: false };
+      }
+      const changed = this.db
+        .prepare(`
+          UPDATE agent_graph_intent_claims
+          SET admission_status = 'executing',
+              admission_updated_at = ?
+          WHERE graph_id = ?
+            AND intent_id = ?
+            AND admission_status = 'claimed'
+        `)
+        .run(this.now(), graphId, intentId).changes;
+      if (changed !== 1) {
         throw new AgentGraphIntentClaimConflictError(
-          'Agent graph intent claim identity collides with another claim',
+          'Agent graph intent execution admission changed concurrently',
         );
       }
-      if (
-        claim.claimId !== request.claimId ||
-        claim.intentFingerprint !== request.intentFingerprint ||
-        claim.readinessContextFingerprint !== request.readinessContextFingerprint ||
-        claim.targetOperatorId !== request.targetOperatorId ||
-        claim.targetSessionId !== request.targetSessionId
-      ) {
+      return { state: 'executing', previousState, changed: true };
+    });
+  }
+
+  async cancelAgentGraphIntentExecution(
+    graphId: string,
+    intentId: string,
+    reason: string,
+  ): Promise<AgentGraphIntentAdmissionTransition> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    assertGraphIntentId(intentId);
+    if (!reason.trim() || reason.length > 4_000) {
+      throw new Error('Agent graph intent cancellation reason must be non-empty and bounded');
+    }
+    return this.transaction(() => {
+      const previousState = this.readAgentGraphIntentAdmissionStateSync(graphId, intentId);
+      if (previousState === 'cancelled') {
+        return { state: 'cancelled', previousState, changed: false };
+      }
+      const changed = this.db
+        .prepare(`
+          UPDATE agent_graph_intent_claims
+          SET admission_status = 'cancelled',
+              admission_updated_at = ?,
+              cancellation_reason = ?
+          WHERE graph_id = ?
+            AND intent_id = ?
+            AND admission_status = ?
+        `)
+        .run(this.now(), reason, graphId, intentId, previousState).changes;
+      if (changed !== 1) {
         throw new AgentGraphIntentClaimConflictError(
-          'Agent graph intent identity was reused for different work',
+          'Agent graph intent cancellation admission changed concurrently',
         );
       }
-      return { claim, created: inserted.changes === 1 };
+      return { state: 'cancelled', previousState, changed: true };
     });
   }
 
@@ -460,6 +643,784 @@ export class SqliteSessionMetadataStore {
     return rows.map(decodeAgentGraphScheduleUpdateRow);
   }
 
+  async claimAgentGraphSupervisorWake(
+    request: ClaimAgentGraphSupervisorWakeRequest,
+  ): Promise<{ wake: AgentGraphSupervisorWakeRecord; created: boolean }> {
+    this.assertOpen();
+    assertAgentGraphSupervisorWakeClaim(request);
+    return this.transaction(() => {
+      const existing = this.readAgentGraphSupervisorWakeSync(request.graphId, request.wakeId);
+      if (existing) {
+        if (
+          existing.snapshotVersion !== request.snapshotVersion ||
+          existing.rootSessionId !== request.rootSessionId
+        ) {
+          throw new SessionMetadataConflictError(
+            'Agent graph supervisor wake identity was reused for another snapshot',
+          );
+        }
+        return { wake: existing, created: false };
+      }
+      const now = this.now();
+      this.db
+        .prepare(`
+          INSERT INTO agent_graph_supervisor_wakes(
+            graph_id,
+            wake_id,
+            schema_version,
+            snapshot_version,
+            root_session_id,
+            status,
+            attempt_count,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+        `)
+        .run(
+          request.graphId,
+          request.wakeId,
+          request.schemaVersion,
+          request.snapshotVersion,
+          request.rootSessionId,
+          now,
+          now,
+        );
+      return {
+        wake: this.requireAgentGraphSupervisorWakeSync(request.graphId, request.wakeId),
+        created: true,
+      };
+    });
+  }
+
+  async beginAgentGraphSupervisorWakeAttempt(
+    request: BeginAgentGraphSupervisorWakeAttemptRequest,
+  ): Promise<{
+    wake: AgentGraphSupervisorWakeRecord;
+    attempt?: AgentGraphSupervisorWakeAttemptRecord;
+    acquired: boolean;
+  }> {
+    this.assertOpen();
+    assertAgentGraphSupervisorWakeAttempt(request);
+    return this.transaction(() => {
+      const wake = this.requireAgentGraphSupervisorWakeSync(request.graphId, request.wakeId);
+      if (
+        wake.status === 'delivered' ||
+        wake.status === 'running' ||
+        wake.status === 'waiting_permission'
+      ) {
+        return { wake, acquired: false };
+      }
+      const now = this.now();
+      const updated = this.db
+        .prepare(`
+          UPDATE agent_graph_supervisor_wakes
+          SET status = 'running',
+              attempt_count = attempt_count + 1,
+              current_attempt_id = ?,
+              current_turn_id = ?,
+              failure_reason = NULL,
+              updated_at = ?
+          WHERE graph_id = ?
+            AND wake_id = ?
+            AND status IN ('pending', 'retryable_failed')
+        `)
+        .run(request.attemptId, request.turnId, now, request.graphId, request.wakeId);
+      if (updated.changes !== 1) {
+        return {
+          wake: this.requireAgentGraphSupervisorWakeSync(request.graphId, request.wakeId),
+          acquired: false,
+        };
+      }
+      this.db
+        .prepare(`
+          INSERT INTO agent_graph_supervisor_wake_attempts(
+            graph_id,
+            wake_id,
+            attempt_id,
+            turn_id,
+            status,
+            started_at
+          ) VALUES (?, ?, ?, ?, 'running', ?)
+        `)
+        .run(request.graphId, request.wakeId, request.attemptId, request.turnId, now);
+      return {
+        wake: this.requireAgentGraphSupervisorWakeSync(request.graphId, request.wakeId),
+        attempt: this.requireAgentGraphSupervisorWakeAttemptSync(
+          request.graphId,
+          request.wakeId,
+          request.attemptId,
+        ),
+        acquired: true,
+      };
+    });
+  }
+
+  async completeAgentGraphSupervisorWakeAttempt(
+    request: CompleteAgentGraphSupervisorWakeAttemptRequest,
+  ): Promise<AgentGraphSupervisorWakeRecord> {
+    this.assertOpen();
+    assertAgentGraphSupervisorWakeCompletion(request);
+    return this.transaction(() => {
+      const wake = this.requireAgentGraphSupervisorWakeSync(request.graphId, request.wakeId);
+      const attempt = this.requireAgentGraphSupervisorWakeAttemptSync(
+        request.graphId,
+        request.wakeId,
+        request.attemptId,
+      );
+      if (wake.currentAttemptId !== request.attemptId || attempt.status !== wake.status) {
+        if (wake.status === request.status && attempt.status === request.status) return wake;
+        throw new SessionMetadataConflictError(
+          'Agent graph supervisor wake attempt is no longer current',
+        );
+      }
+      if (attempt.status !== 'running' && attempt.status !== 'waiting_permission') {
+        if (wake.status === request.status && attempt.status === request.status) return wake;
+        throw new SessionMetadataConflictError(
+          'Agent graph supervisor wake attempt is already terminal',
+        );
+      }
+      if (attempt.status === 'waiting_permission' && request.status === 'waiting_permission') {
+        return wake;
+      }
+      const now = this.now();
+      const failureReason =
+        request.status === 'retryable_failed' ? request.failureReason : undefined;
+      const completedAt = request.status === 'waiting_permission' ? null : now;
+      this.db
+        .prepare(`
+          UPDATE agent_graph_supervisor_wake_attempts
+          SET status = ?, failure_reason = ?, completed_at = ?
+          WHERE graph_id = ? AND wake_id = ? AND attempt_id = ? AND status = ?
+        `)
+        .run(
+          request.status,
+          failureReason ?? null,
+          completedAt,
+          request.graphId,
+          request.wakeId,
+          request.attemptId,
+          attempt.status,
+        );
+      this.db
+        .prepare(`
+          UPDATE agent_graph_supervisor_wakes
+          SET status = ?, failure_reason = ?, updated_at = ?
+          WHERE graph_id = ? AND wake_id = ? AND current_attempt_id = ? AND status = ?
+        `)
+        .run(
+          request.status,
+          failureReason ?? null,
+          now,
+          request.graphId,
+          request.wakeId,
+          request.attemptId,
+          wake.status,
+        );
+      return this.requireAgentGraphSupervisorWakeSync(request.graphId, request.wakeId);
+    });
+  }
+
+  async readAgentGraphSupervisorWake(
+    graphId: string,
+    wakeId: string,
+  ): Promise<AgentGraphSupervisorWakeRecord | undefined> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    assertGraphLookupIdentity(wakeId, 'supervisor wake id');
+    return this.readAgentGraphSupervisorWakeSync(graphId, wakeId);
+  }
+
+  async listAgentGraphSupervisorWakeAttempts(
+    graphId: string,
+    wakeId: string,
+  ): Promise<AgentGraphSupervisorWakeAttemptRecord[]> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    assertGraphLookupIdentity(wakeId, 'supervisor wake id');
+    const rows = this.db
+      .prepare(`
+        SELECT
+          graph_id AS graphId,
+          wake_id AS wakeId,
+          attempt_id AS attemptId,
+          turn_id AS turnId,
+          status,
+          failure_reason AS failureReason,
+          started_at AS startedAt,
+          completed_at AS completedAt
+        FROM agent_graph_supervisor_wake_attempts
+        WHERE graph_id = ? AND wake_id = ?
+        ORDER BY started_at ASC, attempt_id ASC
+      `)
+      .all(graphId, wakeId) as unknown as AgentGraphSupervisorWakeAttemptRow[];
+    return rows.map(decodeAgentGraphSupervisorWakeAttemptRow);
+  }
+
+  async listRetryableAgentGraphSupervisorWakes(): Promise<AgentGraphSupervisorWakeRecord[]> {
+    this.assertOpen();
+    const rows = this.db
+      .prepare(`
+        SELECT
+          schema_version AS schemaVersion,
+          graph_id AS graphId,
+          wake_id AS wakeId,
+          snapshot_version AS snapshotVersion,
+          root_session_id AS rootSessionId,
+          status,
+          attempt_count AS attemptCount,
+          current_attempt_id AS currentAttemptId,
+          current_turn_id AS currentTurnId,
+          failure_reason AS failureReason,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM agent_graph_supervisor_wakes
+        WHERE status = 'retryable_failed'
+        ORDER BY updated_at ASC, graph_id ASC, wake_id ASC
+      `)
+      .all() as unknown as AgentGraphSupervisorWakeRow[];
+    return rows.map(decodeAgentGraphSupervisorWakeRow);
+  }
+
+  async listUnsettledAgentGraphSupervisorWakes(): Promise<AgentGraphSupervisorWakeRecord[]> {
+    this.assertOpen();
+    const rows = this.db
+      .prepare(`
+        SELECT
+          schema_version AS schemaVersion,
+          graph_id AS graphId,
+          wake_id AS wakeId,
+          snapshot_version AS snapshotVersion,
+          root_session_id AS rootSessionId,
+          status,
+          attempt_count AS attemptCount,
+          current_attempt_id AS currentAttemptId,
+          current_turn_id AS currentTurnId,
+          failure_reason AS failureReason,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM agent_graph_supervisor_wakes
+        WHERE status IN ('running', 'waiting_permission')
+        ORDER BY updated_at ASC, graph_id ASC, wake_id ASC
+      `)
+      .all() as unknown as AgentGraphSupervisorWakeRow[];
+    return rows.map(decodeAgentGraphSupervisorWakeRow);
+  }
+
+  async recoverAgentGraphSupervisorWakes(): Promise<number> {
+    this.assertOpen();
+    return this.transaction(() => {
+      const now = this.now();
+      const recovered = this.db
+        .prepare(`
+          UPDATE agent_graph_supervisor_wakes
+          SET status = 'retryable_failed',
+              failure_reason = 'host_restart',
+              updated_at = ?
+          WHERE status = 'pending'
+        `)
+        .run(now).changes;
+      return Number(recovered);
+    });
+  }
+
+  async listAgentGraphOperatorProvisions(graphId: string): Promise<AgentGraphOperatorProvision[]> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    const rows = this.db
+      .prepare(`
+        SELECT payload_json AS payloadJson
+        FROM agent_graph_operator_provisions
+        WHERE graph_id = ?
+        ORDER BY provisioned_at ASC, operator_id ASC
+      `)
+      .all(graphId) as unknown as AgentGraphOperatorProvisionRow[];
+    return rows.map((row) =>
+      decodeAgentGraphOperatorProvision(JSON.parse(row.payloadJson) as unknown),
+    );
+  }
+
+  async readAgentGraphTimelineMetadata(
+    graphId: string,
+  ): Promise<AgentGraphTimelineMetadataSnapshot> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    return this.readTransaction(() => {
+      const scheduleUpdates = (
+        this.db
+          .prepare(`
+            SELECT payload_json AS payloadJson
+            FROM agent_graph_schedule_updates
+            WHERE graph_id = ?
+            ORDER BY revision ASC
+          `)
+          .all(graphId) as unknown as AgentGraphScheduleUpdateRow[]
+      ).map(decodeAgentGraphScheduleUpdateRow);
+      const operatorProvisions = (
+        this.db
+          .prepare(`
+            SELECT payload_json AS payloadJson
+            FROM agent_graph_operator_provisions
+            WHERE graph_id = ?
+            ORDER BY provisioned_at ASC, operator_id ASC
+          `)
+          .all(graphId) as unknown as AgentGraphOperatorProvisionRow[]
+      ).map((row) => decodeAgentGraphOperatorProvision(JSON.parse(row.payloadJson) as unknown));
+      const intentClaims = (
+        this.db
+          .prepare(`
+            SELECT
+              schema_version AS schemaVersion,
+              claim_id AS claimId,
+              graph_id AS graphId,
+              intent_id AS intentId,
+              intent_fingerprint AS intentFingerprint,
+              readiness_context_fingerprint AS readinessContextFingerprint,
+              target_operator_id AS targetOperatorId,
+              target_session_id AS targetSessionId,
+              target_turn_id AS targetTurnId,
+              target_run_id AS targetRunId,
+              claimed_at AS claimedAt
+            FROM agent_graph_intent_claims
+            WHERE graph_id = ?
+            ORDER BY claimed_at ASC, intent_id ASC
+          `)
+          .all(graphId) as unknown as AgentGraphIntentClaim[]
+      ).map(decodeAgentGraphIntentClaim);
+      const intentAdmissions = (
+        this.db
+          .prepare(`
+            SELECT
+              graph_id AS graphId,
+              intent_id AS intentId,
+              admission_status AS state,
+              admission_updated_at AS updatedAt,
+              cancellation_reason AS cancellationReason
+            FROM agent_graph_intent_claims
+            WHERE graph_id = ?
+            ORDER BY claimed_at ASC, intent_id ASC
+          `)
+          .all(graphId) as unknown as AgentGraphIntentAdmissionSnapshotRow[]
+      ).map(decodeAgentGraphIntentAdmissionSnapshotRow);
+      const wakeRows = this.db
+        .prepare(`
+          SELECT
+            schema_version AS schemaVersion,
+            graph_id AS graphId,
+            wake_id AS wakeId,
+            snapshot_version AS snapshotVersion,
+            root_session_id AS rootSessionId,
+            status,
+            attempt_count AS attemptCount,
+            current_attempt_id AS currentAttemptId,
+            current_turn_id AS currentTurnId,
+            failure_reason AS failureReason,
+            created_at AS createdAt,
+            updated_at AS updatedAt
+          FROM agent_graph_supervisor_wakes
+          WHERE graph_id = ?
+          ORDER BY created_at ASC, wake_id ASC
+        `)
+        .all(graphId) as unknown as AgentGraphSupervisorWakeRow[];
+      const attemptRows = this.db
+        .prepare(`
+          SELECT
+            graph_id AS graphId,
+            wake_id AS wakeId,
+            attempt_id AS attemptId,
+            turn_id AS turnId,
+            status,
+            failure_reason AS failureReason,
+            started_at AS startedAt,
+            completed_at AS completedAt
+          FROM agent_graph_supervisor_wake_attempts
+          WHERE graph_id = ?
+          ORDER BY started_at ASC, attempt_id ASC
+        `)
+        .all(graphId) as unknown as AgentGraphSupervisorWakeAttemptRow[];
+      const attemptsByWake = new Map<string, AgentGraphSupervisorWakeAttemptRecord[]>();
+      for (const row of attemptRows) {
+        const attempt = decodeAgentGraphSupervisorWakeAttemptRow(row);
+        const attempts = attemptsByWake.get(attempt.wakeId) ?? [];
+        attempts.push(attempt);
+        attemptsByWake.set(attempt.wakeId, attempts);
+      }
+      const supervisorWakes = wakeRows.map((row) => {
+        const wake = decodeAgentGraphSupervisorWakeRow(row);
+        const attempts = attemptsByWake.get(wake.wakeId) ?? [];
+        attemptsByWake.delete(wake.wakeId);
+        return {
+          wake,
+          attempts,
+        };
+      });
+      if (attemptsByWake.size > 0) {
+        throw new Error(`Agent graph ${graphId} has orphan supervisor wake attempts`);
+      }
+      return {
+        graphId,
+        scheduleUpdates,
+        operatorProvisions,
+        intentClaims,
+        intentAdmissions,
+        supervisorWakes,
+      };
+    });
+  }
+
+  async commitAgentGraphClientProjection(
+    request: CommitAgentGraphClientProjectionRequest,
+  ): Promise<AgentGraphClientProjectionRecord> {
+    this.assertOpen();
+    assertAgentGraphClientProjectionRequest(request);
+    return this.transaction(() => {
+      const current = this.db
+        .prepare(`
+          SELECT
+            schema_version AS schemaVersion,
+            graph_id AS graphId,
+            root_session_id AS rootSessionId,
+            snapshot_version AS snapshotVersion,
+            payload_json AS payloadJson,
+            materialized_at AS materializedAt
+          FROM agent_graph_client_projections
+          WHERE graph_id = ?
+        `)
+        .get(request.graphId) as AgentGraphClientProjectionRow | undefined;
+      if (
+        request.expectedSnapshotVersion === null
+          ? current !== undefined
+          : current?.snapshotVersion !== request.expectedSnapshotVersion
+      ) {
+        throw new AgentGraphClientProjectionConflictError(
+          `Agent graph client projection ${request.graphId} version conflict: expected ${
+            request.expectedSnapshotVersion ?? 'no existing projection'
+          }, found ${current?.snapshotVersion ?? 'none'}`,
+        );
+      }
+
+      const readAppliedRecord = this.db.prepare(`
+        SELECT event_time AS eventTime
+        FROM agent_graph_client_applied_records
+        WHERE graph_id = ? AND record_id = ?
+      `);
+      if (request.incrementalRecordId) {
+        const existing = readAppliedRecord.get(request.graphId, request.incrementalRecordId) as
+          | AgentGraphClientAppliedRecordRow
+          | undefined;
+        if (existing) {
+          const requested = request.activityRecords.find(
+            (record) => record.recordId === request.incrementalRecordId,
+          )!;
+          if (existing.eventTime !== requested.eventTime) {
+            throw new SessionMetadataConflictError(
+              `Agent graph activity ${requested.recordId} changed after materialization`,
+            );
+          }
+          if (!current) {
+            throw new Error('Incremental agent graph projection has no current snapshot');
+          }
+          return decodeAgentGraphClientProjectionRow(current);
+        }
+      }
+
+      const materializedAt = this.now();
+      const snapshotPayloadJson = encodeProjectionPayload(request.snapshot, 'snapshot');
+      this.db
+        .prepare(`
+          INSERT INTO agent_graph_client_projections(
+            graph_id,
+            root_session_id,
+            schema_version,
+            snapshot_version,
+            payload_json,
+            materialized_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(graph_id) DO UPDATE SET
+            root_session_id = excluded.root_session_id,
+            schema_version = excluded.schema_version,
+            snapshot_version = excluded.snapshot_version,
+            payload_json = excluded.payload_json,
+            materialized_at = excluded.materialized_at
+        `)
+        .run(
+          request.graphId,
+          request.rootSessionId,
+          request.schemaVersion,
+          request.snapshotVersion,
+          snapshotPayloadJson,
+          materializedAt,
+        );
+
+      const insertAppliedRecord = this.db.prepare(`
+        INSERT INTO agent_graph_client_applied_records(
+          graph_id,
+          record_id,
+          event_time
+        ) VALUES (?, ?, ?)
+      `);
+      for (const record of request.activityRecords) {
+        const existing = readAppliedRecord.get(request.graphId, record.recordId) as
+          | AgentGraphClientAppliedRecordRow
+          | undefined;
+        if (existing) {
+          if (existing.eventTime !== record.eventTime) {
+            throw new SessionMetadataConflictError(
+              `Agent graph activity ${record.recordId} changed after materialization`,
+            );
+          }
+          continue;
+        }
+        insertAppliedRecord.run(request.graphId, record.recordId, record.eventTime);
+      }
+
+      if (request.replaceOperators) {
+        this.db
+          .prepare('DELETE FROM agent_graph_client_operator_projections WHERE graph_id = ?')
+          .run(request.graphId);
+      }
+      const insertOperator = this.db.prepare(`
+        INSERT INTO agent_graph_client_operator_projections(
+          graph_id,
+          operator_id,
+          snapshot_version,
+          payload_json,
+          materialized_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(graph_id, operator_id) DO UPDATE SET
+          snapshot_version = excluded.snapshot_version,
+          payload_json = excluded.payload_json,
+          materialized_at = excluded.materialized_at
+      `);
+      for (const operator of request.operators) {
+        insertOperator.run(
+          request.graphId,
+          operator.operatorId,
+          request.snapshotVersion,
+          encodeProjectionPayload(operator.payload, 'operator'),
+          materializedAt,
+        );
+      }
+
+      const readTerminal = this.db.prepare(`
+        SELECT event_time AS eventTime, payload_json AS payloadJson
+        FROM agent_graph_client_terminal_activity
+        WHERE graph_id = ? AND record_id = ?
+      `);
+      const insertTerminal = this.db.prepare(`
+        INSERT INTO agent_graph_client_terminal_activity(
+          graph_id,
+          record_id,
+          event_time,
+          payload_json
+        ) VALUES (?, ?, ?, ?)
+      `);
+      for (const terminal of request.terminalActivities) {
+        const payloadJson = encodeProjectionPayload(terminal.payload, 'terminal activity');
+        const existing = readTerminal.get(request.graphId, terminal.recordId) as
+          | AgentGraphClientTerminalActivityRow
+          | undefined;
+        if (existing) {
+          if (existing.eventTime !== terminal.eventTime || existing.payloadJson !== payloadJson) {
+            throw new SessionMetadataConflictError(
+              `Agent graph terminal activity ${terminal.recordId} changed after materialization`,
+            );
+          }
+          continue;
+        }
+        insertTerminal.run(request.graphId, terminal.recordId, terminal.eventTime, payloadJson);
+      }
+
+      return {
+        schemaVersion: request.schemaVersion,
+        graphId: request.graphId,
+        rootSessionId: request.rootSessionId,
+        snapshotVersion: request.snapshotVersion,
+        payload: structuredClone(request.snapshot),
+        materializedAt,
+      };
+    });
+  }
+
+  async readAgentGraphClientProjection(
+    graphId: string,
+  ): Promise<AgentGraphClientProjectionRecord | undefined> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    const row = this.db
+      .prepare(`
+        SELECT
+          schema_version AS schemaVersion,
+          graph_id AS graphId,
+          root_session_id AS rootSessionId,
+          snapshot_version AS snapshotVersion,
+          payload_json AS payloadJson,
+          materialized_at AS materializedAt
+        FROM agent_graph_client_projections
+        WHERE graph_id = ?
+      `)
+      .get(graphId) as AgentGraphClientProjectionRow | undefined;
+    return row ? decodeAgentGraphClientProjectionRow(row) : undefined;
+  }
+
+  async readAgentGraphClientOperatorProjection(
+    graphId: string,
+    operatorId: string,
+  ): Promise<AgentGraphClientOperatorProjectionRecord | undefined> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    assertGraphLookupIdentity(operatorId, 'operator id');
+    const row = this.db
+      .prepare(`
+        SELECT
+          graph_id AS graphId,
+          operator_id AS operatorId,
+          snapshot_version AS snapshotVersion,
+          payload_json AS payloadJson,
+          materialized_at AS materializedAt
+        FROM agent_graph_client_operator_projections
+        WHERE graph_id = ? AND operator_id = ?
+      `)
+      .get(graphId, operatorId) as AgentGraphClientOperatorProjectionRow | undefined;
+    return row ? decodeAgentGraphClientOperatorProjectionRow(row) : undefined;
+  }
+
+  async readAgentGraphClientProjectionWithOperator(
+    graphId: string,
+    operatorId: string,
+  ): Promise<AgentGraphClientProjectionWithOperator | undefined> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    assertGraphLookupIdentity(operatorId, 'operator id');
+    const row = this.db
+      .prepare(`
+        SELECT
+          graph.schema_version AS projectionSchemaVersion,
+          graph.graph_id AS projectionGraphId,
+          graph.root_session_id AS projectionRootSessionId,
+          graph.snapshot_version AS projectionSnapshotVersion,
+          graph.payload_json AS projectionPayloadJson,
+          graph.materialized_at AS projectionMaterializedAt,
+          operator.graph_id AS operatorGraphId,
+          operator.operator_id AS operatorId,
+          operator.snapshot_version AS operatorSnapshotVersion,
+          operator.payload_json AS operatorPayloadJson,
+          operator.materialized_at AS operatorMaterializedAt
+        FROM agent_graph_client_projections AS graph
+        LEFT JOIN agent_graph_client_operator_projections AS operator
+          ON operator.graph_id = graph.graph_id
+          AND operator.operator_id = ?
+        WHERE graph.graph_id = ?
+      `)
+      .get(operatorId, graphId) as AgentGraphClientProjectionWithOperatorRow | undefined;
+    if (!row) return undefined;
+    const projection = decodeAgentGraphClientProjectionRow({
+      schemaVersion: row.projectionSchemaVersion,
+      graphId: row.projectionGraphId,
+      rootSessionId: row.projectionRootSessionId,
+      snapshotVersion: row.projectionSnapshotVersion,
+      payloadJson: row.projectionPayloadJson,
+      materializedAt: row.projectionMaterializedAt,
+    });
+    if (row.operatorGraphId === null) return { projection };
+    return {
+      projection,
+      operator: decodeAgentGraphClientOperatorProjectionRow({
+        graphId: row.operatorGraphId,
+        operatorId: row.operatorId!,
+        snapshotVersion: row.operatorSnapshotVersion!,
+        payloadJson: row.operatorPayloadJson!,
+        materializedAt: row.operatorMaterializedAt!,
+      }),
+    };
+  }
+
+  async listAgentGraphClientTerminalActivities(
+    graphId: string,
+    input: {
+      limit: number;
+      before?: { eventTime: number; recordId: string };
+    },
+  ): Promise<AgentGraphClientTerminalActivityPage> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 256) {
+      throw new Error('Agent graph terminal activity limit must be between 1 and 256');
+    }
+    if (input.before) {
+      assertGraphEventTime(input.before.eventTime);
+      assertGraphLookupIdentity(input.before.recordId, 'terminal record id');
+      const cursor = this.db
+        .prepare(`
+          SELECT event_time AS eventTime
+          FROM agent_graph_client_terminal_activity
+          WHERE graph_id = ? AND record_id = ?
+        `)
+        .get(graphId, input.before.recordId) as { eventTime?: unknown } | undefined;
+      if (cursor?.eventTime !== input.before.eventTime) {
+        throw new Error('Agent graph terminal activity cursor is stale or invalid');
+      }
+    }
+    const rows = this.db
+      .prepare(`
+        SELECT
+          graph_id AS graphId,
+          record_id AS recordId,
+          event_time AS eventTime,
+          payload_json AS payloadJson
+        FROM agent_graph_client_terminal_activity
+        WHERE graph_id = ?
+          ${
+            input.before
+              ? `AND (
+                  event_time < ?
+                  OR (event_time = ? AND record_id < ?)
+                )`
+              : ''
+          }
+        ORDER BY event_time DESC, record_id DESC
+        LIMIT ?
+      `)
+      .all(
+        graphId,
+        ...(input.before
+          ? [input.before.eventTime, input.before.eventTime, input.before.recordId]
+          : []),
+        input.limit + 1,
+      ) as unknown as AgentGraphClientTerminalActivityRowWithIdentity[];
+    return {
+      records: rows.slice(0, input.limit).map((row) => ({
+        graphId: row.graphId,
+        recordId: row.recordId,
+        eventTime: row.eventTime,
+        payload: JSON.parse(row.payloadJson) as unknown,
+      })),
+      hasMore: rows.length > input.limit,
+    };
+  }
+
+  async listAgentGraphClientClaimAdmissions(
+    graphId: string,
+  ): Promise<AgentGraphClientClaimAdmission[]> {
+    this.assertOpen();
+    assertGraphLookupIdentity(graphId, 'graph id');
+    const rows = this.db
+      .prepare(`
+        SELECT
+          intent_id AS intentId,
+          admission_status AS state
+        FROM agent_graph_intent_claims
+        WHERE graph_id = ?
+        ORDER BY claimed_at ASC, intent_id ASC
+      `)
+      .all(graphId) as unknown as AgentGraphClientClaimAdmission[];
+    return rows.map((row) => {
+      if (row.state !== 'claimed' && row.state !== 'executing' && row.state !== 'cancelled') {
+        throw new Error(`Invalid agent graph admission state for ${row.intentId}`);
+      }
+      return { intentId: row.intentId, state: row.state };
+    });
+  }
+
   async update(
     sessionId: string,
     patch: Partial<SessionHeader>,
@@ -557,6 +1518,18 @@ export class SqliteSessionMetadataStore {
     this.assertOpen();
     assertSafeSessionId(sessionId);
     return this.transaction(() => {
+      const graphOwner = this.db
+        .prepare(`
+          SELECT graph_id AS graphId, work_id AS workId
+          FROM agent_graph_operator_provisions
+          WHERE target_session_id = ?
+        `)
+        .get(sessionId) as { graphId: string; workId: string } | undefined;
+      if (graphOwner) {
+        throw new SessionMetadataConflictError(
+          `Cannot remove graph operator Session ${sessionId}; owned by ${graphOwner.graphId}/${graphOwner.workId}`,
+        );
+      }
       const deleted =
         this.db.prepare('DELETE FROM session_metadata WHERE session_id = ?').run(sessionId)
           .changes === 1;
@@ -787,8 +1760,8 @@ export class SqliteSessionMetadataStore {
         identity.parent.parentSessionId,
         identity.parent.spawnedBy.parentRunId,
         identity.parent.spawnedBy.toolCallId,
-        identity.parent.swarm?.swarmId ?? '',
-        identity.parent.swarm?.itemId ?? '',
+        subagentSpawnScope(identity.parent).scopeId,
+        subagentSpawnScope(identity.parent).itemId,
         identity.spawn.requestFingerprint,
         header.id,
         identity.spawn.initialTurnId,
@@ -835,9 +1808,57 @@ export class SqliteSessionMetadataStore {
         parent.parentSessionId,
         parent.spawnedBy.parentRunId,
         parent.spawnedBy.toolCallId,
-        parent.swarm?.swarmId ?? '',
-        parent.swarm?.itemId ?? '',
+        subagentSpawnScope(parent).scopeId,
+        subagentSpawnScope(parent).itemId,
       ) as SubagentSpawnClaim | undefined;
+  }
+
+  private readAgentGraphOperatorProvisionSync(
+    graphId: string,
+    workId: string,
+  ): AgentGraphOperatorProvision | undefined {
+    const row = this.db
+      .prepare(`
+        SELECT payload_json AS payloadJson
+        FROM agent_graph_operator_provisions
+        WHERE graph_id = ? AND work_id = ?
+      `)
+      .get(graphId, workId) as AgentGraphOperatorProvisionRow | undefined;
+    return row
+      ? decodeAgentGraphOperatorProvision(JSON.parse(row.payloadJson) as unknown)
+      : undefined;
+  }
+
+  private matchAgentGraphOperatorProvision(
+    existing: AgentGraphOperatorProvision,
+    request: AgentGraphOperatorProvisionRequest,
+  ): IdempotentAgentGraphOperatorMetadataResult {
+    if (existing.provisionFingerprint !== request.provisionFingerprint) {
+      throw new SessionMetadataConflictError(
+        'Graph operator provision identity was reused for different work',
+      );
+    }
+    const record = this.readRecordSync(existing.targetSessionId);
+    if (!record) {
+      throw new SessionMetadataConflictError(
+        `Graph operator provision belongs to deleted session: ${existing.targetSessionId}`,
+      );
+    }
+    if (
+      record.header.subagentParent?.graph?.graphId !== existing.graphId ||
+      record.header.subagentParent.graph.workId !== existing.workId ||
+      record.header.subagentParent.graph.operatorId !== existing.operatorId
+    ) {
+      throw new SessionMetadataConflictError(
+        'Graph operator provision disagrees with live session metadata',
+      );
+    }
+    this.assertMatchingSubagentSpawnClaim(record.header);
+    return {
+      record,
+      provision: decodeAgentGraphOperatorProvision(existing),
+      created: false,
+    };
   }
 
   private readAgentGraphIntentClaimSync(
@@ -863,6 +1884,88 @@ export class SqliteSessionMetadataStore {
       `)
       .get(graphId, intentId) as AgentGraphIntentClaim | undefined;
     return row ? decodeAgentGraphIntentClaim(row) : undefined;
+  }
+
+  private readAgentGraphIntentAdmissionStateSync(
+    graphId: string,
+    intentId: string,
+  ): AgentGraphIntentAdmissionState {
+    const row = this.db
+      .prepare(`
+        SELECT admission_status AS admissionState
+        FROM agent_graph_intent_claims
+        WHERE graph_id = ? AND intent_id = ?
+      `)
+      .get(graphId, intentId) as { admissionState?: unknown } | undefined;
+    if (
+      row?.admissionState !== 'claimed' &&
+      row?.admissionState !== 'executing' &&
+      row?.admissionState !== 'cancelled'
+    ) {
+      throw new AgentGraphIntentClaimConflictError(
+        `Agent graph intent ${graphId}/${intentId} has no durable admission`,
+      );
+    }
+    return row.admissionState;
+  }
+
+  private claimAgentGraphIntentSync(
+    request: AgentGraphIntentClaimRequest,
+  ): AgentGraphIntentClaimResult {
+    const claimedAt = this.now();
+    const inserted = this.db
+      .prepare(`
+        INSERT OR IGNORE INTO agent_graph_intent_claims(
+          claim_id,
+          schema_version,
+          graph_id,
+          intent_id,
+          intent_fingerprint,
+          readiness_context_fingerprint,
+          target_operator_id,
+          target_session_id,
+          target_turn_id,
+          target_run_id,
+          claimed_at,
+          admission_status,
+          admission_updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?)
+      `)
+      .run(
+        request.claimId,
+        request.schemaVersion,
+        request.graphId,
+        request.intentId,
+        request.intentFingerprint,
+        request.readinessContextFingerprint,
+        request.targetOperatorId,
+        request.targetSessionId,
+        request.targetTurnId,
+        request.targetRunId,
+        claimedAt,
+        claimedAt,
+      );
+    if (inserted.changes === 1) {
+      this.options.failpoint?.('after_agent_graph_intent_claim_write');
+    }
+    const claim = this.readAgentGraphIntentClaimSync(request.graphId, request.intentId);
+    if (!claim) {
+      throw new AgentGraphIntentClaimConflictError(
+        'Agent graph intent claim identity collides with another claim',
+      );
+    }
+    if (
+      claim.claimId !== request.claimId ||
+      claim.intentFingerprint !== request.intentFingerprint ||
+      claim.readinessContextFingerprint !== request.readinessContextFingerprint ||
+      claim.targetOperatorId !== request.targetOperatorId ||
+      claim.targetSessionId !== request.targetSessionId
+    ) {
+      throw new AgentGraphIntentClaimConflictError(
+        'Agent graph intent identity was reused for different work',
+      );
+    }
+    return { claim, created: inserted.changes === 1 };
   }
 
   private readAgentGraphScheduleUpdateByIdSync(
@@ -921,6 +2024,10 @@ export class SqliteSessionMetadataStore {
   }
 
   private nextAgentGraphScheduleRevision(graphId: string): number {
+    return this.currentAgentGraphScheduleRevision(graphId) + 1;
+  }
+
+  private currentAgentGraphScheduleRevision(graphId: string): number {
     const row = this.db
       .prepare(`
         SELECT COALESCE(MAX(revision), 0) AS revision
@@ -932,7 +2039,74 @@ export class SqliteSessionMetadataStore {
     if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) {
       throw new Error(`Invalid agent graph schedule revision for ${graphId}`);
     }
-    return revision + 1;
+    return revision;
+  }
+
+  private readAgentGraphSupervisorWakeSync(
+    graphId: string,
+    wakeId: string,
+  ): AgentGraphSupervisorWakeRecord | undefined {
+    const row = this.db
+      .prepare(`
+        SELECT
+          schema_version AS schemaVersion,
+          graph_id AS graphId,
+          wake_id AS wakeId,
+          snapshot_version AS snapshotVersion,
+          root_session_id AS rootSessionId,
+          status,
+          attempt_count AS attemptCount,
+          current_attempt_id AS currentAttemptId,
+          current_turn_id AS currentTurnId,
+          failure_reason AS failureReason,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM agent_graph_supervisor_wakes
+        WHERE graph_id = ? AND wake_id = ?
+      `)
+      .get(graphId, wakeId) as AgentGraphSupervisorWakeRow | undefined;
+    return row ? decodeAgentGraphSupervisorWakeRow(row) : undefined;
+  }
+
+  private requireAgentGraphSupervisorWakeSync(
+    graphId: string,
+    wakeId: string,
+  ): AgentGraphSupervisorWakeRecord {
+    const wake = this.readAgentGraphSupervisorWakeSync(graphId, wakeId);
+    if (!wake) {
+      throw new SessionMetadataConflictError(
+        `Agent graph supervisor wake ${graphId}/${wakeId} was not claimed`,
+      );
+    }
+    return wake;
+  }
+
+  private requireAgentGraphSupervisorWakeAttemptSync(
+    graphId: string,
+    wakeId: string,
+    attemptId: string,
+  ): AgentGraphSupervisorWakeAttemptRecord {
+    const row = this.db
+      .prepare(`
+        SELECT
+          graph_id AS graphId,
+          wake_id AS wakeId,
+          attempt_id AS attemptId,
+          turn_id AS turnId,
+          status,
+          failure_reason AS failureReason,
+          started_at AS startedAt,
+          completed_at AS completedAt
+        FROM agent_graph_supervisor_wake_attempts
+        WHERE graph_id = ? AND wake_id = ? AND attempt_id = ?
+      `)
+      .get(graphId, wakeId, attemptId) as AgentGraphSupervisorWakeAttemptRow | undefined;
+    if (!row) {
+      throw new SessionMetadataConflictError(
+        `Agent graph supervisor wake attempt ${attemptId} was not found`,
+      );
+    }
+    return decodeAgentGraphSupervisorWakeAttemptRow(row);
   }
 
   private hasTombstone(sessionId: string): boolean {
@@ -945,6 +2119,22 @@ export class SqliteSessionMetadataStore {
 
   private transaction<T>(operation: () => T): T {
     this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = operation();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch {
+        // Preserve the original storage or protocol failure.
+      }
+      throw error;
+    }
+  }
+
+  private readTransaction<T>(operation: () => T): T {
+    this.db.exec('BEGIN');
     try {
       const result = operation();
       this.db.exec('COMMIT');
@@ -998,10 +2188,194 @@ interface AgentGraphScheduleUpdateRow {
   payloadJson: string;
 }
 
+interface AgentGraphOperatorProvisionRow {
+  payloadJson: string;
+}
+
+interface AgentGraphIntentAdmissionSnapshotRow {
+  graphId: string;
+  intentId: string;
+  state: string;
+  updatedAt: number;
+  cancellationReason: string | null;
+}
+
+interface AgentGraphClientProjectionRow {
+  schemaVersion: number;
+  graphId: string;
+  rootSessionId: string;
+  snapshotVersion: string;
+  payloadJson: string;
+  materializedAt: number;
+}
+
+interface AgentGraphClientOperatorProjectionRow {
+  graphId: string;
+  operatorId: string;
+  snapshotVersion: string;
+  payloadJson: string;
+  materializedAt: number;
+}
+
+interface AgentGraphClientProjectionWithOperatorRow {
+  projectionSchemaVersion: number;
+  projectionGraphId: string;
+  projectionRootSessionId: string;
+  projectionSnapshotVersion: string;
+  projectionPayloadJson: string;
+  projectionMaterializedAt: number;
+  operatorGraphId: string | null;
+  operatorId: string | null;
+  operatorSnapshotVersion: string | null;
+  operatorPayloadJson: string | null;
+  operatorMaterializedAt: number | null;
+}
+
+interface AgentGraphClientTerminalActivityRow {
+  eventTime: number;
+  payloadJson: string;
+}
+
+interface AgentGraphClientAppliedRecordRow {
+  eventTime: number;
+}
+
+interface AgentGraphSupervisorWakeRow {
+  schemaVersion: number;
+  graphId: string;
+  wakeId: string;
+  snapshotVersion: string;
+  rootSessionId: string;
+  status: string;
+  attemptCount: number;
+  currentAttemptId: string | null;
+  currentTurnId: string | null;
+  failureReason: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface AgentGraphSupervisorWakeAttemptRow {
+  graphId: string;
+  wakeId: string;
+  attemptId: string;
+  turnId: string;
+  status: string;
+  failureReason: string | null;
+  startedAt: number;
+  completedAt: number | null;
+}
+
+interface AgentGraphClientTerminalActivityRowWithIdentity
+  extends AgentGraphClientTerminalActivityRow {
+  graphId: string;
+  recordId: string;
+}
+
+function decodeAgentGraphIntentAdmissionSnapshotRow(
+  row: AgentGraphIntentAdmissionSnapshotRow,
+): AgentGraphIntentAdmissionSnapshot {
+  assertGraphLookupIdentity(row.graphId, 'graph id');
+  assertGraphIntentId(row.intentId);
+  if (row.state !== 'claimed' && row.state !== 'executing' && row.state !== 'cancelled') {
+    throw new Error(`Invalid agent graph admission state for ${row.intentId}`);
+  }
+  if (!Number.isSafeInteger(row.updatedAt) || row.updatedAt < 0) {
+    throw new Error(`Invalid agent graph admission timestamp for ${row.intentId}`);
+  }
+  return {
+    graphId: row.graphId,
+    intentId: row.intentId,
+    state: row.state,
+    updatedAt: row.updatedAt,
+    ...(row.cancellationReason ? { cancellationReason: row.cancellationReason } : {}),
+  };
+}
+
 function decodeAgentGraphScheduleUpdateRow(
   row: AgentGraphScheduleUpdateRow,
 ): AgentGraphScheduleUpdate {
   return decodeAgentGraphScheduleUpdate(JSON.parse(row.payloadJson) as unknown);
+}
+
+function decodeAgentGraphSupervisorWakeRow(
+  row: AgentGraphSupervisorWakeRow,
+): AgentGraphSupervisorWakeRecord {
+  if (
+    row.schemaVersion !== AGENT_GRAPH_SUPERVISOR_WAKE_SCHEMA_VERSION ||
+    !['pending', 'running', 'waiting_permission', 'delivered', 'retryable_failed'].includes(
+      row.status,
+    ) ||
+    !Number.isSafeInteger(row.attemptCount) ||
+    row.attemptCount < 0 ||
+    !Number.isSafeInteger(row.createdAt) ||
+    row.createdAt < 0 ||
+    !Number.isSafeInteger(row.updatedAt) ||
+    row.updatedAt < 0
+  ) {
+    throw new Error(`Invalid agent graph supervisor wake ${row.graphId}/${row.wakeId}`);
+  }
+  assertGraphLookupIdentity(row.graphId, 'graph id');
+  assertGraphLookupIdentity(row.wakeId, 'supervisor wake id');
+  assertGraphLookupIdentity(row.snapshotVersion, 'snapshot version');
+  assertSafeSessionId(row.rootSessionId);
+  return {
+    schemaVersion: row.schemaVersion,
+    graphId: row.graphId,
+    wakeId: row.wakeId,
+    snapshotVersion: row.snapshotVersion,
+    rootSessionId: row.rootSessionId,
+    status: row.status as AgentGraphSupervisorWakeRecord['status'],
+    attemptCount: row.attemptCount,
+    ...(row.currentAttemptId ? { currentAttemptId: row.currentAttemptId } : {}),
+    ...(row.currentTurnId ? { currentTurnId: row.currentTurnId } : {}),
+    ...(row.failureReason ? { failureReason: row.failureReason } : {}),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function decodeAgentGraphSupervisorWakeAttemptRow(
+  row: AgentGraphSupervisorWakeAttemptRow,
+): AgentGraphSupervisorWakeAttemptRecord {
+  if (
+    !['running', 'waiting_permission', 'delivered', 'retryable_failed'].includes(row.status) ||
+    !Number.isSafeInteger(row.startedAt) ||
+    row.startedAt < 0 ||
+    (row.completedAt !== null && (!Number.isSafeInteger(row.completedAt) || row.completedAt < 0))
+  ) {
+    throw new Error(`Invalid agent graph supervisor wake attempt ${row.attemptId}`);
+  }
+  assertGraphLookupIdentity(row.graphId, 'graph id');
+  assertGraphLookupIdentity(row.wakeId, 'supervisor wake id');
+  assertGraphLookupIdentity(row.attemptId, 'supervisor wake attempt id');
+  assertGraphLookupIdentity(row.turnId, 'supervisor wake turn id');
+  return {
+    graphId: row.graphId,
+    wakeId: row.wakeId,
+    attemptId: row.attemptId,
+    turnId: row.turnId,
+    status: row.status as AgentGraphSupervisorWakeAttemptRecord['status'],
+    ...(row.failureReason ? { failureReason: row.failureReason } : {}),
+    startedAt: row.startedAt,
+    ...(row.completedAt !== null ? { completedAt: row.completedAt } : {}),
+  };
+}
+
+function subagentSpawnScope(parent: SubagentSessionParent): {
+  scopeId: string;
+  itemId: string;
+} {
+  if (parent.graph) {
+    return {
+      scopeId: `graph:${parent.graph.graphId}`,
+      itemId: parent.graph.workId,
+    };
+  }
+  return {
+    scopeId: parent.swarm?.swarmId ?? '',
+    itemId: parent.swarm?.itemId ?? '',
+  };
 }
 
 function agentGraphScheduleUpdateRequest(
@@ -1040,6 +2414,155 @@ function assertGraphLookupIdentity(value: string, name: string): void {
     /[\u0000-\u001f\u007f]/.test(value)
   ) {
     throw new Error(`Invalid agent graph ${name}`);
+  }
+}
+
+function assertAgentGraphSupervisorWakeClaim(request: ClaimAgentGraphSupervisorWakeRequest): void {
+  if (request.schemaVersion !== AGENT_GRAPH_SUPERVISOR_WAKE_SCHEMA_VERSION) {
+    throw new Error('Invalid agent graph supervisor wake schema');
+  }
+  assertGraphLookupIdentity(request.graphId, 'graph id');
+  assertGraphLookupIdentity(request.wakeId, 'supervisor wake id');
+  assertGraphLookupIdentity(request.snapshotVersion, 'snapshot version');
+  assertSafeSessionId(request.rootSessionId);
+}
+
+function assertAgentGraphSupervisorWakeAttempt(
+  request: BeginAgentGraphSupervisorWakeAttemptRequest,
+): void {
+  assertGraphLookupIdentity(request.graphId, 'graph id');
+  assertGraphLookupIdentity(request.wakeId, 'supervisor wake id');
+  assertGraphLookupIdentity(request.attemptId, 'supervisor wake attempt id');
+  assertGraphLookupIdentity(request.turnId, 'supervisor wake turn id');
+}
+
+function assertAgentGraphSupervisorWakeCompletion(
+  request: CompleteAgentGraphSupervisorWakeAttemptRequest,
+): void {
+  assertGraphLookupIdentity(request.graphId, 'graph id');
+  assertGraphLookupIdentity(request.wakeId, 'supervisor wake id');
+  assertGraphLookupIdentity(request.attemptId, 'supervisor wake attempt id');
+  if (
+    request.status !== 'waiting_permission' &&
+    request.status !== 'delivered' &&
+    request.status !== 'retryable_failed'
+  ) {
+    throw new Error('Invalid agent graph supervisor wake completion status');
+  }
+  if (
+    request.status === 'retryable_failed' &&
+    (!request.failureReason?.trim() || request.failureReason.length > 4_000)
+  ) {
+    throw new Error('Agent graph supervisor wake failure reason must be non-empty and bounded');
+  }
+}
+
+function assertAgentGraphClientProjectionRequest(
+  request: CommitAgentGraphClientProjectionRequest,
+): void {
+  if (
+    request.schemaVersion !== AGENT_GRAPH_CLIENT_PROJECTION_SCHEMA_VERSION ||
+    (request.expectedSnapshotVersion !== null &&
+      typeof request.expectedSnapshotVersion !== 'string') ||
+    typeof request.replaceOperators !== 'boolean' ||
+    !Array.isArray(request.operators) ||
+    !Array.isArray(request.terminalActivities) ||
+    !Array.isArray(request.activityRecords)
+  ) {
+    throw new Error('Invalid agent graph client projection request');
+  }
+  assertGraphLookupIdentity(request.graphId, 'graph id');
+  assertSafeSessionId(request.rootSessionId);
+  if (request.expectedSnapshotVersion !== null) {
+    assertGraphLookupIdentity(request.expectedSnapshotVersion, 'expected snapshot version');
+  }
+  assertGraphLookupIdentity(request.snapshotVersion, 'snapshot version');
+  const operatorIds = new Set<string>();
+  for (const operator of request.operators) {
+    assertGraphLookupIdentity(operator.operatorId, 'operator id');
+    if (operatorIds.has(operator.operatorId)) {
+      throw new Error(`Duplicate agent graph client operator ${operator.operatorId}`);
+    }
+    operatorIds.add(operator.operatorId);
+  }
+  const terminalIds = new Set<string>();
+  for (const terminal of request.terminalActivities) {
+    assertGraphLookupIdentity(terminal.recordId, 'terminal record id');
+    assertGraphEventTime(terminal.eventTime);
+    if (terminalIds.has(terminal.recordId)) {
+      throw new Error(`Duplicate agent graph terminal activity ${terminal.recordId}`);
+    }
+    terminalIds.add(terminal.recordId);
+  }
+  const activityIds = new Set<string>();
+  for (const record of request.activityRecords) {
+    assertGraphLookupIdentity(record.recordId, 'activity record id');
+    assertGraphEventTime(record.eventTime);
+    if (activityIds.has(record.recordId)) {
+      throw new Error(`Duplicate agent graph activity ${record.recordId}`);
+    }
+    activityIds.add(record.recordId);
+  }
+  if (request.incrementalRecordId !== undefined) {
+    assertGraphLookupIdentity(request.incrementalRecordId, 'incremental record id');
+    if (request.expectedSnapshotVersion === null || !activityIds.has(request.incrementalRecordId)) {
+      throw new Error('Invalid incremental agent graph projection record');
+    }
+  }
+}
+
+function encodeProjectionPayload(payload: unknown, name: string): string {
+  const encoded = JSON.stringify(payload);
+  if (encoded === undefined) {
+    throw new Error(`Invalid agent graph ${name} payload`);
+  }
+  return encoded;
+}
+
+function decodeAgentGraphClientProjectionRow(
+  row: AgentGraphClientProjectionRow,
+): AgentGraphClientProjectionRecord {
+  if (
+    row.schemaVersion !== AGENT_GRAPH_CLIENT_PROJECTION_SCHEMA_VERSION ||
+    !Number.isSafeInteger(row.materializedAt) ||
+    row.materializedAt < 0
+  ) {
+    throw new Error(`Invalid agent graph client projection for ${row.graphId}`);
+  }
+  assertGraphLookupIdentity(row.graphId, 'graph id');
+  assertSafeSessionId(row.rootSessionId);
+  assertGraphLookupIdentity(row.snapshotVersion, 'snapshot version');
+  return {
+    schemaVersion: row.schemaVersion,
+    graphId: row.graphId,
+    rootSessionId: row.rootSessionId,
+    snapshotVersion: row.snapshotVersion,
+    payload: JSON.parse(row.payloadJson) as unknown,
+    materializedAt: row.materializedAt,
+  };
+}
+
+function decodeAgentGraphClientOperatorProjectionRow(
+  row: AgentGraphClientOperatorProjectionRow,
+): AgentGraphClientOperatorProjectionRecord {
+  if (!Number.isSafeInteger(row.materializedAt) || row.materializedAt < 0) {
+    throw new Error(`Invalid agent graph operator projection for ${row.operatorId}`);
+  }
+  assertGraphLookupIdentity(row.graphId, 'graph id');
+  assertGraphLookupIdentity(row.operatorId, 'operator id');
+  assertGraphLookupIdentity(row.snapshotVersion, 'snapshot version');
+  return {
+    graphId: row.graphId,
+    operatorId: row.operatorId,
+    snapshotVersion: row.snapshotVersion,
+    payload: JSON.parse(row.payloadJson) as unknown,
+    materializedAt: row.materializedAt,
+  };
+}
+
+function assertGraphEventTime(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('Invalid agent graph terminal activity event time');
   }
 }
 
