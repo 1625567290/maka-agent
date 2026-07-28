@@ -163,6 +163,8 @@ export interface SessionHeader {
   id: string;
   workspaceRoot: string;
   cwd: string;
+  /** Stable project-catalog association. Null means the user explicitly chose no project. */
+  projectId?: string | null;
 
   // Lifecycle timestamps
   createdAt: number;
@@ -228,6 +230,7 @@ export type BackendKind = 'ai-sdk' | 'fake' | 'pi-agent';
 export interface SessionSummary {
   id: string;
   cwd?: string;
+  projectId?: string | null;
   name: string;
   isFlagged: boolean;
   isArchived: boolean;
@@ -529,6 +532,7 @@ function isSubagentCategoryPolicy(
 
 export type SessionChangedReason =
   | 'created'
+  | 'migrated'
   | 'updated'
   | 'archived'
   | 'deleted'
