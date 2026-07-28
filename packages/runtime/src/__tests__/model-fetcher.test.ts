@@ -11,6 +11,140 @@ after(async () => {
 });
 
 describe('fetchProviderModels', () => {
+  test('Cloudflare Workers AI discovers text-generation models through its native paginated API', async () => {
+    const requests: Array<{ url: string; authorization: string | undefined }> = [];
+    const server = await startJsonServer((request, response) => {
+      requests.push({ url: request.url ?? '', authorization: request.headers.authorization });
+      const page = new URL(request.url ?? '', 'http://test.local').searchParams.get('page');
+      const result =
+        page === '3'
+          ? []
+          : page === '2'
+            ? [{ name: '@cf/qwen/qwen-next' }]
+            : Array.from({ length: 50 }, (_, index) => ({
+                name: `@cf/example/text-model-${index}`,
+              }));
+      respondJson(response, 200, {
+        success: true,
+        result,
+        result_info: {
+          page: Number(page),
+          per_page: 50,
+          count: result.length,
+          total_count: 51,
+        },
+      });
+    });
+
+    const models = await fetchProviderModels(
+      {
+        slug: 'cloudflare-workers-ai',
+        name: 'Cloudflare Workers AI',
+        providerType: 'cloudflare-workers-ai',
+        baseUrl: `${server.url}/client/v4/accounts/account-123/ai/v1`,
+        defaultModel: '@cf/meta/llama-next',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      'cloudflare-api-token',
+    );
+
+    assert.equal(models.length, 51);
+    assert.equal(models[0]?.id, '@cf/example/text-model-0');
+    assert.equal(models[50]?.id, '@cf/qwen/qwen-next');
+    assert.deepEqual(requests, [
+      {
+        url: '/client/v4/accounts/account-123/ai/models/search?page=1&per_page=50&task=Text+Generation',
+        authorization: 'Bearer cloudflare-api-token',
+      },
+      {
+        url: '/client/v4/accounts/account-123/ai/models/search?page=2&per_page=50&task=Text+Generation',
+        authorization: 'Bearer cloudflare-api-token',
+      },
+      {
+        url: '/client/v4/accounts/account-123/ai/models/search?page=3&per_page=50&task=Text+Generation',
+        authorization: 'Bearer cloudflare-api-token',
+      },
+    ]);
+  });
+
+  test('Cloudflare Workers AI accepts exactly 2,048 models and rejects the first excess item', async () => {
+    for (const modelCount of [2_048, 2_049]) {
+      let requestCount = 0;
+      const server = await startJsonServer((request, response) => {
+        requestCount += 1;
+        const page = Number(
+          new URL(request.url ?? '', 'http://test.local').searchParams.get('page'),
+        );
+        const pageStart = (page - 1) * 50;
+        const result = Array.from(
+          { length: Math.max(0, Math.min(50, modelCount - pageStart)) },
+          (_, index) => ({ name: `@cf/example/model-${pageStart + index}` }),
+        );
+        respondJson(response, 200, { success: true, result });
+      });
+
+      const request = fetchProviderModels(
+        {
+          slug: 'cloudflare-workers-ai',
+          name: 'Cloudflare Workers AI',
+          providerType: 'cloudflare-workers-ai',
+          baseUrl: `${server.url}/client/v4/accounts/account-123/ai/v1`,
+          defaultModel: '@cf/example/default',
+          enabled: true,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        'cloudflare-api-token',
+      );
+      if (modelCount === 2_048) {
+        assert.equal((await request).length, 2_048);
+        assert.equal(requestCount, 42);
+      } else {
+        await assert.rejects(request, /Failed to fetch provider models/);
+        assert.equal(requestCount, 41);
+      }
+    }
+  });
+
+  test('Cloudflare Workers AI bounds pagination before an oversized catalog can be persisted', async () => {
+    let requestCount = 0;
+    const server = await startJsonServer((_request, response) => {
+      requestCount += 1;
+      respondJson(response, 200, {
+        success: true,
+        result: Array.from({ length: 50 }, (_, index) => ({
+          name: `@cf/example/page-${requestCount}-model-${index}`,
+        })),
+        result_info: {
+          page: requestCount,
+          per_page: 50,
+          count: 50,
+          total_count: 10_000,
+        },
+      });
+    });
+
+    await assert.rejects(
+      fetchProviderModels(
+        {
+          slug: 'cloudflare-workers-ai',
+          name: 'Cloudflare Workers AI',
+          providerType: 'cloudflare-workers-ai',
+          baseUrl: `${server.url}/client/v4/accounts/account-123/ai/v1`,
+          defaultModel: '@cf/example/default',
+          enabled: true,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        'cloudflare-api-token',
+      ),
+      /Failed to fetch provider models/,
+    );
+    assert.equal(requestCount, 41);
+  });
+
   test('OpenCode Zen and Go discover exact account model ids with their shared API-key auth shape', async () => {
     const requests: Array<{ url: string; authorization: string | undefined }> = [];
     const server = await startJsonServer((request, response) => {
@@ -623,7 +757,7 @@ describe('fetchProviderModels', () => {
     let capturedAccountId: string | string[] | undefined;
     const server = await startJsonServer((request, response) => {
       capturedAccountId = request.headers['chatgpt-account-id'];
-      respondJson(response, 200, { models: [] });
+      respondJson(response, 200, { models: [{ slug: 'gpt-5.6-sol' }] });
     });
     await fetchProviderModels(
       {
@@ -663,9 +797,30 @@ describe('fetchProviderModels', () => {
     );
   });
 
-  test('successful empty provider responses stay fetched-empty instead of falling back', async () => {
+  test('normalization leaves empty-catalog policy to the caller that owns persistence', async () => {
     const server = await startJsonServer((_request, response) => {
       respondJson(response, 200, { data: [] });
+    });
+
+    assert.deepEqual(
+      await fetchProviderModels({ ...zaiConnection(), baseUrl: server.url }, 'zai-live-secret'),
+      [],
+    );
+  });
+
+  test('discovery trims model IDs, drops malformed entries, and deduplicates before persistence', async () => {
+    const server = await startJsonServer((_request, response) => {
+      respondJson(response, 200, {
+        data: [
+          { id: ' model-a ' },
+          { id: 'model-a' },
+          { id: '' },
+          { id: 42 },
+          { id: 'bad\nmodel' },
+          { id: 'x'.repeat(513) },
+          { id: 'model-b', name: 'Model B' },
+        ],
+      });
     });
 
     const models = await fetchProviderModels(
@@ -673,7 +828,7 @@ describe('fetchProviderModels', () => {
       'zai-live-secret',
     );
 
-    assert.deepEqual(models, []);
+    assert.deepEqual(models, [{ id: 'model-a' }, { id: 'model-b', displayName: 'Model B' }]);
   });
 });
 

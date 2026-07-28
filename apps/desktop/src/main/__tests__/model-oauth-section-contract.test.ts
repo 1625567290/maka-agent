@@ -296,6 +296,11 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
       /connections:fetchModels[\s\S]*generalizedErrorMessageChinese\(error,\s*'拉取模型列表失败'\)/,
       'main-process fetchModels errors must be localized before crossing IPC to renderer toasts',
     );
+    assert.match(
+      main,
+      /error instanceof ConnectionModelDiscoveryPreconditionError[\s\S]*throw error/,
+      'safe discovery precondition copy must survive IPC error generalization',
+    );
     assert.doesNotMatch(
       main,
       /No OAuth login stored for this connection|No API key set for this connection|Failed to fetch provider models/,
@@ -316,10 +321,54 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     assert.match(src, /\.\.\.\(normalizedApiKey \? \{ apiKey: normalizedApiKey \} : \{\}\)/);
     assert.match(
       src,
-      /defaults\.category === 'local'[\s\S]*props\.bridge\.fetchModels\(connection\.slug\)[\s\S]*props\.onCreated\(connection\.slug, modelDiscoveryError\)/,
-      'new local-provider connections must immediately discover the daemon model catalog',
+      /const supportsRemoteDiscovery = providerSupportsModelDiscovery\(props\.providerType\);[\s\S]*if \(supportsRemoteDiscovery\) \{[\s\S]*props\.bridge\.fetchModels\(connection\.slug\)[\s\S]*props\.onCreated\(connection\.slug, modelDiscoveryError\)/,
+      'new connections with a discovery strategy must fetch the current catalog immediately',
     );
     assert.doesNotMatch(src, /ProviderPageHeader|providerInlineEditor/, 'creation must not retain an in-pane child editor');
+  });
+
+  it('refreshes discoverable providers after credential or endpoint changes', async () => {
+    const detail = await readFile(
+      resolve(
+        REPO_ROOT,
+        'apps',
+        'desktop',
+        'src',
+        'renderer',
+        'settings',
+        'use-connection-detail.ts',
+      ),
+      'utf8',
+    );
+
+    assert.match(
+      detail,
+      /const supportsRemoteDiscovery = providerSupportsModelDiscovery\(connection\.providerType\);/,
+      'connection detail must derive refresh support from the provider discovery contract',
+    );
+    assert.match(
+      detail,
+      /if \([\s\S]*supportsRemoteDiscovery[\s\S]*&&[\s\S]*\(wroteNewKey \|\| hasBaseUrlChange \|\| models\.length === 0\)[\s\S]*\) \{[\s\S]*refreshModels\(\{ silent: true \}\)/,
+      'saving a new credential or endpoint must refresh the remote model catalog',
+    );
+
+    const component = await readFile(
+      resolve(
+        REPO_ROOT,
+        'apps',
+        'desktop',
+        'src',
+        'renderer',
+        'settings',
+        'provider-connection-detail.tsx',
+      ),
+      'utf8',
+    );
+    assert.match(
+      component,
+      /\{supportsRemoteDiscovery && \([\s\S]*onClick=\{\(\) => void refreshModels\(\)\}[\s\S]*\)\}/,
+      'fallback-only providers must not render a model-refresh action',
+    );
   });
 
   it('OAuth login uses the same centered connection dialog as API providers', async () => {

@@ -1227,6 +1227,7 @@ export {
   normalizeConnectionBaseUrl,
   normalizeProviderType,
   persistedBaseUrl,
+  providerSupportsModelDiscovery,
   validateConnectionBaseUrl,
   validateSlug,
 } from './llm-connections.js';

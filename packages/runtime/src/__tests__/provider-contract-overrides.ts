@@ -69,6 +69,11 @@ export const PROVIDER_CONTRACT_OVERRIDE_BINDINGS: readonly ProviderContractOverr
     run: runCohereDiscovery,
   },
   {
+    keys: ['cloudflare-workers-ai:discovery'],
+    title: 'Cloudflare Workers AI discovers text-generation models through its native catalog',
+    run: runCloudflareDiscovery,
+  },
+  {
     keys: ['zenmux:reasoning-replay'],
     title: 'ZenMux replays signed reasoning details in the streamed runtime tool loop',
     run: runZenMuxSignedReasoningReplay,
@@ -79,6 +84,41 @@ export const PROVIDER_CONTRACT_OVERRIDE_BINDINGS: readonly ProviderContractOverr
     run: runCustomOpenAIResponsesRelayWire,
   },
 ];
+
+async function runCloudflareDiscovery(): Promise<void> {
+  const server = await startJsonServer((request, response) => {
+    assert.equal(request.method, 'GET');
+    const page = new URL(request.url ?? '', 'http://test.local').searchParams.get('page');
+    assert.equal(request.headers.authorization, 'Bearer cloudflare-test-token');
+    respondJson(response, 200, {
+      success: true,
+      result:
+        page === '1'
+          ? [
+              {
+                name: '@cf/meta/llama-text',
+                task: { id: 'text-generation', name: 'Text Generation' },
+              },
+            ]
+          : [],
+      result_info: { page: Number(page), per_page: 50 },
+    });
+  });
+  const connection: LlmConnection = {
+    slug: 'cloudflare-workers-ai',
+    name: 'Cloudflare Workers AI',
+    providerType: 'cloudflare-workers-ai',
+    baseUrl: `${server.url}/client/v4/accounts/account-123/ai/v1`,
+    defaultModel: '@cf/meta/llama-text',
+    enabled: true,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+
+  assert.deepEqual(await fetchProviderModels(connection, 'cloudflare-test-token'), [
+    { id: '@cf/meta/llama-text' },
+  ]);
+}
 
 async function runGitHubCopilotDiscovery(): Promise<void> {
   const server = await startJsonServer((request, response) => {
