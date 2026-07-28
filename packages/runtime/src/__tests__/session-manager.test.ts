@@ -1,6 +1,7 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { setTimeout as timerDelay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import {
   DEEP_RESEARCH_SESSION_LABEL,
@@ -21,6 +22,7 @@ import type {
   AgentRunStore,
   RuntimeEvent,
   RuntimeEventStore,
+  RootExecutionDescriptor,
   SessionEvent,
   SessionHeader,
   SessionListFilter,
@@ -89,6 +91,11 @@ import {
   type RuntimePermissionContinuation,
   type RuntimeUserQuestionContinuation,
 } from '../interaction-authority.js';
+import {
+  claimAgentGraphRunnableIntent,
+  fingerprintAgentGraphRunnableIntent,
+} from '../stream-graph-admission.js';
+import type { AgentGraphRunnableIntent } from '../stream-graph-readiness.js';
 
 test('session summaries preserve an explicit no-project association', async () => {
   const store = new MemorySessionStore();
@@ -278,7 +285,7 @@ describe('SessionManager graph operator provisioning', () => {
 });
 
 describe('SessionManager claimed graph intent execution', () => {
-  test('rejects hosted graph execution before durable state or backend activation', async () => {
+  test('fails closed without a trusted hosted graph execution capability', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
@@ -299,16 +306,524 @@ describe('SessionManager claimed graph intent execution', () => {
     });
     const parent = await manager.createSession(makeInput({ name: 'Supervisor' }));
     const child = await createGraphOperatorSession(store, parent.id);
-    const claim = graphIntentClaim({ targetSessionId: child.id });
+    const claim = graphIntentClaim({ targetSessionId: child.id }, 'must not start');
 
     await expectRejects(
       manager.runClaimedAgentGraphIntent(graphExecutionInput(claim, 'must not start')),
-      /requires a Runtime Host graph composition/,
+      /requires its trusted graph execution capability/,
     );
 
     expect(await runStore.listSessionRuns(child.id)).toEqual([]);
     expect(await store.readMessages(child.id)).toEqual([]);
     expect(backendBuilds).toBe(0);
+  });
+
+  test('hosted execution reads the trusted claim and delegates the exact root descriptor', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    backends.register('fake', (ctx) => new TestBackend(ctx));
+    const executions: Parameters<RuntimeHostedRootAuthority['executeRoot']>[0][] = [];
+    const authority = hostedRootAuthority();
+    authority.executeRoot = async (input) => {
+      executions.push(input);
+      for await (const event of input.start({
+        runId: input.runId,
+        userMessageId: input.userMessageId,
+        onRunStarted: () => input.onReady?.(),
+      })) {
+        input.onEvent?.(event);
+      }
+    };
+    const parent = await store.create(makeInput({ name: 'Supervisor' }));
+    const child = await createGraphOperatorSession(store, parent.id);
+    const claim = graphIntentClaim(
+      {
+        targetSessionId: child.id,
+        targetTurnId: 'hosted-graph-turn',
+        targetRunId: 'hosted-graph-run',
+      },
+      'canonical hosted graph prompt',
+    );
+    const prompt = 'canonical hosted graph prompt';
+    const trustedExecution = graphExecutionInput(claim, prompt);
+    let trustedReads = 0;
+    const trustedClaimStore = trustedExecution.claimStore;
+    const callerClaimStore: AgentGraphIntentClaimStore = {
+      async claimAgentGraphIntent() {
+        throw new Error('caller store must not be used');
+      },
+      async readAgentGraphIntentClaim() {
+        throw new Error('caller store must not be used');
+      },
+      async listAgentGraphIntentClaims() {
+        throw new Error('caller store must not be used');
+      },
+    };
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      messageAuthority: authority,
+      hostedAgentGraphExecution: {
+        async readAgentGraphIntentClaim(graphId, intentId) {
+          trustedReads += 1;
+          return trustedClaimStore.readAgentGraphIntentClaim(graphId, intentId);
+        },
+        async readRootTurnAdmissionIdentity(sessionId, turnId) {
+          const admission = await runStore.readRootTurnAdmission(sessionId, turnId);
+          return admission
+            ? { runId: admission.runId, userMessageId: admission.userMessageId }
+            : undefined;
+        },
+      },
+      newId: nextId(),
+      now: nextNow(30),
+    });
+
+    const result = await manager.runClaimedAgentGraphIntent({
+      ...trustedExecution,
+      claimStore: callerClaimStore,
+    });
+
+    expect(result.status).toBe('completed');
+    expect(trustedReads).toBe(1);
+    expect(executions).toHaveLength(1);
+    expect(executions[0]).toMatchObject({
+      sessionId: child.id,
+      turnId: claim.targetTurnId,
+      runId: claim.targetRunId,
+      userMessageId: 'id-1',
+      execution: {
+        kind: 'claimed_agent_graph_intent',
+        claim,
+        agentId: LOCAL_READ_AGENT_ID,
+        agentName: LOCAL_READ_AGENT_DEFINITION.name,
+      },
+      content: { text: prompt },
+    });
+    expect(
+      (await store.readMessages(child.id)).find(
+        (message) => message.type === 'user' && message.turnId === claim.targetTurnId,
+      ),
+    ).toMatchObject({ id: 'id-1', text: prompt });
+  });
+
+  test('hosted execution rejects prompt drift from the durable graph claim before admission', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    let backendBuilds = 0;
+    backends.register('fake', (ctx) => {
+      backendBuilds += 1;
+      return new TestBackend(ctx);
+    });
+    const parent = await store.create(makeInput({ name: 'Supervisor' }));
+    const child = await createGraphOperatorSession(store, parent.id);
+    const proposedClaim = graphIntentClaim({
+      targetSessionId: child.id,
+      targetTurnId: 'prompt-bound-turn',
+      targetRunId: 'prompt-bound-run',
+    });
+    const intent = graphRunnableIntentForClaim(proposedClaim);
+    let persistedClaim: AgentGraphIntentClaim | undefined;
+    const durableClaims: AgentGraphIntentClaimStore = {
+      async claimAgentGraphIntent(request) {
+        if (persistedClaim) return { claim: persistedClaim, created: false };
+        persistedClaim = { ...request, claimedAt: 31 };
+        return { claim: persistedClaim, created: true };
+      },
+      async readAgentGraphIntentClaim(graphId, intentId) {
+        return persistedClaim?.graphId === graphId && persistedClaim.intentId === intentId
+          ? persistedClaim
+          : undefined;
+      },
+      async listAgentGraphIntentClaims(graphId) {
+        return persistedClaim && (!graphId || persistedClaim.graphId === graphId)
+          ? [persistedClaim]
+          : [];
+      },
+    };
+    const admitted = await claimAgentGraphRunnableIntent({
+      intent,
+      store: durableClaims,
+      newId: nextId(),
+      targetTurnId: proposedClaim.targetTurnId,
+      targetRunId: proposedClaim.targetRunId,
+      executionInput: { prompt: 'durably claimed prompt A' },
+    });
+    let hostedExecutions = 0;
+    const authority = hostedRootAuthority();
+    authority.executeRoot = async () => {
+      hostedExecutions += 1;
+    };
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      messageAuthority: authority,
+      hostedAgentGraphExecution: hostedGraphExecutionCapability(durableClaims, runStore),
+      newId: nextId(),
+      now: nextNow(31),
+    });
+
+    await expectRejects(
+      manager.runClaimedAgentGraphIntent({
+        claimStore: durableClaims,
+        intent,
+        graphId: admitted.claim.graphId,
+        intentId: admitted.claim.intentId,
+        prompt: 'drifted prompt B',
+      }),
+      /does not match its durable claim/,
+    );
+
+    expect(hostedExecutions).toBe(0);
+    expect(backendBuilds).toBe(0);
+    expect(await runStore.listSessionRuns(child.id)).toEqual([]);
+    expect(await store.readMessages(child.id)).toEqual([]);
+    expect(
+      await runStore.readRootTurnAdmission(child.id, proposedClaim.targetTurnId),
+    ).toBeUndefined();
+  });
+
+  test('hosted retry reuses an admitted user message identity before a Run exists', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    backends.register('fake', (ctx) => new TestBackend(ctx));
+    const parent = await store.create(makeInput({ name: 'Supervisor' }));
+    const child = await createGraphOperatorSession(store, parent.id);
+    const claim = graphIntentClaim(
+      {
+        targetSessionId: child.id,
+        targetTurnId: 'admitted-graph-turn',
+        targetRunId: 'admitted-graph-run',
+      },
+      'resume admitted graph root',
+    );
+    const descriptor: RootExecutionDescriptor = {
+      kind: 'claimed_agent_graph_intent',
+      claim,
+      agentId: LOCAL_READ_AGENT_ID,
+      agentName: LOCAL_READ_AGENT_DEFINITION.name,
+    };
+    runStore.seedRootTurnAdmission(child.id, claim.targetTurnId, {
+      runId: claim.targetRunId,
+      userMessageId: 'durable-graph-user-message',
+      execution: descriptor,
+    });
+    let newIdCalls = 0;
+    let newIdCallsAtExecution = -1;
+    const authority = hostedRootAuthority();
+    authority.executeRoot = async (input) => {
+      newIdCallsAtExecution = newIdCalls;
+      expect(input.userMessageId).toBe('durable-graph-user-message');
+      for await (const event of input.start({
+        runId: input.runId,
+        userMessageId: input.userMessageId,
+        onRunStarted: () => input.onReady?.(),
+      })) {
+        input.onEvent?.(event);
+      }
+    };
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      messageAuthority: authority,
+      hostedAgentGraphExecution: hostedGraphExecutionCapability(
+        graphExecutionInput(claim, '').claimStore,
+        runStore,
+      ),
+      newId: () => `retry-id-${++newIdCalls}`,
+      now: nextNow(33),
+    });
+
+    const result = await manager.runClaimedAgentGraphIntent(
+      graphExecutionInput(claim, 'resume admitted graph root'),
+    );
+
+    expect(result.status).toBe('completed');
+    expect(newIdCallsAtExecution).toBe(0);
+    expect(
+      (await store.readMessages(child.id)).find(
+        (message) => message.type === 'user' && message.turnId === claim.targetTurnId,
+      ),
+    ).toMatchObject({
+      id: 'durable-graph-user-message',
+      text: 'resume admitted graph root',
+    });
+  });
+
+  test('hosted retry rejects an existing Run without its durable RootTurn admission', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    let backendBuilds = 0;
+    backends.register('fake', (ctx) => {
+      backendBuilds += 1;
+      return new TestBackend(ctx);
+    });
+    const parent = await store.create(makeInput({ name: 'Supervisor' }));
+    const child = await createGraphOperatorSession(store, parent.id);
+    const claim = graphIntentClaim(
+      {
+        targetSessionId: child.id,
+        targetTurnId: 'orphaned-hosted-turn',
+        targetRunId: 'orphaned-hosted-run',
+      },
+      'must not be backfilled',
+    );
+    await runStore.createRun(
+      makeRunHeader({
+        sessionId: child.id,
+        runId: claim.targetRunId,
+        turnId: claim.targetTurnId,
+        status: 'completed',
+        completedAt: 34,
+        permissionMode: 'explore',
+        agentId: LOCAL_READ_AGENT_ID,
+        agentName: LOCAL_READ_AGENT_DEFINITION.name,
+      }),
+    );
+    let hostedExecutions = 0;
+    const authority = hostedRootAuthority();
+    authority.executeRoot = async () => {
+      hostedExecutions += 1;
+    };
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      messageAuthority: authority,
+      hostedAgentGraphExecution: hostedGraphExecutionCapability(
+        graphExecutionInput(claim, '').claimStore,
+        runStore,
+      ),
+      newId: nextId(),
+      now: nextNow(34),
+    });
+
+    await expectRejects(
+      manager.runClaimedAgentGraphIntent(graphExecutionInput(claim, 'must not be backfilled')),
+      /missing its durable RootTurn admission/,
+    );
+
+    expect(hostedExecutions).toBe(0);
+    expect(backendBuilds).toBe(0);
+    expect(await store.readMessages(child.id)).toEqual([]);
+    expect((await runStore.readRun(child.id, claim.targetRunId)).status).toBe('completed');
+  });
+
+  test('hosted retry rejects an existing Run with conflicting durable message content', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    let backendBuilds = 0;
+    backends.register('fake', (ctx) => {
+      backendBuilds += 1;
+      return new TestBackend(ctx);
+    });
+    const parent = await store.create(makeInput({ name: 'Supervisor' }));
+    const child = await createGraphOperatorSession(store, parent.id);
+    const claim = graphIntentClaim(
+      {
+        targetSessionId: child.id,
+        targetTurnId: 'conflicting-hosted-turn',
+        targetRunId: 'conflicting-hosted-run',
+      },
+      'expected durable prompt',
+    );
+    await runStore.createRun(
+      makeRunHeader({
+        sessionId: child.id,
+        runId: claim.targetRunId,
+        turnId: claim.targetTurnId,
+        status: 'completed',
+        completedAt: 35,
+        permissionMode: 'explore',
+        agentId: LOCAL_READ_AGENT_ID,
+        agentName: LOCAL_READ_AGENT_DEFINITION.name,
+      }),
+    );
+    runStore.seedRootTurnAdmission(child.id, claim.targetTurnId, {
+      runId: claim.targetRunId,
+      userMessageId: 'conflicting-hosted-message',
+      execution: {
+        kind: 'claimed_agent_graph_intent',
+        claim,
+        agentId: LOCAL_READ_AGENT_ID,
+        agentName: LOCAL_READ_AGENT_DEFINITION.name,
+      },
+    });
+    await store.appendMessage(child.id, {
+      type: 'user',
+      id: 'conflicting-hosted-message',
+      turnId: claim.targetTurnId,
+      ts: 35,
+      text: 'different durable prompt',
+    });
+    let hostedExecutions = 0;
+    const authority = hostedRootAuthority();
+    authority.executeRoot = async () => {
+      hostedExecutions += 1;
+    };
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      messageAuthority: authority,
+      hostedAgentGraphExecution: hostedGraphExecutionCapability(
+        graphExecutionInput(claim, '').claimStore,
+        runStore,
+      ),
+      newId: nextId(),
+      now: nextNow(35),
+    });
+
+    await expectRejects(
+      manager.runClaimedAgentGraphIntent(graphExecutionInput(claim, 'expected durable prompt')),
+      /does not match its durable UserMessage/,
+    );
+
+    expect(hostedExecutions).toBe(1);
+    expect(backendBuilds).toBe(0);
+    const userMessages = (await store.readMessages(child.id)).filter(
+      (message) => message.type === 'user',
+    );
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]).toMatchObject({
+      id: 'conflicting-hosted-message',
+      text: 'different durable prompt',
+    });
+  });
+
+  test('hosted explicit abort stops only the exact claimed root identity', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const backendGate = makeGate();
+    const ready = makeGate();
+    backends.register('fake', (ctx) => new TestBackend(ctx, backendGate));
+    const stoppedRoots: RuntimeMessageRunIdentity[] = [];
+    let stoppedSessions = 0;
+    const authority = hostedRootAuthority();
+    authority.stopRoot = async (identity) => {
+      stoppedRoots.push(identity);
+      backendGate.release();
+    };
+    authority.stopSession = async () => {
+      stoppedSessions += 1;
+    };
+    const parent = await store.create(makeInput({ name: 'Supervisor' }));
+    const child = await createGraphOperatorSession(store, parent.id);
+    const claim = graphIntentClaim(
+      {
+        targetSessionId: child.id,
+        targetTurnId: 'aborted-hosted-turn',
+        targetRunId: 'aborted-hosted-run',
+      },
+      'abort this exact root',
+    );
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      messageAuthority: authority,
+      hostedAgentGraphExecution: hostedGraphExecutionCapability(
+        graphExecutionInput(claim, '').claimStore,
+        runStore,
+      ),
+      newId: nextId(),
+      now: nextNow(35),
+    });
+    const abort = new AbortController();
+    const execution = manager.runClaimedAgentGraphIntent({
+      ...graphExecutionInput(claim, 'abort this exact root'),
+      abortSignal: abort.signal,
+      onReady: () => ready.release(),
+    });
+    await ready.promise;
+
+    abort.abort();
+    await execution;
+
+    expect(stoppedRoots).toEqual([
+      {
+        sessionId: child.id,
+        turnId: claim.targetTurnId,
+        runId: claim.targetRunId,
+      },
+    ]);
+    expect(stoppedSessions).toBe(0);
+  });
+
+  test('recovers a pending hosted graph admission without source lineage', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(38),
+    });
+    const parent = await store.create(makeInput({ name: 'Supervisor' }));
+    const child = await createGraphOperatorSession(store, parent.id);
+    const claim = graphIntentClaim({
+      targetSessionId: child.id,
+      targetTurnId: 'recovered-graph-turn',
+      targetRunId: 'recovered-graph-run',
+    });
+
+    await manager.closePendingHostedLinkedChildAdmission({
+      sessionId: child.id,
+      turnId: claim.targetTurnId,
+      runId: claim.targetRunId,
+      admittedAt: 37,
+      execution: {
+        kind: 'claimed_agent_graph_intent',
+        claim,
+        agentId: LOCAL_READ_AGENT_ID,
+        agentName: LOCAL_READ_AGENT_DEFINITION.name,
+      },
+    });
+
+    const run = await runStore.readRun(child.id, claim.targetRunId);
+    expect(run).toMatchObject({
+      status: 'failed',
+      failureClass: 'app_restarted',
+      agentId: LOCAL_READ_AGENT_ID,
+      agentName: LOCAL_READ_AGENT_DEFINITION.name,
+    });
+    expect(run.workspaceIdentity).toBe(undefined);
+    expect(run.resumedFromRunId).toBe(undefined);
+    expect(run.retriedFromRunId).toBe(undefined);
+    const terminalEvents = (await runStore.readRuntimeEvents(child.id, claim.targetRunId)).filter(
+      (event) => event.status === 'failed',
+    );
+    expect(terminalEvents).toHaveLength(1);
+    expect(terminalEvents[0]?.actions?.stateDelta).toMatchObject({
+      recovered: true,
+      recoveryReason: 'child_internal_admission_without_run',
+      executionKind: 'claimed_agent_graph_intent',
+      failureClass: 'app_restarted',
+    });
+    expect(terminalEvents[0]?.actions?.stateDelta?.sourceRunId).toBe(undefined);
   });
 
   test('runs the exact claimed session-inline activation and durably deduplicates retries', async () => {
@@ -332,11 +847,14 @@ describe('SessionManager claimed graph intent execution', () => {
     });
     const parent = await manager.createSession(makeInput({ name: 'Supervisor' }));
     const child = await createGraphOperatorSession(store, parent.id);
-    const claim = graphIntentClaim({
-      targetSessionId: child.id,
-      targetTurnId: 'graph-turn',
-      targetRunId: 'graph-run',
-    });
+    const claim = graphIntentClaim(
+      {
+        targetSessionId: child.id,
+        targetTurnId: 'graph-turn',
+        targetRunId: 'graph-run',
+      },
+      'summarize the routed records',
+    );
     const ready: unknown[] = [];
 
     const result = await manager.runClaimedAgentGraphIntent({
@@ -399,7 +917,7 @@ describe('SessionManager claimed graph intent execution', () => {
       manager.runClaimedAgentGraphIntent({
         ...graphExecutionInput(claim, 'perform different work'),
       }),
-      /reused for different execution input/,
+      /does not match its durable claim/,
     );
   });
 
@@ -425,7 +943,7 @@ describe('SessionManager claimed graph intent execution', () => {
     });
     const parent = await manager.createSession(makeInput());
     const child = await createGraphOperatorSession(store, parent.id);
-    const claim = graphIntentClaim({ targetSessionId: child.id });
+    const claim = graphIntentClaim({ targetSessionId: child.id }, 'one activation');
     const first = manager.runClaimedAgentGraphIntent({
       ...graphExecutionInput(claim, 'one activation'),
       onReady: () => started.release(),
@@ -439,7 +957,7 @@ describe('SessionManager claimed graph intent execution', () => {
       manager.runClaimedAgentGraphIntent({
         ...graphExecutionInput(claim, 'drifted activation'),
       }),
-      /reused for different execution input/,
+      /does not match its durable claim/,
     );
     childGate.release();
 
@@ -450,47 +968,9 @@ describe('SessionManager claimed graph intent execution', () => {
   });
 
   test('serializes different claims per child session without letting a queued abort stop active work', async () => {
-    const store = new MemorySessionStore();
-    const runStore = new MemoryAgentRunStore();
-    const backends = new BackendRegistry();
-    const firstGate = makeGate();
-    const firstReady = makeGate();
-    let backend: TestBackend | undefined;
-    backends.register('fake', (ctx) => {
-      backend = new TestBackend(ctx, firstGate);
-      return backend;
-    });
-    const manager = new SessionManager({
-      store,
-      runStore,
-      runtimeEventStore: runStore,
-      backends,
-      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
-      newId: nextId(),
-      now: nextNow(70),
-    });
-    const parent = await manager.createSession(makeInput());
-    const child = await createGraphOperatorSession(store, parent.id);
-    const firstClaim = graphIntentClaim({ targetSessionId: child.id });
-    const secondClaim = graphIntentClaim({
-      claimId: `graph_claim_${'e'.repeat(32)}`,
-      intentId: `graph_intent_${'f'.repeat(32)}`,
-      targetSessionId: child.id,
-      targetTurnId: 'graph-turn-2',
-      targetRunId: 'graph-run-2',
-    });
-    const thirdClaim = graphIntentClaim({
-      claimId: `graph_claim_${'1'.repeat(32)}`,
-      intentId: `graph_intent_${'2'.repeat(32)}`,
-      targetSessionId: child.id,
-      targetTurnId: 'graph-turn-3',
-      targetRunId: 'graph-run-3',
-    });
-    const first = manager.runClaimedAgentGraphIntent({
-      ...graphExecutionInput(firstClaim, 'first activation'),
-      onReady: () => firstReady.release(),
-    });
-    await firstReady.promise;
+    const { store, runStore, manager, child, backend, activeGate, first, claims } =
+      await createQueuedGraphScenario();
+    const [firstClaim, secondClaim, thirdClaim] = claims;
 
     const queuedAbort = new AbortController();
     let secondReadyCount = 0;
@@ -510,7 +990,7 @@ describe('SessionManager claimed graph intent execution', () => {
     expect(backend?.stopCalls).toBe(0);
     expect((await runStore.listSessionRuns(child.id)).length).toBe(1);
 
-    firstGate.release();
+    activeGate.release();
     expect((await first).status).toBe('completed');
     await expectRejects(second, /cancelled before runtime admission/);
     expect(secondReadyCount).toBe(0);
@@ -547,14 +1027,17 @@ describe('SessionManager claimed graph intent execution', () => {
     });
     const parent = await manager.createSession(makeInput());
     const child = await createGraphOperatorSession(store, parent.id);
-    const firstClaim = graphIntentClaim({ targetSessionId: child.id });
-    const queuedClaim = graphIntentClaim({
-      claimId: `graph_claim_${'7'.repeat(32)}`,
-      intentId: `graph_intent_${'8'.repeat(32)}`,
-      targetSessionId: child.id,
-      targetTurnId: 'queued-turn',
-      targetRunId: 'queued-run',
-    });
+    const firstClaim = graphIntentClaim({ targetSessionId: child.id }, 'first activation');
+    const queuedClaim = graphIntentClaim(
+      {
+        claimId: `graph_claim_${'7'.repeat(32)}`,
+        intentId: `graph_intent_${'8'.repeat(32)}`,
+        targetSessionId: child.id,
+        targetTurnId: 'queued-turn',
+        targetRunId: 'queued-run',
+      },
+      'cancelled queued activation',
+    );
     const first = manager.runClaimedAgentGraphIntent({
       ...graphExecutionInput(firstClaim, 'first activation'),
       onReady: () => firstReady.release(),
@@ -609,7 +1092,10 @@ describe('SessionManager claimed graph intent execution', () => {
       }),
     );
     expect(backend?.sendInputs).toHaveLength(1);
-    const claim = graphIntentClaim({ targetSessionId: child.id });
+    const claim = graphIntentClaim(
+      { targetSessionId: child.id },
+      'activation stopped during admission',
+    );
     const execution = manager.runClaimedAgentGraphIntent({
       ...graphExecutionInput(claim, 'activation stopped during admission'),
       async admitExecution() {
@@ -638,6 +1124,59 @@ describe('SessionManager claimed graph intent execution', () => {
     expect((await runStore.readRun(child.id, claim.targetRunId)).status).toBe('cancelled');
   });
 
+  test('runtime stop settles queued graph claims without letting their slots pass the active claim', async () => {
+    const firstAbort = new AbortController();
+    const { store, runStore, manager, child, backend, stopStarted, first, claims } =
+      await createQueuedGraphScenario(firstAbort.signal);
+    const [firstClaim, secondClaim, thirdClaim] = claims;
+    let queuedReady = 0;
+    const second = manager.runClaimedAgentGraphIntent({
+      ...graphExecutionInput(secondClaim, 'queued activation'),
+      onReady: () => {
+        queuedReady += 1;
+      },
+    });
+    const third = manager.runClaimedAgentGraphIntent({
+      ...graphExecutionInput(thirdClaim, 'third activation'),
+      onReady: () => {
+        queuedReady += 1;
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    firstAbort.abort();
+    await stopStarted.promise;
+    const bound = new AbortController();
+    let results: Awaited<ReturnType<typeof Promise.allSettled>>;
+    try {
+      results = await Promise.race([
+        Promise.allSettled([first, second, third]),
+        timerDelay(2_000, undefined, { signal: bound.signal }).then(() => {
+          throw new Error('graph stop composition did not settle within the bound');
+        }),
+      ]);
+    } finally {
+      bound.abort();
+    }
+
+    expect(results[0]?.status).toBe('fulfilled');
+    expect(results[1]?.status).toBe('rejected');
+    expect(results[2]?.status).toBe('rejected');
+    expect(queuedReady).toBe(0);
+    expect(backend?.sendInputs.map((input) => input.turnId)).toEqual([firstClaim.targetTurnId]);
+    expect((await runStore.listSessionRuns(child.id)).map((run) => run.turnId)).toEqual([
+      firstClaim.targetTurnId,
+    ]);
+    expect(
+      (await store.readMessages(child.id)).filter(
+        (message) =>
+          'turnId' in message &&
+          (message.turnId === secondClaim.targetTurnId ||
+            message.turnId === thirdClaim.targetTurnId),
+      ),
+    ).toEqual([]);
+  });
+
   test('recovers an existing nonterminal claimed run without invoking the backend again', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
@@ -658,7 +1197,7 @@ describe('SessionManager claimed graph intent execution', () => {
     });
     const parent = await manager.createSession(makeInput());
     const child = await createGraphOperatorSession(store, parent.id);
-    const claim = graphIntentClaim({ targetSessionId: child.id });
+    const claim = graphIntentClaim({ targetSessionId: child.id }, 'interrupted turn');
     await seedRunningTurn(store, child.id, claim.targetTurnId);
     await seedRun(
       runStore,
@@ -712,11 +1251,14 @@ describe('SessionManager claimed graph intent execution', () => {
     });
     const parent = await manager.createSession(makeInput());
     const child = await createGraphOperatorSession(store, parent.id);
-    const claim = graphIntentClaim({
-      targetSessionId: child.id,
-      targetTurnId: 'stopped-graph-turn',
-      targetRunId: 'stopped-graph-run',
-    });
+    const claim = graphIntentClaim(
+      {
+        targetSessionId: child.id,
+        targetTurnId: 'stopped-graph-turn',
+        targetRunId: 'stopped-graph-run',
+      },
+      'must stop before provider dispatch',
+    );
     const readStarted = makeGate();
     const releaseRead = makeGate();
     store.nextReadHeaderGate = { started: readStarted, release: releaseRead };
@@ -759,6 +1301,12 @@ describe('SessionManager claimed graph intent execution', () => {
       now: nextNow(100),
     });
     const parent = await manager.createSession(makeInput());
+    const unclaimedIntent = graphRunnableIntentForClaim(
+      graphIntentClaim({
+        graphId: 'graph-unclaimed',
+        intentId: `graph_intent_${'f'.repeat(32)}`,
+      }),
+    );
     await expectRejects(
       manager.runClaimedAgentGraphIntent({
         claimStore: {
@@ -772,20 +1320,21 @@ describe('SessionManager claimed graph intent execution', () => {
             return [];
           },
         },
+        intent: unclaimedIntent,
         graphId: 'graph-unclaimed',
         intentId: `graph_intent_${'f'.repeat(32)}`,
         prompt: 'must not run',
       }),
       /has not been claimed/,
     );
-    const mainSessionClaim = graphIntentClaim({ targetSessionId: parent.id });
+    const mainSessionClaim = graphIntentClaim({ targetSessionId: parent.id }, 'must not run');
     await expectRejects(
       manager.runClaimedAgentGraphIntent(graphExecutionInput(mainSessionClaim, 'must not run')),
       /target must be a linked child session/,
     );
 
     const child = await createGraphOperatorSession(store, parent.id);
-    const claim = graphIntentClaim({ targetSessionId: child.id });
+    const claim = graphIntentClaim({ targetSessionId: child.id }, 'must not run');
     await runStore.createRun(
       makeRunHeader({
         sessionId: child.id,
@@ -805,13 +1354,16 @@ describe('SessionManager claimed graph intent execution', () => {
 
     const archivedChild = await createGraphOperatorSession(store, parent.id);
     await store.archive(archivedChild.id);
-    const archivedClaim = graphIntentClaim({
-      claimId: `graph_claim_${'3'.repeat(32)}`,
-      intentId: `graph_intent_${'4'.repeat(32)}`,
-      targetSessionId: archivedChild.id,
-      targetTurnId: 'archived-turn',
-      targetRunId: 'archived-run',
-    });
+    const archivedClaim = graphIntentClaim(
+      {
+        claimId: `graph_claim_${'3'.repeat(32)}`,
+        intentId: `graph_intent_${'4'.repeat(32)}`,
+        targetSessionId: archivedChild.id,
+        targetTurnId: 'archived-turn',
+        targetRunId: 'archived-run',
+      },
+      'must not revive archived work',
+    );
     await expectRejects(
       manager.runClaimedAgentGraphIntent(
         graphExecutionInput(archivedClaim, 'must not revive archived work'),
@@ -821,13 +1373,16 @@ describe('SessionManager claimed graph intent execution', () => {
 
     const abortedChild = await createGraphOperatorSession(store, parent.id);
     await store.updateHeader(abortedChild.id, { status: 'aborted' });
-    const abortedClaim = graphIntentClaim({
-      claimId: `graph_claim_${'5'.repeat(32)}`,
-      intentId: `graph_intent_${'6'.repeat(32)}`,
-      targetSessionId: abortedChild.id,
-      targetTurnId: 'aborted-turn',
-      targetRunId: 'aborted-run',
-    });
+    const abortedClaim = graphIntentClaim(
+      {
+        claimId: `graph_claim_${'5'.repeat(32)}`,
+        intentId: `graph_intent_${'6'.repeat(32)}`,
+        targetSessionId: abortedChild.id,
+        targetTurnId: 'aborted-turn',
+        targetRunId: 'aborted-run',
+      },
+      'must not revive aborted work',
+    );
     await expectRejects(
       manager.runClaimedAgentGraphIntent(
         graphExecutionInput(abortedClaim, 'must not revive aborted work'),
@@ -2575,6 +3130,78 @@ describe('SessionManager manual compaction', () => {
       (run) => run.turnId === 'turn-compact',
     );
     expect(compactRun?.status).toBe('cancelled');
+  });
+
+  test('cold manual compaction normalizes only its execution cancellation reason', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const factoryStarts = new Map<string, ReturnType<typeof makeGate>>();
+    const factoryModes = new Map<string, 'execution_cancellation' | 'abort_error'>();
+    backends.register('fake', async (ctx) => {
+      const started = factoryStarts.get(ctx.sessionId);
+      const mode = factoryModes.get(ctx.sessionId);
+      if (!started || !mode) throw new Error('cold compact factory was not configured');
+      const signal = ctx.abortSignal;
+      if (!signal) throw new Error('cold compact factory did not receive an abort signal');
+      started.release();
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+      }
+      if (mode === 'abort_error') {
+        const error = new Error('cold compact factory timed out');
+        error.name = 'AbortError';
+        throw error;
+      }
+      throw signal.reason;
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId: nextId(),
+      now: nextNow(15_500),
+    });
+    const cancelledSession = await manager.createSession(
+      makeInput({ backend: 'fake', permissionMode: 'bypass' }),
+    );
+    const abortErrorSession = await manager.createSession(
+      makeInput({ backend: 'fake', permissionMode: 'bypass' }),
+    );
+    const cancelledStart = makeGate();
+    const abortErrorStart = makeGate();
+    factoryStarts.set(cancelledSession.id, cancelledStart);
+    factoryStarts.set(abortErrorSession.id, abortErrorStart);
+    factoryModes.set(cancelledSession.id, 'execution_cancellation');
+    factoryModes.set(abortErrorSession.id, 'abort_error');
+
+    const cancelledCompact = collectSessionEvents(
+      manager.compactSession(cancelledSession.id, { turnId: 'compact-cancelled-factory' }),
+    );
+    await cancelledStart.promise;
+    const cancelledStop = manager.stopSession(cancelledSession.id, {
+      source: 'stop_button',
+    });
+    const [cancelledEvents] = await Promise.all([cancelledCompact, cancelledStop]);
+    expect(cancelledEvents).toEqual([]);
+
+    const abortErrorCompact = collectSessionEvents(
+      manager.compactSession(abortErrorSession.id, { turnId: 'compact-abort-error-factory' }),
+    );
+    await abortErrorStart.promise;
+    const abortErrorRejection = assert.rejects(abortErrorCompact, /cold compact factory timed out/);
+    const abortErrorStop = manager.stopSession(abortErrorSession.id, {
+      source: 'stop_button',
+    });
+    await Promise.all([abortErrorRejection, abortErrorStop]);
+
+    const [cancelledRun] = await runStore.listSessionRuns(cancelledSession.id);
+    const [abortErrorRun] = await runStore.listSessionRuns(abortErrorSession.id);
+    expect(cancelledRun?.status).toBe('cancelled');
+    expect(abortErrorRun?.status).toBe('cancelled');
   });
 
   test('manual compaction begin failure after reservation has no unhandled claim rejection', async () => {
@@ -10349,7 +10976,7 @@ describe('SessionManager permission mode updates', () => {
     expect((await store.readHeader(session.id)).status === 'blocked').toBe(false);
   });
 
-  test('stop-owned parent activation stays cancelled when backend build rejects', async () => {
+  test('a factory AbortError is not normalized as execution cancellation', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
@@ -10358,7 +10985,9 @@ describe('SessionManager permission mode updates', () => {
     backends.register('fake', async () => {
       buildStarted.release();
       await releaseBuild.promise;
-      throw new Error('backend activation rejected');
+      const error = new Error('backend activation timed out');
+      error.name = 'AbortError';
+      throw error;
     });
     const manager = new SessionManager({
       store,
@@ -10387,7 +11016,7 @@ describe('SessionManager permission mode updates', () => {
     expect(stopSettled).toBe(false);
 
     releaseBuild.release();
-    await expectRejects(firstEvent, /backend activation rejected/);
+    await expectRejects(firstEvent, /backend activation timed out/);
     await stopping;
     const run = await runStore.readRun(
       session.id,
@@ -10398,16 +11027,21 @@ describe('SessionManager permission mode updates', () => {
     expect((await store.readHeader(session.id)).status).toBe('aborted');
   });
 
-  test('stop-owned activation rejects stop when cancelled terminal persistence fails', async () => {
+  test('stop signal cooperatively releases a blocked backend factory', async () => {
     const store = new MemorySessionStore();
-    const runStore = new MemoryAgentRunStore({ failRuntimeEventAppendAfter: 1 });
+    const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
     const buildStarted = makeGate();
-    const releaseBuild = makeGate();
-    backends.register('fake', async () => {
+    let factorySignal: AbortSignal | undefined;
+    let dispatches = 0;
+    backends.register('fake', async (ctx) => {
+      factorySignal = ctx.abortSignal;
+      if (!factorySignal) throw new Error('backend factory did not receive an abort signal');
       buildStarted.release();
-      await releaseBuild.promise;
-      throw new Error('backend activation rejected');
+      await new Promise<void>((resolve) => {
+        factorySignal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      throw factorySignal.reason;
     });
     const manager = new SessionManager({
       store,
@@ -10421,77 +11055,205 @@ describe('SessionManager permission mode updates', () => {
     const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
     const turn = manager
       .sendMessage(session.id, {
-        turnId: 'stop-owned-terminal-write-reject',
-        text: 'stop must observe cancelled terminal persistence',
+        turnId: 'cooperative-factory-stop',
+        text: 'stop must release backend activation',
       })
       [Symbol.asyncIterator]();
-    const firstEvent = turn.next();
+    const firstEvent = turn.next().then((result) => {
+      dispatches += result.done ? 0 : 1;
+      return result;
+    });
     await buildStarted.promise;
 
-    const stopping = manager.stopSession(session.id, { source: 'stop_button' });
-    const joinedStopping = manager.stopSession(session.id, { source: 'stop_button' });
-    releaseBuild.release();
+    await manager.stopSession(session.id, { source: 'stop_button' });
 
-    await Promise.all([
-      expectRejects(firstEvent, /runtime event append failed/),
-      expectRejects(stopping, /runtime event append failed/),
-      expectRejects(joinedStopping, /runtime event append failed/),
-    ]);
+    expect(factorySignal?.aborted).toBe(true);
+    expect((await firstEvent).done).toBe(true);
+    expect(dispatches).toBe(0);
     const [run] = await runStore.listSessionRuns(session.id);
-    if (!run) throw new Error('stop-owned Run was not recorded');
-    expect(run.status).toBe('created');
-    expect(
-      (await runStore.readRuntimeEvents(session.id, run.runId)).some(isTerminalRuntimeEvent),
-    ).toBe(false);
+    expect(run?.status).toBe('cancelled');
   });
 
-  test('stop rejects instead of hanging when attached Run settlement throws synchronously', async () => {
+  test('node timers AbortError is cancellation only when its cause is this execution stop', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
     const buildStarted = makeGate();
-    const releaseBuild = makeGate();
     backends.register('fake', async (ctx) => {
+      if (!ctx.abortSignal) throw new Error('backend factory did not receive an abort signal');
       buildStarted.release();
-      await releaseBuild.promise;
+      await timerDelay(60_000, undefined, { signal: ctx.abortSignal });
       return new TestBackend(ctx);
     });
-    const ids = nextId();
-    let rejectStopOwnershipId = false;
     const manager = new SessionManager({
       store,
       runStore,
       runtimeEventStore: runStore,
       backends,
-      newId: () => {
-        if (rejectStopOwnershipId) {
-          rejectStopOwnershipId = false;
-          throw new Error('stop ownership id failed');
-        }
-        return ids();
-      },
+      newId: nextId(),
       now: nextNow(6_845),
       runtimeSource: 'test',
     });
     const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
     const turn = manager
       .sendMessage(session.id, {
-        turnId: 'stop-owned-settlement-failure',
-        text: 'must settle exactly once',
+        turnId: 'native-abort-wrapper-stop',
+        text: 'native AbortError should retain exact cancellation cause',
       })
       [Symbol.asyncIterator]();
     const firstEvent = turn.next();
     await buildStarted.promise;
-    const stopping = manager.stopSession(session.id, { source: 'stop_button' });
-    rejectStopOwnershipId = true;
-    releaseBuild.release();
 
-    await expectRejects(stopping, /stop ownership id failed/);
-    await expectRejects(firstEvent, /stop ownership id failed/);
+    await manager.stopSession(session.id, { source: 'stop_button' });
+
+    expect((await firstEvent).done).toBe(true);
     const [run] = await runStore.listSessionRuns(session.id);
     expect(run?.status).toBe('cancelled');
     expect(run?.failureClass).toBe(undefined);
-    expect((await store.readHeader(session.id)).status === 'blocked').toBe(false);
+  });
+
+  test('late ignored-signal backend is disposed once and never cached or dispatched', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const buildStarted = makeGate();
+    const releaseBuild = makeGate();
+    let builds = 0;
+    let firstDisposeCalls = 0;
+    let firstDispatches = 0;
+    backends.register('fake', async (ctx) => {
+      builds += 1;
+      if (builds === 1) {
+        buildStarted.release();
+        await releaseBuild.promise;
+        return {
+          kind: 'fake' as const,
+          sessionId: ctx.sessionId,
+          async *send(): AsyncIterable<SessionEvent> {
+            firstDispatches += 1;
+          },
+          async stop(): Promise<void> {},
+          async respondToPermission(): Promise<void> {},
+          async dispose(): Promise<void> {
+            firstDisposeCalls += 1;
+          },
+        };
+      }
+      return new TestBackend(ctx);
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId: nextId(),
+      now: nextNow(6_845),
+      runtimeSource: 'test',
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
+    const turn = manager
+      .sendMessage(session.id, {
+        turnId: 'ignored-factory-stop',
+        text: 'late backend must be rejected',
+      })
+      [Symbol.asyncIterator]();
+    const firstEvent = turn.next();
+    await buildStarted.promise;
+
+    const stopping = manager.stopSession(session.id, { source: 'stop_button' });
+    releaseBuild.release();
+    await stopping;
+
+    expect((await firstEvent).done).toBe(true);
+    expect(firstDisposeCalls).toBe(1);
+    expect(firstDispatches).toBe(0);
+    const [stoppedRun] = await runStore.listSessionRuns(session.id);
+    expect(stoppedRun?.status).toBe('cancelled');
+
+    await drain(
+      manager.sendMessage(session.id, {
+        turnId: 'post-ignored-factory-stop',
+        text: 'must build a fresh backend',
+      }),
+    );
+    expect(builds).toBe(2);
+    expect(firstDisposeCalls).toBe(1);
+  });
+
+  test('late cancelled backend disposal failure propagates as an AggregateError', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const buildStarted = makeGate();
+    const releaseBuild = makeGate();
+    let builds = 0;
+    let disposeCalls = 0;
+    backends.register('fake', async (ctx) => {
+      builds += 1;
+      buildStarted.release();
+      await releaseBuild.promise;
+      return {
+        kind: 'fake' as const,
+        sessionId: ctx.sessionId,
+        async *send(): AsyncIterable<SessionEvent> {
+          throw new Error('cancelled backend must not dispatch');
+        },
+        async stop(): Promise<void> {},
+        async respondToPermission(): Promise<void> {},
+        async dispose(): Promise<void> {
+          disposeCalls += 1;
+          throw new Error('late backend disposal failed');
+        },
+      };
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId: nextId(),
+      now: nextNow(6_845),
+      runtimeSource: 'test',
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
+    const turn = manager
+      .sendMessage(session.id, {
+        turnId: 'late-disposal-failure',
+        text: 'cleanup failure must remain observable',
+      })
+      [Symbol.asyncIterator]();
+    const firstEvent = turn.next();
+    await buildStarted.promise;
+
+    const streamRejection = assert.rejects(firstEvent, (error: unknown) => {
+      assert.ok(error instanceof AggregateError);
+      assert.match(error.message, /Cancelled backend activation disposal failed/);
+      assert.ok(
+        error.errors.some(
+          (entry) => entry instanceof Error && entry.message === 'late backend disposal failed',
+        ),
+      );
+      return true;
+    });
+    const stopping = manager.stopSession(session.id, { source: 'stop_button' });
+    releaseBuild.release();
+
+    await Promise.all([streamRejection, stopping]);
+    expect(disposeCalls).toBe(1);
+    const [run] = await runStore.listSessionRuns(session.id);
+    expect(run?.status).toBe('cancelled');
+
+    await expectRejects(
+      drain(
+        manager.sendMessage(session.id, {
+          turnId: 'late-disposal-next-turn',
+          text: 'must not create a second backend after quarantine failure',
+        }),
+      ),
+      /permanently quarantined/,
+    );
+    expect(builds).toBe(1);
+    expect(disposeCalls).toBe(1);
   });
 
   test('stopSession keeps a rejected backend generation quarantined across retries', async () => {
@@ -10647,6 +11409,15 @@ describe('SessionManager permission mode updates', () => {
     expect(backend?.stopCalls).toBe(1);
     expect(backend?.stopModes).toEqual(['after_step']);
     expect(backend?.sendInputs.map((input) => input.turnId)).toEqual(['turn-warm-cache']);
+    const registeringRun = (await runStore.listSessionRuns(session.id)).find(
+      (run) => run.turnId === 'turn-registering',
+    );
+    expect(registeringRun?.status).toBe('cancelled');
+    expect(
+      (await runStore.readRuntimeEvents(session.id, registeringRun!.runId)).filter(
+        isTerminalRuntimeEvent,
+      ),
+    ).toHaveLength(1);
   });
 
   test('stopSession fences dispatch after the public onRunStarted hook', async () => {
@@ -16519,8 +17290,10 @@ class DelegatingRuntimeKernel implements RuntimeKernelLike {
   constructor(private readonly events: readonly SessionEvent[] = []) {}
 
   claimExecution(sessionId: string): ReturnType<RuntimeKernelLike['claimExecution']> {
+    const stopController = new AbortController();
     return {
       sessionId,
+      stopSignal: stopController.signal,
       isStopRequested: () => false,
       release: () => {},
     };
@@ -18268,6 +19041,10 @@ class MemoryAgentRunStore implements AgentRunStore, RuntimeEventStore {
   private events = new Map<string, AgentRunEvent[]>();
   private runtimeEvents = new Map<string, RuntimeEvent[]>();
   private runtimeEventAppendCount = 0;
+  private rootTurnAdmissions = new Map<
+    string,
+    { runId: string; userMessageId: string | null; execution: RootExecutionDescriptor }
+  >();
 
   constructor(
     private readonly options: {
@@ -18346,6 +19123,23 @@ class MemoryAgentRunStore implements AgentRunStore, RuntimeEventStore {
       .filter((header) => header.sessionId === sessionId)
       .sort((a, b) => a.createdAt - b.createdAt || a.runId.localeCompare(b.runId))
       .map((header) => ({ ...header }));
+  }
+
+  seedRootTurnAdmission(
+    sessionId: string,
+    turnId: string,
+    admission: { runId: string; userMessageId: string | null; execution: RootExecutionDescriptor },
+  ): void {
+    this.rootTurnAdmissions.set(key(sessionId, turnId), admission);
+  }
+
+  async readRootTurnAdmission(
+    sessionId: string,
+    turnId: string,
+  ): Promise<
+    { runId: string; userMessageId: string | null; execution: RootExecutionDescriptor } | undefined
+  > {
+    return this.rootTurnAdmissions.get(key(sessionId, turnId));
   }
 
   async appendEvent(sessionId: string, runId: string, event: AgentRunEvent): Promise<void> {
@@ -18770,13 +19564,16 @@ function createGraphOperatorSession(
   );
 }
 
-function graphIntentClaim(overrides: Partial<AgentGraphIntentClaim> = {}): AgentGraphIntentClaim {
-  return {
+function graphIntentClaim(
+  overrides: Partial<AgentGraphIntentClaim> = {},
+  prompt = 'test graph prompt',
+): AgentGraphIntentClaim {
+  const claim: AgentGraphIntentClaim = {
     schemaVersion: 1,
     claimId: `graph_claim_${'a'.repeat(32)}`,
     graphId: 'graph-1',
     intentId: `graph_intent_${'b'.repeat(32)}`,
-    intentFingerprint: `sha256:${'c'.repeat(64)}`,
+    intentFingerprint: '',
     readinessContextFingerprint: `sha256:${'d'.repeat(64)}`,
     targetOperatorId: 'operator-1',
     targetSessionId: 'session-child',
@@ -18785,25 +19582,144 @@ function graphIntentClaim(overrides: Partial<AgentGraphIntentClaim> = {}): Agent
     claimedAt: 10,
     ...overrides,
   };
+  const intent = graphRunnableIntentForClaim(claim);
+  return Object.freeze({
+    ...claim,
+    intentFingerprint:
+      overrides.intentFingerprint ??
+      fingerprintAgentGraphRunnableIntent({
+        intent,
+        executionInput: { prompt },
+      }),
+  });
 }
 
 function graphExecutionInput(claim: AgentGraphIntentClaim, prompt: string) {
+  const intent = graphRunnableIntentForClaim(claim);
+  const storedClaim = Object.freeze({ ...claim });
   const claimStore: AgentGraphIntentClaimStore = {
     async claimAgentGraphIntent() {
       throw new Error('test claim store is read-only');
     },
     async readAgentGraphIntentClaim(graphId, intentId) {
-      return graphId === claim.graphId && intentId === claim.intentId ? claim : undefined;
+      return graphId === storedClaim.graphId && intentId === storedClaim.intentId
+        ? storedClaim
+        : undefined;
     },
     async listAgentGraphIntentClaims(graphId) {
-      return !graphId || graphId === claim.graphId ? [claim] : [];
+      return !graphId || graphId === storedClaim.graphId ? [storedClaim] : [];
     },
   };
   return {
     claimStore,
+    intent,
     graphId: claim.graphId,
     intentId: claim.intentId,
     prompt,
+  };
+}
+
+function graphRunnableIntentForClaim(claim: AgentGraphIntentClaim): AgentGraphRunnableIntent {
+  return {
+    schemaVersion: 1,
+    intentId: claim.intentId,
+    graphId: claim.graphId,
+    readinessContextFingerprint: claim.readinessContextFingerprint,
+    policyFingerprint: `sha256:${'e'.repeat(64)}`,
+    readinessId: 'readiness-1',
+    operatorId: claim.targetOperatorId,
+    targetSessionId: claim.targetSessionId,
+    policyKind: 'map',
+    triggerRouteIds: ['route-1'],
+    triggerRecordIds: ['record-1'],
+  };
+}
+
+async function createQueuedGraphScenario(firstAbortSignal?: AbortSignal) {
+  const store = new MemorySessionStore();
+  const runStore = new MemoryAgentRunStore();
+  const backends = new BackendRegistry();
+  const activeGate = makeGate();
+  const firstReady = makeGate();
+  const stopStarted = makeGate();
+  let backend!: TestBackend;
+  backends.register('fake', (ctx) => {
+    backend = new (class extends TestBackend {
+      override async stop(
+        reason: 'user_stop' | 'redirect',
+        mode: BackendStopMode = 'immediate',
+      ): Promise<void> {
+        await super.stop(reason, mode);
+        stopStarted.release();
+        activeGate.release();
+      }
+    })(ctx, activeGate);
+    return backend;
+  });
+  const manager = new SessionManager({
+    store,
+    runStore,
+    runtimeEventStore: runStore,
+    backends,
+    childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+    newId: nextId(),
+    now: nextNow(70),
+  });
+  const parent = await manager.createSession(makeInput());
+  const child = await createGraphOperatorSession(store, parent.id);
+  const firstClaim = graphIntentClaim({ targetSessionId: child.id }, 'first activation');
+  const secondClaim = graphIntentClaim(
+    {
+      claimId: `graph_claim_${'e'.repeat(32)}`,
+      intentId: `graph_intent_${'f'.repeat(32)}`,
+      targetSessionId: child.id,
+      targetTurnId: 'graph-turn-2',
+      targetRunId: 'graph-run-2',
+    },
+    'queued activation',
+  );
+  const thirdClaim = graphIntentClaim(
+    {
+      claimId: `graph_claim_${'1'.repeat(32)}`,
+      intentId: `graph_intent_${'2'.repeat(32)}`,
+      targetSessionId: child.id,
+      targetTurnId: 'graph-turn-3',
+      targetRunId: 'graph-run-3',
+    },
+    'third activation',
+  );
+  const first = manager.runClaimedAgentGraphIntent({
+    ...graphExecutionInput(firstClaim, 'first activation'),
+    ...(firstAbortSignal ? { abortSignal: firstAbortSignal } : {}),
+    onReady: () => firstReady.release(),
+  });
+  await firstReady.promise;
+  return {
+    store,
+    runStore,
+    manager,
+    child,
+    backend,
+    activeGate,
+    stopStarted,
+    first,
+    claims: [firstClaim, secondClaim, thirdClaim] as const,
+  };
+}
+
+function hostedGraphExecutionCapability(
+  claims: AgentGraphIntentClaimStore,
+  runs: MemoryAgentRunStore,
+) {
+  return {
+    readAgentGraphIntentClaim: (graphId: string, intentId: string) =>
+      claims.readAgentGraphIntentClaim(graphId, intentId),
+    async readRootTurnAdmissionIdentity(sessionId: string, turnId: string) {
+      const admission = await runs.readRootTurnAdmission(sessionId, turnId);
+      return admission
+        ? { runId: admission.runId, userMessageId: admission.userMessageId }
+        : undefined;
+    },
   };
 }
 

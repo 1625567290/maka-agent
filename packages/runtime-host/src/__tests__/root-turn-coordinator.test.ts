@@ -12,10 +12,12 @@ import {
   LOCAL_READ_AGENT_PROFILE,
   RuntimeHostedRootConflictError,
   RuntimeInteractionAdmissionRejectedError,
+  RuntimeMessageAuthorityInvariantError,
   SessionManager,
   type RuntimeHostedRootAuthority,
   type RuntimeInteractionAuthority,
   type RuntimeInteractionRunClosureReason,
+  type RuntimeMessageAuthority,
 } from '@maka/runtime';
 import type { AgentBackend, BackendSendInput, PermissionDecision } from '@maka/core/backend-types';
 import type { SessionEvent } from '@maka/core/events';
@@ -413,11 +415,10 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
     assert.deepEqual(retryMessages, []);
     assert.deepEqual(coordinator.readRootState(child.childSessionId), { kind: 'idle' });
 
-    const readyFailure = new Error('linked child onReady failed after stop committed');
     const callbackAbortController = new AbortController();
     const stopClosureObserved = deferred<void>();
     stopClosureSignal = stopClosureObserved;
-    let failedReady:
+    let stoppedReady:
       | {
           childSessionId: string;
           turnId: string;
@@ -426,27 +427,26 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
           agentName: string;
         }
       | undefined;
-    const callbackFailed = await manager.spawnChildSession(parent.id, {
+    const callbackStopped = await manager.spawnChildSession(parent.id, {
       spawnedBy: {
         parentRunId: parentStarted.result.runId,
         parentTurnId,
-        toolCallId: 'linked-ready-failure',
+        toolCallId: 'linked-ready-stop',
       },
       agentProfile: LOCAL_READ_AGENT_PROFILE,
       prompt: FAKE_ASK_USER_QUESTION_PROMPT,
       abortSignal: callbackAbortController.signal,
       onReady: async (ready) => {
-        failedReady = ready;
+        stoppedReady = ready;
         callbackAbortController.abort();
         await stopClosureObserved.promise;
-        throw readyFailure;
       },
     });
     stopClosureSignal = undefined;
-    assert.ok(failedReady);
-    assert.equal(callbackFailed.status, 'cancelled');
-    assert.equal(callbackFailed.runId, failedReady.runId);
-    assert.deepEqual(coordinator.readRootState(failedReady.childSessionId), { kind: 'idle' });
+    assert.ok(stoppedReady);
+    assert.equal(callbackStopped.status, 'cancelled');
+    assert.equal(callbackStopped.runId, stoppedReady.runId);
+    assert.deepEqual(coordinator.readRootState(stoppedReady.childSessionId), { kind: 'idle' });
     assert.equal(interactions.isPoisoned(), false);
     assert.equal(drainRequested, false);
 
@@ -662,18 +662,22 @@ test('pre-bind startup failure fail-stops without orphaning an admitted queued M
     releaseBackendFactory.resolve();
     await assert.rejects(starting, /injected backend startup failure/);
 
+    const admissions = await fixture.stores.agentRunStore.listRootTurnAdmissionsForRecovery(
+      fixture.sessionId,
+    );
+    assert.equal(admissions.length, 2);
+    const successor = admissions[1];
+    assert.ok(successor);
+    if (!successor) return;
     const expectedOwner = {
       kind: 'active' as const,
       sessionId: fixture.sessionId,
-      turnId,
-      runId: admission.runId,
+      turnId: successor.turnId,
+      runId: successor.runId,
     };
     assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), expectedOwner);
-    assert.deepEqual(
-      fixture.messages.projection(fixture.sessionId).followup.map((entry) => entry.messageId),
-      ['message-held-across-startup-failure'],
-    );
-    assert.equal(fixture.liveResidencies(), 2);
+    assert.deepEqual(fixture.messages.projection(fixture.sessionId).followup, []);
+    assert.equal(fixture.liveResidencies(), 1);
     assert.equal(fixture.drainRequested(), true);
 
     const rejected = await fixture.messages.handlers['turn.message.submit'](
@@ -689,10 +693,19 @@ test('pre-bind startup failure fail-stops without orphaning an admitted queued M
     assert.equal(rejected.ok, false);
     if (!rejected.ok) assert.equal(rejected.error.code, 'host_draining');
 
-    await assert.rejects(fixture.coordinator.close());
-    await assert.rejects(fixture.messages.close(), /live owner, entry, or transition/);
-    assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), expectedOwner);
-    assert.equal(fixture.liveResidencies(), 2);
+    await assert.rejects(fixture.coordinator.close(), (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(
+        error.errors.some(
+          (cause) => cause instanceof Error && cause.message === 'injected backend startup failure',
+        ),
+        true,
+      );
+      return true;
+    });
+    await fixture.messages.close();
+    assert.deepEqual(fixture.coordinator.readRootState(fixture.sessionId), { kind: 'idle' });
+    assert.equal(fixture.liveResidencies(), 0);
   } finally {
     await fixture.dispose();
   }
@@ -1064,16 +1077,20 @@ test('public turn.interrupt releases the Session lane while a queried Run is sti
   timeout: 20_000,
 }, async () => {
   const backendFactoryEntered = deferred<void>();
-  const releaseBackendFactory = deferred<void>();
-  let backend: LinkedChildAuthorityBackend | undefined;
+  let backendFactoryAborted = false;
   const fixture = await createFailureFixture({
     withInteractions: true,
     registerBackend: (backends) => {
       backends.register('fake', async (context) => {
         backendFactoryEntered.resolve();
-        await releaseBackendFactory.promise;
-        backend = new LinkedChildAuthorityBackend(context.sessionId);
-        return backend;
+        return await new Promise<never>((_resolve, reject) => {
+          const abort = () => {
+            backendFactoryAborted = true;
+            reject(context.abortSignal?.reason ?? new Error('backend factory aborted'));
+          };
+          if (context.abortSignal?.aborted) abort();
+          else context.abortSignal?.addEventListener('abort', abort, { once: true });
+        });
       });
     },
   });
@@ -1109,21 +1126,19 @@ test('public turn.interrupt releases the Session lane while a queried Run is sti
     ).finally(() => {
       interruptSettled = true;
     });
-    assert.equal(await settlesWithin(interrupting, 25), false);
-    assert.equal(interruptSettled, false);
-
-    releaseBackendFactory.resolve();
     const [startOutcome, interruptOutcome] = await Promise.all([
-      completesWithin(starting, 2_000, 'turn start after interrupt fence'),
-      completesWithin(interrupting, 2_000, 'public interrupt after start handoff'),
+      completesWithin(starting, 2_000, 'cancelled turn start'),
+      completesWithin(interrupting, 2_000, 'public interrupt during backend creation'),
     ]);
     assert.equal(startOutcome.ok, true);
+    if (startOutcome.ok) assert.equal(startOutcome.result.status, 'cancelled');
     assert.equal(interruptOutcome.ok, true);
     if (interruptOutcome.ok) {
       assert.equal(interruptOutcome.result.turn.runId, queried.result.runId);
       assert.equal(interruptOutcome.result.turn.status, 'cancelled');
     }
-    assert.equal(backend?.sendCount, 0);
+    assert.equal(interruptSettled, true);
+    assert.equal(backendFactoryAborted, true);
     assert.equal(fixture.interactions?.isPoisoned(), false);
     assert.equal(fixture.drainRequested(), false);
 
@@ -1131,8 +1146,6 @@ test('public turn.interrupt releases the Session lane while a queried Run is sti
     await fixture.messages.close();
     await fixture.interactions?.close();
   } finally {
-    releaseBackendFactory.resolve();
-    backend?.release();
     await fixture.dispose();
   }
 });
@@ -1190,6 +1203,340 @@ test('Runtime stop lets a running admission publish before its exact-Run closure
     await fixture.interactions.close();
   } finally {
     releasePreflight.resolve();
+    backend?.release();
+    await fixture.dispose();
+  }
+});
+
+test('post-start backend failure closes its owner without draining an unrelated active root', {
+  timeout: 20_000,
+}, async () => {
+  let backend: AdmissionThenFailureBackend | undefined;
+  let failingSessionId: string | undefined;
+  let unrelatedBackend: LinkedChildAuthorityBackend | undefined;
+  const backendReady = deferred<AdmissionThenFailureBackend>();
+  const fixture = await createFailureFixture({
+    withInteractions: true,
+    registerBackend: (backends) => {
+      backends.register('fake', (context) => {
+        if (context.sessionId !== failingSessionId) {
+          unrelatedBackend = new LinkedChildAuthorityBackend(context.sessionId);
+          return unrelatedBackend;
+        }
+        backend = new AdmissionThenFailureBackend(context.sessionId);
+        backendReady.resolve(backend);
+        return backend;
+      });
+    },
+  });
+  failingSessionId = fixture.sessionId;
+
+  try {
+    const unrelatedSession = await fixture.stores.sessionStore.create({
+      cwd: '/tmp/unrelated-active-root',
+      backend: 'fake',
+      llmConnectionSlug: 'fake',
+      model: 'fake-model',
+      permissionMode: 'ask',
+    });
+    const unrelatedTurnId = 'turn-unrelated-active-root';
+    const unrelatedStarted = await fixture.coordinator.handlers['turn.start'](
+      {
+        sessionId: unrelatedSession.id,
+        turnId: unrelatedTurnId,
+        content: { text: HOLD_EXTERNAL_PROMPT },
+      },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+    assert.equal(unrelatedStarted.ok, true);
+    if (!unrelatedStarted.ok) return;
+    assert.ok(unrelatedBackend);
+
+    const turnId = 'turn-admission-before-backend-failure';
+    const starting = fixture.coordinator.handlers['turn.start'](
+      {
+        sessionId: fixture.sessionId,
+        turnId,
+        content: { text: 'admit a question then fail before publication' },
+      },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+    const activeBackend = await completesWithin(
+      backendReady.promise,
+      2_000,
+      'backend construction',
+    );
+    await completesWithin(
+      activeBackend.admitted.promise,
+      2_000,
+      'question admission before backend failure',
+    );
+    const started = await completesWithin(starting, 2_000, 'turn start before backend failure');
+    assert.equal(started.ok, true);
+    if (!started.ok) return;
+
+    activeBackend.releaseFailure();
+    await waitUntil(() => fixture.coordinator.readRootState(fixture.sessionId).kind === 'idle');
+    await waitUntil(() => fixture.liveResidencies() === 1);
+
+    assert.deepEqual(activeBackend.closureReasons, ['turn_terminal']);
+    assert.equal(fixture.interactions?.isPoisoned(), false);
+    assert.equal(fixture.drainRequested(), false);
+    assert.deepEqual(fixture.coordinator.readRootState(unrelatedSession.id), {
+      kind: 'active',
+      sessionId: unrelatedSession.id,
+      turnId: unrelatedTurnId,
+      runId: unrelatedStarted.result.runId,
+    });
+    assert.equal(unrelatedBackend.stopCount, 0);
+    const run = await fixture.stores.agentRunStore.readRun(fixture.sessionId, started.result.runId);
+    const events = await fixture.stores.runtimeEventStore.readImmutableRuntimeEvents(
+      fixture.sessionId,
+      started.result.runId,
+    );
+    const terminal = classifyTerminalRuntimeLedger(run, events);
+    assert.equal(terminal.kind, 'fact');
+    if (terminal.kind === 'fact') assert.equal(terminal.fact.runStatus, 'failed');
+
+    await fixture.coordinator.stopRoot({
+      sessionId: unrelatedSession.id,
+      turnId: unrelatedTurnId,
+      runId: unrelatedStarted.result.runId,
+    });
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.interactions?.close();
+  } finally {
+    backend?.releaseFailure();
+    unrelatedBackend?.release();
+    await fixture.dispose();
+  }
+});
+
+test('claimed graph backend failure is contained after its failed terminal transition', {
+  timeout: 20_000,
+}, async () => {
+  let backend: AdmissionThenFailureBackend | undefined;
+  const backendReady = deferred<AdmissionThenFailureBackend>();
+  const fixture = await createFailureFixture({
+    withInteractions: true,
+    registerBackend: (backends) => {
+      backends.register('fake', (context) => {
+        backend = new AdmissionThenFailureBackend(context.sessionId);
+        backendReady.resolve(backend);
+        return backend;
+      });
+    },
+  });
+
+  try {
+    const { turnId, runId, execution } = executeClaimedGraphRoot(fixture, {
+      key: 'backend-failure',
+      claimChar: 'a',
+      intentChar: 'b',
+      prompt: 'fail this claimed graph execution after start',
+    });
+    const activeBackend = await completesWithin(
+      backendReady.promise,
+      2_000,
+      'claimed graph backend construction',
+    );
+    await completesWithin(
+      activeBackend.admitted.promise,
+      2_000,
+      'question admission before claimed graph backend failure',
+    );
+
+    activeBackend.releaseFailure();
+    await completesWithin(execution, 2_000, 'claimed graph failure containment');
+    const queried = await fixture.coordinator.handlers['turn.query'](
+      { sessionId: fixture.sessionId, turnId },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+
+    assert.equal(queried.ok, true);
+    if (queried.ok) {
+      assert.equal(queried.result.runId, runId);
+      assert.equal(queried.result.status, 'failed');
+    }
+    assert.deepEqual(activeBackend.closureReasons, ['turn_terminal']);
+    assert.equal(fixture.interactions?.isPoisoned(), false);
+    assert.equal(fixture.drainRequested(), false);
+
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.interactions?.close();
+  } finally {
+    backend?.releaseFailure();
+    await fixture.dispose();
+  }
+});
+
+test('failed claimed graph Run identity mismatch drains instead of being contained', {
+  timeout: 20_000,
+}, async () => {
+  let backend: AdmissionThenFailureBackend | undefined;
+  const fixture = await createFailureFixture({
+    withInteractions: true,
+    registerBackend: (backends) => {
+      backends.register('fake', (context) => {
+        backend = new AdmissionThenFailureBackend(context.sessionId);
+        return backend;
+      });
+    },
+  });
+
+  try {
+    const { execution } = executeClaimedGraphRoot(fixture, {
+      key: 'identity-mismatch',
+      claimChar: 'e',
+      intentChar: 'f',
+      prompt: 'throw a backend failure after identity drift',
+      runtimeAgentName: 'Drifted Agent Name',
+    });
+
+    await waitUntil(() => backend !== undefined);
+    await completesWithin(
+      backend!.admitted.promise,
+      2_000,
+      'question admission before identity-drift backend failure',
+    );
+    backend!.releaseFailure();
+    await assert.rejects(execution, RuntimeMessageAuthorityInvariantError);
+    await waitUntil(() => fixture.drainRequested());
+    await waitUntil(() => fixture.coordinator.readRootState(fixture.sessionId).kind === 'idle');
+
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.interactions?.close();
+  } finally {
+    backend?.releaseFailure();
+    await fixture.dispose();
+  }
+});
+
+test('post-start backend AggregateError is contained after its failed terminal transition', {
+  timeout: 20_000,
+}, async () => {
+  const firstProviderFailure = new Error('provider request failed');
+  const secondProviderFailure = new Error('provider response also failed');
+  const aggregateFailure = new AggregateError(
+    [firstProviderFailure, secondProviderFailure],
+    'provider returned multiple failures',
+  );
+  let backend: AdmissionThenFailureBackend | undefined;
+  const fixture = await createFailureFixture({
+    withInteractions: true,
+    registerBackend: (backends) => {
+      backends.register('fake', (context) => {
+        backend = new AdmissionThenFailureBackend(context.sessionId, aggregateFailure);
+        return backend;
+      });
+    },
+  });
+
+  try {
+    const turnId = 'turn-aggregate-cleanup-failure';
+    const starting = fixture.coordinator.handlers['turn.start'](
+      {
+        sessionId: fixture.sessionId,
+        turnId,
+        content: { text: 'surface aggregate execution cleanup failure' },
+      },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+    await waitUntil(() => backend !== undefined);
+    await completesWithin(
+      backend!.admitted.promise,
+      2_000,
+      'question admission before provider aggregate failure',
+    );
+    const started = await completesWithin(
+      starting,
+      2_000,
+      'turn start before provider aggregate failure',
+    );
+    assert.equal(started.ok, true);
+    if (!started.ok) return;
+
+    backend!.releaseFailure();
+    await waitUntil(() => fixture.coordinator.readRootState(fixture.sessionId).kind === 'idle');
+    assert.equal(fixture.drainRequested(), false);
+
+    const run = await fixture.stores.agentRunStore.readRun(fixture.sessionId, started.result.runId);
+    const events = await fixture.stores.runtimeEventStore.readImmutableRuntimeEvents(
+      fixture.sessionId,
+      started.result.runId,
+    );
+    const terminal = classifyTerminalRuntimeLedger(run, events);
+    assert.equal(terminal.kind, 'fact');
+    if (terminal.kind === 'fact') assert.equal(terminal.fact.runStatus, 'failed');
+
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.interactions?.close();
+  } finally {
+    backend?.releaseFailure();
+    await fixture.dispose();
+  }
+});
+
+test('post-start message owner cleanup failure drains after its failed terminal transition', {
+  timeout: 20_000,
+}, async () => {
+  let backend: LinkedChildAuthorityBackend | undefined;
+  const cleanupFailure = new Error('message owner release failed');
+  const fixture = await createFailureFixture({
+    registerBackend: (backends) => {
+      backends.register('fake', (context) => {
+        backend = new LinkedChildAuthorityBackend(context.sessionId);
+        return backend;
+      });
+    },
+    wrapMessageAuthority: (authority) => ({
+      bindRun: (identity) => {
+        const owner = authority.bindRun(identity);
+        return {
+          ...owner,
+          pull: () => owner.pull(),
+          ack: (leaseIds) => owner.ack(leaseIds),
+          nack: (leaseIds) => owner.nack(leaseIds),
+          release: () => {
+            owner.release();
+            throw cleanupFailure;
+          },
+        };
+      },
+    }),
+  });
+
+  try {
+    const turnId = 'turn-message-owner-cleanup-failure';
+    const started = await fixture.coordinator.handlers['turn.start'](
+      {
+        sessionId: fixture.sessionId,
+        turnId,
+        content: { text: 'surface rate limit with owner cleanup failure' },
+      },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+    assert.equal(started.ok, true);
+    if (!started.ok) return;
+
+    await waitUntil(() => fixture.drainRequested());
+    await waitUntil(() => fixture.coordinator.readRootState(fixture.sessionId).kind === 'idle');
+    const run = await fixture.stores.agentRunStore.readRun(fixture.sessionId, started.result.runId);
+    const events = await fixture.stores.runtimeEventStore.readImmutableRuntimeEvents(
+      fixture.sessionId,
+      started.result.runId,
+    );
+    const terminal = classifyTerminalRuntimeLedger(run, events);
+    assert.equal(terminal.kind, 'fact');
+    if (terminal.kind === 'fact') assert.equal(terminal.fact.runStatus, 'failed');
+
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+  } finally {
     backend?.release();
     await fixture.dispose();
   }
@@ -1444,9 +1791,68 @@ test('public turn.stop takes over an earlier closure claim queued behind its lea
   }
 });
 
+function executeClaimedGraphRoot(
+  fixture: Awaited<ReturnType<typeof createFailureFixture>>,
+  input: {
+    key: string;
+    claimChar: string;
+    intentChar: string;
+    prompt: string;
+    runtimeAgentName?: string;
+  },
+) {
+  const turnId = `turn-claimed-graph-${input.key}`;
+  const runId = `run-claimed-graph-${input.key}`;
+  const agentId = 'claimed-graph-operator';
+  const agentName = 'Claimed Graph Operator';
+  const execution = fixture.coordinator.executeRoot({
+    sessionId: fixture.sessionId,
+    turnId,
+    runId,
+    userMessageId: `message-claimed-graph-${input.key}`,
+    execution: {
+      kind: 'claimed_agent_graph_intent',
+      claim: {
+        schemaVersion: 1,
+        claimId: `graph_claim_${input.claimChar.repeat(32)}`,
+        graphId: `graph-${input.key}`,
+        intentId: `graph_intent_${input.intentChar.repeat(32)}`,
+        intentFingerprint: `sha256:${'c'.repeat(64)}`,
+        readinessContextFingerprint: `sha256:${'d'.repeat(64)}`,
+        targetOperatorId: agentId,
+        targetSessionId: fixture.sessionId,
+        targetTurnId: turnId,
+        targetRunId: runId,
+        claimedAt: Date.now(),
+      },
+      agentId,
+      agentName,
+    },
+    content: { text: input.prompt },
+    start: ({ runId: admittedRunId, userMessageId, onRunStarted }) =>
+      fixture.manager.sendMessage(
+        fixture.sessionId,
+        {
+          turnId,
+          text: input.prompt,
+          agentId,
+          agentName: input.runtimeAgentName ?? agentName,
+        },
+        {
+          runId: admittedRunId,
+          userMessageId: userMessageId ?? undefined,
+          durability: 'required',
+          onRunStarted,
+        },
+      ),
+  });
+  return { turnId, runId, execution };
+}
+
 async function createFailureFixture(options: {
   registerBackend(backends: BackendRegistry): void;
   wrapAdmissionStore?(store: RootTurnAdmissionStore): RootTurnAdmissionStore;
+  wrapMessageAuthority?(authority: RuntimeMessageAuthority): RuntimeMessageAuthority;
   withInteractions?: boolean;
   beforeInteractionPreflight?(): Promise<void>;
 }) {
@@ -1487,6 +1893,8 @@ async function createFailureFixture(options: {
   let coordinator: RootTurnCoordinator | undefined;
   let continuity: SessionContinuityCoordinator | undefined;
   let canonicalProjection: CanonicalSessionProjectionReader | undefined;
+  let messages!: HostMessageCoordinator;
+  let interactions: HostInteractionCoordinator | undefined;
   const rootPort: HostMessageRootPort = {
     readSessionHeader: (sessionId) => requireCoordinator(coordinator).readSessionHeader(sessionId),
     readRootState: (sessionId) => requireCoordinator(coordinator).readRootState(sessionId),
@@ -1501,8 +1909,10 @@ async function createFailureFixture(options: {
   await stores.messageReceiptStore.beginHostEpoch(hostEpoch);
   const requestDrain = () => {
     drainRequested = true;
+    messages?.beginDrain();
+    interactions?.beginDrain();
   };
-  const messages = new HostMessageCoordinator({
+  messages = new HostMessageCoordinator({
     hostEpoch,
     root: rootPort,
     durableProof: {
@@ -1532,7 +1942,7 @@ async function createFailureFixture(options: {
     sessionAdmission,
     requestDrain,
   );
-  const interactions = options.withInteractions
+  interactions = options.withInteractions
     ? new HostInteractionCoordinator({
         store: stores.interactionStore,
         sessionAdmission,
@@ -1556,7 +1966,7 @@ async function createFailureFixture(options: {
     backends,
     newId: randomUUID,
     now: Date.now,
-    messageAuthority: messages,
+    messageAuthority: options.wrapMessageAuthority?.(messages) ?? messages,
   };
   const manager = interactions
     ? new SessionManager({
@@ -1689,6 +2099,7 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
 class LinkedChildAuthorityBackend implements AgentBackend {
   readonly kind = 'fake' as const;
   sendCount = 0;
+  stopCount = 0;
   private stopped = false;
   private releaseWait: (() => void) | undefined;
 
@@ -1760,6 +2171,7 @@ class LinkedChildAuthorityBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {
+    this.stopCount += 1;
     this.stopped = true;
     this.releaseWait?.();
   }
@@ -1924,6 +2336,62 @@ class RunningAdmissionBackend implements AgentBackend {
 
   async dispose(): Promise<void> {
     this.settled.resolve();
+  }
+}
+
+class AdmissionThenFailureBackend implements AgentBackend {
+  readonly kind = 'fake' as const;
+  readonly admitted = deferred<void>();
+  readonly closureReasons: string[] = [];
+  private readonly fail = deferred<void>();
+
+  constructor(
+    readonly sessionId: string,
+    private readonly failure: unknown = new Error('backend failed after question admission'),
+  ) {}
+
+  releaseFailure(): void {
+    this.fail.resolve();
+  }
+
+  async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    if (!input.hostedInteraction) {
+      throw new Error('AdmissionThenFailureBackend requires hosted Interaction authority');
+    }
+    const request = {
+      type: 'user_question_request',
+      id: randomUUID(),
+      turnId: input.turnId,
+      ts: Date.now(),
+      requestId: randomUUID(),
+      toolUseId: randomUUID(),
+      questions: [
+        {
+          question: 'Continue?',
+          options: [{ label: 'Yes' }, { label: 'No' }],
+        },
+      ],
+    } satisfies Extract<SessionEvent, { type: 'user_question_request' }>;
+    await input.hostedInteraction.admitUserQuestionRequest({
+      request,
+      settlement: {
+        applyAnswer: async () => {},
+        applyClosure: async (reason) => {
+          this.closureReasons.push(reason);
+        },
+      },
+    });
+    this.admitted.resolve();
+    await this.fail.promise;
+    throw this.failure;
+  }
+
+  async stop(): Promise<void> {}
+
+  async respondToPermission(): Promise<void> {}
+
+  async dispose(): Promise<void> {
+    this.fail.resolve();
   }
 }
 
