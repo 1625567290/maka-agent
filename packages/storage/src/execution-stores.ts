@@ -233,6 +233,8 @@ async function openExecutionStoresForWrite<K extends StorageRootKind, E extends 
       readEvents: (sessionId, runId) => run(() => agentRunStore.readEvents(sessionId, runId)),
       readEventsForRecovery: (sessionId, runId) =>
         run(() => agentRunStore.readEventsForRecovery(sessionId, runId)),
+      readEventsForEvidence: (sessionId, runId) =>
+        run(() => agentRunStore.readEventsForEvidence(sessionId, runId)),
       readEventProjection: (sessionId, type) =>
         run(() => agentRunStore.readEventProjection(sessionId, type)),
       repairEventProjection: (sessionId, type, event, options) =>

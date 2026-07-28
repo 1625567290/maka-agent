@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import type {
+  AgentRunEvent,
   AgentRunHeader,
   BackendKind,
   PricingConfig,
@@ -575,6 +576,7 @@ async function readHarborCellUsageCheckpoint(
   }
 }
 
+/** Export top-level invocation ledgers for provider-request benchmark evidence. */
 export async function writeHarborTaskRunTrace(input: {
   outputDir: string;
   storage: HeadlessStorageWriter;
@@ -582,9 +584,49 @@ export async function writeHarborTaskRunTrace(input: {
 }): Promise<string> {
   const storage = authenticateHeadlessStorageWriter(input.storage);
   const eventGroups = await Promise.all(
-    input.invocations.map((invocation) =>
-      storage.executionStores.agentRunStore.readEvents(invocation.sessionId, invocation.runId),
-    ),
+    input.invocations.map(async (invocation) => {
+      const [header, events] = await Promise.all([
+        storage.executionStores.agentRunStore.readRun(invocation.sessionId, invocation.runId),
+        storage.executionStores.agentRunStore.readEventsForEvidence(
+          invocation.sessionId,
+          invocation.runId,
+        ),
+      ]);
+      const evidenceEvents =
+        header.traceWriteError && !events.some((event) => event.type === 'trace_write_failed')
+          ? [
+              ...events,
+              {
+                type: 'trace_write_failed',
+                id: `run-header-trace-write-failed-${header.runId}`,
+                runId: header.runId,
+                sessionId: header.sessionId,
+                turnId: header.turnId,
+                ts: header.updatedAt,
+                message: header.traceWriteError,
+              } satisfies AgentRunEvent,
+            ]
+          : events;
+      if (header.backendKind !== 'ai-sdk' || evidenceEvents.some(isProviderRequestTraceEvidence)) {
+        return evidenceEvents;
+      }
+      return [
+        ...evidenceEvents,
+        {
+          type: 'event_corrupt',
+          id: `run-provider-request-evidence-missing-${header.runId}`,
+          runId: header.runId,
+          sessionId: header.sessionId,
+          turnId: header.turnId,
+          ts: header.updatedAt,
+          message: `Provider request trace evidence is missing for invocation ${invocation.invocationId}`,
+          data: {
+            reason: 'missing_provider_request_evidence',
+            invocationId: invocation.invocationId,
+          },
+        } satisfies AgentRunEvent,
+      ];
+    }),
   );
   const chunks = eventGroups.map((events) =>
     events.map((event) => JSON.stringify(event)).join('\n'),
@@ -596,6 +638,14 @@ export async function writeHarborTaskRunTrace(input: {
     nonEmptyChunks.length > 0 ? `${nonEmptyChunks.join('\n')}\n` : '',
   );
   return traceEventsPath;
+}
+
+function isProviderRequestTraceEvidence(event: AgentRunEvent): boolean {
+  return (
+    event.type === 'provider_request_captured' ||
+    event.type === 'provider_request_attempt_recorded' ||
+    event.type === 'trace_write_failed'
+  );
 }
 
 export async function runHarborCellFromEnv(

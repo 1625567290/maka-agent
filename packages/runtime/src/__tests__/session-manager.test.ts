@@ -12023,6 +12023,52 @@ describe('SessionManager permission mode updates', () => {
     expect(events.some((event) => event.id === 'attempt-2')).toBe(true);
   });
 
+  test('carries a provider attempt failure latch into the terminal run header', async () => {
+    const store = new MemorySessionStore();
+    let failAttemptAppend = true;
+    let failFailureLatch = true;
+    let failFailureSentinel = true;
+    const runStore = new MemoryAgentRunStore({
+      beforeAgentRunUpdate: async (_sessionId, _runId, patch) => {
+        if (patch.traceWriteError && failFailureLatch) {
+          failFailureLatch = false;
+          throw new Error('trace failure latch update failed');
+        }
+      },
+      beforeAgentRunEventAppend: async (_sessionId, _runId, event) => {
+        if (event.type === 'provider_request_attempt_recorded' && failAttemptAppend) {
+          failAttemptAppend = false;
+          throw new Error('provider attempt append failed');
+        }
+        if (event.type === 'trace_write_failed' && failFailureSentinel) {
+          failFailureSentinel = false;
+          throw new Error('trace failure sentinel append failed');
+        }
+      },
+    });
+    const backends = new BackendRegistry();
+    backends.register('fake', (ctx) => new ProviderRequestTraceBackend(ctx));
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId: nextId(),
+      now: nextNow(12_763),
+    });
+    const session = await manager.createSession(makeInput());
+
+    await drain(manager.sendMessage(session.id, { turnId: 'turn-1', text: 'hello' }));
+
+    const [run] = await runStore.listSessionRuns(session.id);
+    expect(run?.status).toBe('completed');
+    expect(run?.traceWriteError).toMatch(
+      /append provider request attempt: provider attempt append failed/,
+    );
+    const events = await runStore.readEvents(session.id, run!.runId);
+    expect(events.some((event) => event.type === 'trace_write_failed')).toBe(false);
+  });
+
   test('finalizes the run when a required provider capture append fails', async () => {
     const store = new MemorySessionStore();
     let providerDispatches = 0;
@@ -16923,7 +16969,7 @@ class ProviderRequestTraceBackend implements AgentBackend {
 
   async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
     await this.ctx.recordProviderRequestCapture?.({
-      schemaVersion: 1,
+      schemaVersion: 2,
       traceId: 'provider-trace-1',
       captureId: 'capture-1',
       turnId: input.turnId,
@@ -16931,6 +16977,7 @@ class ProviderRequestTraceBackend implements AgentBackend {
       providerId: 'fake',
       modelId: 'fake-model',
       requestHash: 'sha256:request',
+      requestPayloadWithoutProviderOptionsHash: 'sha256:shared-request',
       requestBytes: 100,
       segments: [],
       artifactId: 'artifact-capture',
@@ -16987,7 +17034,7 @@ class ProviderCaptureGateBackend implements AgentBackend {
 
   async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
     await this.ctx.recordProviderRequestCapture?.({
-      schemaVersion: 1,
+      schemaVersion: 2,
       traceId: 'provider-trace-gated',
       captureId: 'capture-gated',
       turnId: input.turnId,
@@ -16995,6 +17042,7 @@ class ProviderCaptureGateBackend implements AgentBackend {
       providerId: 'fake',
       modelId: 'fake-model',
       requestHash: 'sha256:gated',
+      requestPayloadWithoutProviderOptionsHash: 'sha256:shared-gated',
       requestBytes: 100,
       segments: [],
       artifactId: 'artifact-gated',
@@ -17048,7 +17096,7 @@ class ProviderCaptureAfterAttemptFailureBackend implements AgentBackend {
     await this.attemptFailureRecorded;
     try {
       await this.ctx.recordProviderRequestCapture?.({
-        schemaVersion: 1,
+        schemaVersion: 2,
         traceId: 'provider-trace-1',
         captureId: 'capture-2',
         turnId: input.turnId,
@@ -17056,6 +17104,7 @@ class ProviderCaptureAfterAttemptFailureBackend implements AgentBackend {
         providerId: 'fake',
         modelId: 'fake-model',
         requestHash: 'sha256:request-2',
+        requestPayloadWithoutProviderOptionsHash: 'sha256:shared-request-2',
         requestBytes: 120,
         segments: [],
         artifactId: 'artifact-capture-2',
@@ -17860,6 +17909,11 @@ class MemoryAgentRunStore implements AgentRunStore, RuntimeEventStore {
         event: AgentRunEvent,
       ) => Promise<void> | void;
       beforeAgentRunEventRead?: (sessionId: string, runId: string) => Promise<void> | void;
+      beforeAgentRunUpdate?: (
+        sessionId: string,
+        runId: string,
+        patch: Partial<AgentRunHeader>,
+      ) => Promise<void> | void;
     } = {},
   ) {}
 
@@ -17876,6 +17930,7 @@ class MemoryAgentRunStore implements AgentRunStore, RuntimeEventStore {
     runId: string,
     patch: Partial<AgentRunHeader>,
   ): Promise<AgentRunHeader> {
+    await this.options.beforeAgentRunUpdate?.(sessionId, runId, patch);
     if (this.options.failUpdateRunOnce) {
       this.options.failUpdateRunOnce = false;
       throw new Error('update run failed');
