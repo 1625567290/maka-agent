@@ -14,6 +14,7 @@ import type {
 import {
   classifyRuntimeEventTerminalFact,
   compareRuntimeReadModelMessages,
+  isHardRuntimeEventReadModelDiagnostic,
   projectRuntimeEventsToStoredMessages,
   type RuntimeEventReadModelDiagnostic,
   type RuntimeEventTerminalFact,
@@ -292,7 +293,7 @@ export class RuntimeReadModel {
     if (canonicalPermissionRead.diagnostics.length > 0) {
       throw new RuntimeReadModelError('Canonical permission outcome read failed', diagnostics);
     }
-    if (hasHardProjectionDiagnostic(projected.diagnostics)) {
+    if (projected.diagnostics.some(isHardRuntimeEventReadModelDiagnostic)) {
       throw new RuntimeReadModelError('RuntimeEvent read projection is incomplete', diagnostics);
     }
 
@@ -442,17 +443,6 @@ function mergeInFlightProjectionCache(
 
 function messageTurnId(message: StoredMessage): string | undefined {
   return 'turnId' in message && typeof message.turnId === 'string' ? message.turnId : undefined;
-}
-
-function hasHardProjectionDiagnostic(
-  diagnostics: readonly RuntimeEventReadModelDiagnostic[],
-): boolean {
-  return diagnostics.some(
-    (diagnostic) =>
-      diagnostic.code === 'incomplete_event' ||
-      diagnostic.code === 'unsupported_event' ||
-      diagnostic.code === 'tool_use_id_mismatch',
-  );
 }
 
 function readModelDiagnostic(
