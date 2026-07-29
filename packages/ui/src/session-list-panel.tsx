@@ -49,9 +49,6 @@ export function SessionListPanel(props: {
       className="maka-session-panel agents-sidebar"
       aria-label={copy.listAriaLabel}
     >
-      <header className="maka-session-panel-header">
-        <div className="maka-sidebar-drag-strip" />
-      </header>
       <SessionSidebarNav
         selection={props.selection}
         planReminders={props.planReminders}
