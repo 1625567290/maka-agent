@@ -11,7 +11,7 @@ import {
   type SetStateAction,
 } from 'react';
 import type {
-  PermissionMode,
+  ExecutionBoundary,
   PlanReminder,
   QuoteRef,
   SessionSummary,
@@ -44,8 +44,10 @@ import {
   type TurnFooterActionMeta,
   useToast,
   activeInteractionFor,
+  enqueueInteraction,
   getConversationCopy,
   getSharedUiCopy,
+  reconcileSandboxBoundaryInteractions,
 } from '@maka/ui';
 import { useKeyboardHelp } from './keyboard-help';
 import { useCommandPalette } from './command-palette';
@@ -77,6 +79,7 @@ import { deriveBranchBanner } from './branch-banner';
 import { readNavigationState, selectNavigation } from './nav-selection';
 import { sessionMatchesNavSelection } from './session-nav-filter';
 import { deriveSessionRevisionNavigation } from './session-revisions';
+import { deriveDesktopExecutionBoundarySurface } from './desktop-execution-boundary-surface';
 import {
   SESSION_LIST_EXPANDED_MAX_WIDTH,
   SESSION_LIST_EXPANDED_MIN_WIDTH,
@@ -228,6 +231,11 @@ function AppShellContent({
     setPendingSessionModelBySession,
     clearTurnTransientState,
   } = useAppShellSessionWorkspace(toastApi);
+  const sandboxBoundaryInteractionEpochRef = useRef(new Map<string, number>());
+  const markSandboxBoundaryInteractionChanged = useCallback((sessionId: string) => {
+    const epochs = sandboxBoundaryInteractionEpochRef.current;
+    epochs.set(sessionId, (epochs.get(sessionId) ?? 0) + 1);
+  }, []);
   const attachmentDraftKey = activeId ?? 'new-session';
   const {
     pendingAttachments,
@@ -518,7 +526,8 @@ function AppShellContent({
     toastApi,
   });
   const activeInteraction = activeInteractionFor(interactionBySession, activeId);
-  const activePermission = activeInteraction?.type === 'permission_request' ? activeInteraction : undefined;
+  const activeSandboxBoundary =
+    activeInteraction?.type === 'sandbox_boundary_request' ? activeInteraction : undefined;
   const activeQuestion = activeInteraction?.type === 'user_question_request' ? activeInteraction : undefined;
   const activeSession = sessions.find((session) => session.id === activeId);
   // Live-turn projection of the active session: streaming/thinking slices, the
@@ -982,6 +991,54 @@ function AppShellContent({
     permissionMode: defaultPermissionMode,
         }
       : undefined);
+  const [activeExecutionBoundary, setActiveExecutionBoundary] = useState<
+    ExecutionBoundary | undefined
+  >();
+  useEffect(() => {
+    if (!activeId) {
+      setActiveExecutionBoundary(undefined);
+      return;
+    }
+    let cancelled = false;
+    setActiveExecutionBoundary(undefined);
+    void window.maka.sessions
+      .readExecutionBoundary(activeId)
+      .then((boundary) => {
+        if (!cancelled) setActiveExecutionBoundary(boundary);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, activeSessionForView?.permissionMode]);
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    const hydrationEpoch = sandboxBoundaryInteractionEpochRef.current.get(activeId) ?? 0;
+    void window.maka.sessions
+      .listActiveSandboxBoundaryRequests(activeId)
+      .then((requests) => {
+        if (
+          cancelled ||
+          (sandboxBoundaryInteractionEpochRef.current.get(activeId) ?? 0) !== hydrationEpoch
+        ) {
+          return;
+        }
+        setInteractionBySession((current) =>
+          reconcileSandboxBoundaryInteractions(current, activeId, requests),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, setInteractionBySession]);
+  const activeBoundarySurface = deriveDesktopExecutionBoundarySurface(
+    activeId,
+    activeExecutionBoundary,
+    activeId ? (activeSessionForView?.permissionMode ?? 'ask') : defaultPermissionMode,
+  );
+  const activePermissionMode = activeBoundarySurface.permissionMode;
   const planMode = usePlanModeState(activeSessionForView);
   const planConversationItems = (planMode.state?.proposals ?? []).map((proposal) => ({
     id: proposal.proposalId,
@@ -1256,7 +1313,7 @@ function AppShellContent({
 
   const {
     send,
-    respondToPermission,
+    respondToSandboxBoundary,
     respondToUserQuestion,
     refreshMessages,
     retryMessages,
@@ -1279,6 +1336,7 @@ function AppShellContent({
     setNavSelection,
     setLiveTurnBySession,
     setInteractionBySession,
+    onSandboxBoundaryInteractionChanged: markSandboxBoundaryInteractionChanged,
     showModelSetupToast,
     toastApi,
     upsertSessionSummary,
@@ -1488,6 +1546,7 @@ function AppShellContent({
     refreshSessions,
     setLiveTurnBySession,
     setInteractionBySession,
+    onSandboxBoundaryInteractionChanged: markSandboxBoundaryInteractionChanged,
     showModelSetupToast,
     toastApi,
     notifyRunEnded: ({ kind, sessionId, body }) => {
@@ -1771,7 +1830,8 @@ function AppShellContent({
   const commandOptions: AppShellCommandListOptions = {
     uiLocale,
     activeId,
-    activePermissionMode: activeSessionForView?.permissionMode,
+    activePermissionMode,
+    canSetPermissionMode: activeBoundarySurface.localInteractionAvailable,
     connections,
     defaultConnection,
     dailyReviewBridge,
@@ -2104,12 +2164,14 @@ function AppShellContent({
               <ChatComposerRegion
                 composerRef={composerRef}
                 active={navSelection.section === 'sessions'}
-                onboardingComposerHidden={onboardingComposerHidden}
+                onboardingComposerHidden={
+                  onboardingComposerHidden || !activeBoundarySurface.localInteractionAvailable
+                }
                 activeInteraction={activeInteraction}
                 activeId={activeId}
                 stopPendingBySession={stopPendingBySession}
-                activePermission={activePermission}
-                respondToPermission={respondToPermission}
+                activeSandboxBoundary={activeSandboxBoundary}
+                respondToSandboxBoundary={respondToSandboxBoundary}
                 activeQuestion={activeQuestion}
                 respondToUserQuestion={respondToUserQuestion}
                 stop={stop}
@@ -2224,7 +2286,7 @@ function AppShellContent({
                       }
                     : undefined
                 }
-                permissionMode={defaultPermissionMode}
+                permissionMode={activePermissionMode}
                 permissionModePending={activeId ? pendingPermissionModeBySession[activeId] === true : false}
                 permissionModeDisabledReason={
                   activeId && pendingPermissionModeBySession[activeId] === true
@@ -2237,7 +2299,11 @@ function AppShellContent({
                             ? shellCopy.permissionModeWaiting
                           : undefined
                 }
-                onPermissionModeChange={(mode) => setPermissionMode(mode)}
+                onPermissionModeChange={
+                  activeBoundarySurface.localInteractionAvailable
+                    ? (mode) => setPermissionMode(mode)
+                    : undefined
+                }
                 planModeActive={activeId
                   ? (activeSessionForView?.collaborationMode ?? 'agent') === 'plan'
                   : newChatPlanModeActive}

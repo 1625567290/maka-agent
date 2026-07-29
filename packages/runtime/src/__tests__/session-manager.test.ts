@@ -4,13 +4,24 @@ import { readFile } from 'node:fs/promises';
 import { setTimeout as timerDelay } from 'node:timers/promises';
 import { createHash } from 'node:crypto';
 import {
+  applySandboxBoundaryExpansion,
+  createGenesisExecutionBoundary,
+  createWorkspaceWritePermissionProfile,
   DEEP_RESEARCH_SESSION_LABEL,
   deriveTurnRecords,
   isSessionInlineRun,
   isTerminalRuntimeEvent,
 } from '@maka/core';
 import type {
+  CreateSandboxBoundaryRequest,
+  SandboxBoundaryRequest,
+  SandboxBoundaryResponse,
+  SandboxBoundarySettlement,
+  SettleSandboxBoundaryRequest,
+} from '@maka/core/sandbox-boundary';
+import type {
   CreateSessionInput,
+  ExecutionBoundary,
   PermissionMode,
   QueueEnqueueOutcome,
   AgentGraphIntentClaim,
@@ -31,18 +42,14 @@ import type {
   StoredMessage,
   TurnRecord,
 } from '@maka/core';
-import type {
-  BackendSendInput,
-  BackendStopMode,
-  PermissionDecision,
-} from '@maka/core/backend-types';
+import type { BackendSendInput, BackendStopMode } from '@maka/core/backend-types';
 import { expect } from '../test-helpers.js';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
+import { createTestAiSdkBackend } from './execution-boundary-test-helpers.js';
 import type { LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import { z } from 'zod';
 import type { LlmConnection } from '@maka/core';
 import { AiSdkBackend } from '../ai-sdk-backend.js';
-import { PermissionEngine } from '../permission-engine.js';
 import {
   BackendRegistry,
   SessionManager,
@@ -88,7 +95,6 @@ import {
   type CanonicalPermissionOutcomeRecord,
   type RuntimeInteractionAuthority,
   type RuntimeInteractionRunIdentity,
-  type RuntimePermissionContinuation,
   type RuntimeUserQuestionContinuation,
 } from '../interaction-authority.js';
 import {
@@ -246,7 +252,7 @@ describe('SessionManager graph operator provisioning', () => {
       makeInput({
         cwd: '/tmp/project',
         projectId: 'project-1',
-        permissionMode: 'bypass',
+        permissionMode: 'ask',
       }),
     );
     await runStore.createRun(
@@ -275,7 +281,12 @@ describe('SessionManager graph operator provisioning', () => {
 
     expect(provisioned).toHaveLength(1);
     expect(result.header.projectId).toBe('project-1');
-    expect(result.header.permissionMode).toBe('bypass');
+    expect(result.header.permissionMode).toBe('execute');
+    expect(
+      result.header.subagentRuntime
+        ? 'permissionCeiling' in result.header.subagentRuntime
+        : undefined,
+    ).toBe(false);
     expect(result.header.cwd).toBe(result.header.subagentWorkspace?.worktreePath);
     expect(result.header.subagentWorkspace?.kind).toBe('git_worktree');
     expect(result.header.subagentWorkspace?.branch).toMatch(/^maka\/subagent\//);
@@ -1455,6 +1466,9 @@ describe('SessionManager child-session runtime primitive', () => {
     });
 
     const childHeader = await store.readHeader(result.childSessionId);
+    expect(await store.readExecutionBoundary(result.childSessionId)).toEqual(
+      await store.readExecutionBoundary(parent.id),
+    );
     expect(childHeader.cwd).toBe('/tmp/project');
     expect(childHeader.projectId).toBe('project-1');
     expect(childHeader.workspaceRoot).toBe((await store.readHeader(parent.id)).workspaceRoot);
@@ -1482,8 +1496,7 @@ describe('SessionManager child-session runtime primitive', () => {
       profile: LOCAL_READ_AGENT_PROFILE,
       systemPrompt: LOCAL_READ_AGENT_DEFINITION.systemPrompt,
       toolNames: ['Read', 'Glob', 'Grep'],
-      categoryPolicy: { read: 'allow' },
-      permissionCeiling: 'ask',
+      categoryPolicy: {},
     });
     expect(childHeader.subagentSpawn?.schemaVersion).toBe(1);
     expect(childHeader.subagentSpawn?.requestFingerprint).toMatch(/^[a-f0-9]{64}$/);
@@ -1529,10 +1542,8 @@ describe('SessionManager child-session runtime primitive', () => {
         (message) => message.type === 'user' && message.text === 'inspect the storage boundary',
       ),
     ).toBe(true);
-    await expectRejects(
-      manager.setPermissionMode(result.childSessionId, 'execute'),
-      /exceeds its "ask" ceiling/,
-    );
+    await manager.setPermissionMode(result.childSessionId, 'execute');
+    expect((await store.readHeader(result.childSessionId)).permissionMode).toBe('execute');
     const projection = await manager.listChildAgents(parent.id);
     expect(projection.runs).toEqual([]);
     expect(projection.executions).toHaveLength(1);
@@ -1683,6 +1694,56 @@ describe('SessionManager child-session runtime primitive', () => {
     while (!(await parentTurn.next()).done) {}
   });
 
+  test('does not resume a linked child after its parent boundary narrows', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const parentGate = makeGate();
+    backends.register(
+      'fake',
+      (ctx) => new TestBackend(ctx, ctx.header.subagentRuntime ? undefined : parentGate),
+    );
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(140),
+      runtimeSource: 'test',
+    });
+    const parent = await manager.createSession(makeInput({ permissionMode: 'bypass' }));
+    const parentTurn = manager
+      .sendMessage(parent.id, { turnId: 'parent-turn', text: 'keep parent active' })
+      [Symbol.asyncIterator]();
+    await parentTurn.next();
+    const [parentRun] = await runStore.listSessionRuns(parent.id);
+    if (!parentRun) throw new Error('parent run was not recorded');
+
+    const child = await manager.spawnChildSession(parent.id, {
+      spawnedBy: {
+        parentRunId: parentRun.runId,
+        parentTurnId: parentRun.turnId,
+        toolCallId: 'stale-boundary-child',
+      },
+      agentProfile: LOCAL_READ_AGENT_PROFILE,
+      prompt: 'inspect before the boundary narrows',
+    });
+    store.forceBoundary(parent.id, {
+      ...createGenesisExecutionBoundary('ask'),
+      revision: 1,
+    });
+
+    await expectRejects(
+      manager.prepareChildAgentResume(parent.id, child.runId),
+      /execution boundary no longer matches its parent/,
+    );
+
+    parentGate.release();
+    while (!(await parentTurn.next()).done) {}
+  });
+
   test('retries a rate-limited fresh child inside the same linked Session', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
@@ -1734,7 +1795,7 @@ describe('SessionManager child-session runtime primitive', () => {
           };
         },
         async stop(): Promise<void> {},
-        async respondToPermission(): Promise<void> {},
+        async respondToSandboxBoundary(): Promise<void> {},
         async dispose(): Promise<void> {},
       };
     });
@@ -1869,7 +1930,7 @@ describe('SessionManager child-session runtime primitive', () => {
           };
         },
         async stop(): Promise<void> {},
-        async respondToPermission(): Promise<void> {},
+        async respondToSandboxBoundary(): Promise<void> {},
         async dispose(): Promise<void> {},
       };
     });
@@ -2177,7 +2238,7 @@ describe('SessionManager child-session runtime primitive', () => {
               profile: LOCAL_READ_AGENT_PROFILE,
               systemPrompt: LOCAL_READ_AGENT_DEFINITION.systemPrompt,
               toolNames: [...LOCAL_READ_AGENT_DEFINITION.tools],
-              categoryPolicy: { ...LOCAL_READ_AGENT_DEFINITION.categoryPolicy },
+              categoryPolicy: {},
               permissionCeiling: 'ask',
             },
             subagentSpawn: {
@@ -2285,7 +2346,6 @@ describe('SessionManager child-session runtime primitive', () => {
     if (!durablePrompt) throw new Error('child runtime snapshot was not persisted');
 
     const originalPrompt = LOCAL_READ_AGENT_DEFINITION.systemPrompt;
-    const originalPolicy = LOCAL_READ_AGENT_DEFINITION.categoryPolicy;
     let parentTurnDrained = false;
     const drainParentTurn = async (): Promise<void> => {
       parentGate.release();
@@ -2294,7 +2354,6 @@ describe('SessionManager child-session runtime primitive', () => {
     };
     try {
       LOCAL_READ_AGENT_DEFINITION.systemPrompt = 'Changed catalog prompt that must not leak.';
-      LOCAL_READ_AGENT_DEFINITION.categoryPolicy = { read: 'block' };
       let refreshSettled = false;
       const refresh = manager.refreshIdleBackends().finally(() => {
         refreshSettled = true;
@@ -2313,7 +2372,6 @@ describe('SessionManager child-session runtime primitive', () => {
     } finally {
       if (!parentTurnDrained) await drainParentTurn();
       LOCAL_READ_AGENT_DEFINITION.systemPrompt = originalPrompt;
-      LOCAL_READ_AGENT_DEFINITION.categoryPolicy = originalPolicy;
     }
 
     const childContexts = contexts.filter((ctx) => ctx.sessionId === child.childSessionId);
@@ -2540,7 +2598,7 @@ describe('SessionManager child-session runtime primitive', () => {
           profile: LOCAL_READ_AGENT_PROFILE,
           systemPrompt: LOCAL_READ_AGENT_DEFINITION.systemPrompt,
           toolNames: [...LOCAL_READ_AGENT_DEFINITION.tools],
-          categoryPolicy: { ...LOCAL_READ_AGENT_DEFINITION.categoryPolicy },
+          categoryPolicy: {},
           permissionCeiling: 'ask',
         },
         subagentSpawn: {
@@ -3770,6 +3828,259 @@ describe('SessionManager manual compaction', () => {
 });
 
 describe('SessionManager permission mode updates', () => {
+  test('projects the legacy mode through the atomic boundary transition', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const manager = new SessionManager({
+      store,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(900),
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
+
+    const summary = await manager.setPermissionMode(session.id, 'explore');
+
+    expect(summary.permissionMode).toBe('explore');
+    expect(store.boundaryCalls).toEqual([
+      {
+        sessionId: session.id,
+        kind: 'managed',
+        projection: { permissionMode: 'explore', labels: [] },
+      },
+    ]);
+  });
+
+  test('reports the committed transition when the best-effort audit note fails', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const manager = new SessionManager({
+      store,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(925),
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
+    store.failAppends = true;
+
+    const summary = await manager.setPermissionMode(session.id, 'explore');
+
+    expect(summary.permissionMode).toBe('explore');
+    expect((await store.readExecutionBoundary(session.id)).kind).toBe('managed');
+  });
+
+  test('routes generic permission updates through the boundary transition', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const manager = new SessionManager({
+      store,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(950),
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
+
+    const summary = await manager.updateSession(session.id, {
+      permissionMode: 'explore',
+    });
+
+    expect(summary.permissionMode).toBe('explore');
+    expect(store.boundaryCalls[0]?.projection?.permissionMode).toBe('explore');
+  });
+
+  test('repairs a legacy mode projection that already disagrees with the boundary', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const manager = new SessionManager({
+      store,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(975),
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
+    store.forceBoundary(session.id, { kind: 'bypass', revision: 4 });
+
+    await manager.setPermissionMode(session.id, 'ask');
+
+    expect(store.boundaryCalls).toHaveLength(1);
+    expect((await store.readExecutionBoundary(session.id)).kind).toBe('managed');
+  });
+
+  test('revokes background shell authority before narrowing Bypass to Auto', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const calls: string[] = [];
+    const lease = { sessionId: 'session-1', token: Symbol('test') };
+    const manager = new SessionManager({
+      store,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(980),
+      shellRuns: {
+        async terminateSession(sessionId: string) {
+          calls.push(`terminate:${sessionId}`);
+          return lease;
+        },
+        async commitSessionClose() {
+          calls.push('commit');
+        },
+        rollbackSessionClose() {
+          calls.push('rollback');
+        },
+        resumeSession(sessionId: string) {
+          calls.push(`resume:${sessionId}`);
+        },
+      } as never,
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'bypass' }));
+    lease.sessionId = session.id;
+
+    await manager.setPermissionMode(session.id, 'ask');
+
+    expect(calls).toEqual([`terminate:${session.id}`, 'commit', `resume:${session.id}`]);
+    expect((await store.readExecutionBoundary(session.id)).kind).toBe('managed');
+  });
+
+  test('revokes background shell authority before narrowing Auto to Explore', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const calls: string[] = [];
+    const manager = new SessionManager({
+      store,
+      backends: new BackendRegistry(),
+      newId: nextId(),
+      now: nextNow(985),
+      shellRuns: {
+        async terminateSession(sessionId: string) {
+          calls.push(`terminate:${sessionId}`);
+          return { sessionId, token: Symbol('test') };
+        },
+        async commitSessionClose() {
+          calls.push('commit');
+        },
+        rollbackSessionClose() {
+          calls.push('rollback');
+        },
+        resumeSession(sessionId: string) {
+          calls.push(`resume:${sessionId}`);
+        },
+      } as never,
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
+
+    await manager.setPermissionMode(session.id, 'explore');
+
+    expect(calls).toEqual([`terminate:${session.id}`, 'commit', `resume:${session.id}`]);
+    const boundary = await store.readExecutionBoundary(session.id);
+    expect(boundary.kind).toBe('managed');
+    if (boundary.kind === 'managed') expect(boundary.profile.name).toBe('read-only');
+  });
+
+  test('revokes descendant background shell authority through the direct boundary API', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const calls: string[] = [];
+    const backends = new BackendRegistry();
+    backends.register('fake', (ctx) => new TestBackend(ctx));
+    const manager = new SessionManager({
+      store,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(990),
+      shellRuns: {
+        async terminateSession(sessionId: string) {
+          calls.push(`terminate:${sessionId}`);
+          return { sessionId, token: Symbol('test') };
+        },
+        async commitSessionClose() {
+          calls.push('commit');
+        },
+        rollbackSessionClose() {
+          calls.push('rollback');
+        },
+        resumeSession(sessionId: string) {
+          calls.push(`resume:${sessionId}`);
+        },
+      } as never,
+    });
+    const session = await manager.createSession(makeInput({ permissionMode: 'bypass' }));
+    const child = await manager.createSession(
+      makeInput({
+        permissionMode: 'bypass',
+        subagentParent: {
+          kind: 'subagent',
+          parentSessionId: session.id,
+          spawnedBy: {
+            parentRunId: 'parent-run',
+            parentTurnId: 'parent-turn',
+            toolCallId: 'child-tool',
+          },
+          lifecycle: 'foreground',
+        },
+        subagentRuntime: {
+          schemaVersion: 1,
+          definitionVersion: LOCAL_READ_AGENT_DEFINITION.definitionVersion,
+          agentId: LOCAL_READ_AGENT_ID,
+          agentName: LOCAL_READ_AGENT_DEFINITION.name,
+          profile: LOCAL_READ_AGENT_PROFILE,
+          systemPrompt: LOCAL_READ_AGENT_DEFINITION.systemPrompt,
+          toolNames: ['Read', 'Glob', 'Grep'],
+          categoryPolicy: {},
+        },
+        subagentSpawn: {
+          schemaVersion: 1,
+          requestFingerprint: 'a'.repeat(64),
+          initialTurnId: 'child-turn',
+          initialRunId: 'child-run',
+        },
+      }),
+    );
+    const grandchild = await manager.createSession(
+      makeInput({
+        permissionMode: 'bypass',
+        subagentParent: {
+          kind: 'subagent',
+          parentSessionId: child.id,
+          spawnedBy: {
+            parentRunId: 'child-run',
+            parentTurnId: 'child-turn',
+            toolCallId: 'grandchild-tool',
+          },
+          lifecycle: 'foreground',
+        },
+        subagentRuntime: {
+          schemaVersion: 1,
+          definitionVersion: LOCAL_READ_AGENT_DEFINITION.definitionVersion,
+          agentId: LOCAL_READ_AGENT_ID,
+          agentName: LOCAL_READ_AGENT_DEFINITION.name,
+          profile: LOCAL_READ_AGENT_PROFILE,
+          systemPrompt: LOCAL_READ_AGENT_DEFINITION.systemPrompt,
+          toolNames: ['Read', 'Glob', 'Grep'],
+          categoryPolicy: {},
+        },
+        subagentSpawn: {
+          schemaVersion: 1,
+          requestFingerprint: 'b'.repeat(64),
+          initialTurnId: 'grandchild-turn',
+          initialRunId: 'grandchild-run',
+        },
+      }),
+    );
+    await drain(manager.sendMessage(session.id, { turnId: 'parent-turn', text: 'parent' }));
+    await drain(manager.sendMessage(child.id, { turnId: 'child-turn', text: 'child' }));
+    await drain(
+      manager.sendMessage(grandchild.id, { turnId: 'grandchild-turn', text: 'grandchild' }),
+    );
+    store.disposeCount = 0;
+
+    await manager.setExecutionBoundaryKind(session.id, 'managed');
+
+    expect(calls).toEqual([
+      `terminate:${session.id}`,
+      `terminate:${child.id}`,
+      `terminate:${grandchild.id}`,
+      'commit',
+      'commit',
+      'commit',
+      `resume:${session.id}`,
+    ]);
+    expect(store.disposeCount).toBe(3);
+  });
+
   test('updates header, rebuilds active backend, and writes an audit note', async () => {
     const store = new MemorySessionStore();
     const backends = new BackendRegistry();
@@ -10282,7 +10593,7 @@ describe('SessionManager permission mode updates', () => {
         };
       },
       async stop(): Promise<void> {},
-      async respondToPermission(): Promise<void> {},
+      async respondToSandboxBoundary(): Promise<void> {},
       async dispose(): Promise<void> {},
     }));
     const manager = new SessionManager({
@@ -10928,7 +11239,7 @@ describe('SessionManager permission mode updates', () => {
         };
       },
       async stop(): Promise<void> {},
-      async respondToPermission(): Promise<void> {},
+      async respondToSandboxBoundary(): Promise<void> {},
       async dispose(): Promise<void> {},
     }));
     const manager = new SessionManager({
@@ -11134,7 +11445,7 @@ describe('SessionManager permission mode updates', () => {
             firstDispatches += 1;
           },
           async stop(): Promise<void> {},
-          async respondToPermission(): Promise<void> {},
+          async respondToSandboxBoundary(): Promise<void> {},
           async dispose(): Promise<void> {
             firstDisposeCalls += 1;
           },
@@ -11200,7 +11511,7 @@ describe('SessionManager permission mode updates', () => {
           throw new Error('cancelled backend must not dispatch');
         },
         async stop(): Promise<void> {},
-        async respondToPermission(): Promise<void> {},
+        async respondToSandboxBoundary(): Promise<void> {},
         async dispose(): Promise<void> {
           disposeCalls += 1;
           throw new Error('late backend disposal failed');
@@ -11467,7 +11778,7 @@ describe('SessionManager permission mode updates', () => {
     expect(stoppedRun?.status).toBe('cancelled');
   });
 
-  test('concurrent cold turns share one backend generation and one control broadcast target', async () => {
+  test('concurrent cold turns share one backend generation without accepting an ownerless response', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
@@ -11509,17 +11820,73 @@ describe('SessionManager permission mode updates', () => {
     releaseBuild.release();
     expect((await firstEvent).value?.type).toBe('text_delta');
     expect((await secondEvent).value?.type).toBe('text_delta');
-    await manager.respondToPermission(session.id, {
-      requestId: 'control-broadcast',
-      decision: 'deny',
-    });
-    expect(backend?.permissionResponses).toBe(1);
+    await expectRejects(
+      manager.respondToSandboxBoundary(session.id, {
+        requestId: 'control-broadcast',
+        decision: 'deny',
+      }),
+      /No pending sandbox boundary request/,
+    );
+    expect(backend?.permissionResponses).toBe(0);
     expect(builds).toBe(1);
 
     releaseSend.release();
     while (!(await first.next()).done) {}
     while (!(await second.next()).done) {}
     expect(backend?.sendInputs).toHaveLength(2);
+  });
+
+  test('routes a sandbox boundary response only to the generation that emitted its request', async () => {
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const childGate = makeGate();
+    let parentBackend: SandboxBoundaryWaitBackend | undefined;
+    let childBackend: PermissionBroadcastBackend | undefined;
+    backends.register('fake', (ctx) => {
+      if (ctx.header.permissionMode === 'explore') {
+        childBackend = new PermissionBroadcastBackend(ctx, childGate);
+        return childBackend;
+      }
+      parentBackend = new SandboxBoundaryWaitBackend(ctx);
+      return parentBackend;
+    });
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      childTools: [testTool('Read'), testTool('Glob'), testTool('Grep')],
+      newId: nextId(),
+      now: nextNow(6_848),
+      runtimeSource: 'test',
+    });
+    const session = await manager.createSession(makeInput());
+    const parent = manager
+      .sendMessage(session.id, { turnId: 'parent-boundary-turn', text: 'parent' })
+      [Symbol.asyncIterator]();
+    expect((await parent.next()).value?.type).toBe('sandbox_boundary_request');
+
+    const child = manager
+      .startChildTurn(session.id, {
+        turnId: 'child-running-turn',
+        parentRunId: 'parent-run',
+        spec: { id: LOCAL_READ_AGENT_ID, name: 'Researcher', systemPrompt: 'read only' },
+        prompt: 'stay active',
+      })
+      [Symbol.asyncIterator]();
+    expect((await child.next()).value?.type).toBe('text_delta');
+
+    await manager.respondToSandboxBoundary(session.id, {
+      requestId: 'boundary-1',
+      decision: 'deny',
+    });
+    expect(parentBackend?.responses).toEqual([{ requestId: 'boundary-1', decision: 'deny' }]);
+    expect(childBackend?.permissionResponses).toBe(0);
+
+    while (!(await parent.next()).done) {}
+    childGate.release();
+    while (!(await child.next()).done) {}
   });
 
   test('concurrent cold child starts share their route generation without an orphan', async () => {
@@ -11568,11 +11935,14 @@ describe('SessionManager permission mode updates', () => {
     const outcomes = await Promise.allSettled([firstEvent, secondEvent]);
     expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toHaveLength(1);
-    await manager.respondToPermission(session.id, {
-      requestId: 'child-control-broadcast',
-      decision: 'deny',
-    });
-    expect(backend?.permissionResponses).toBe(1);
+    await expectRejects(
+      manager.respondToSandboxBoundary(session.id, {
+        requestId: 'child-control-broadcast',
+        decision: 'deny',
+      }),
+      /No pending sandbox boundary request/,
+    );
+    expect(backend?.permissionResponses).toBe(0);
     expect(builds).toBe(1);
 
     releaseSend.release();
@@ -12459,28 +12829,15 @@ describe('SessionManager permission mode updates', () => {
     expect(turns.find((turn) => turn.turnId === 'turn-1')?.status).toBe('completed');
   });
 
-  test('marks permission handoff as waiting_for_user', async () => {
+  test('marks a sandbox boundary request waiting and blocks boundary mode changes', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
-    backends.register(
-      'fake',
-      (ctx) =>
-        new EventBackend(ctx, [
-          {
-            type: 'permission_request',
-            kind: 'tool_permission',
-            requestId: 'pr-1',
-            toolUseId: 'tool-1',
-            toolName: 'Bash',
-            category: 'shell_safe',
-            reason: 'custom',
-            args: {},
-            rememberForTurnAllowed: true,
-          },
-          { type: 'complete', stopReason: 'permission_handoff' },
-        ]),
-    );
+    let backend: SandboxBoundaryWaitBackend | undefined;
+    backends.register('fake', (ctx) => {
+      backend = new SandboxBoundaryWaitBackend(ctx);
+      return backend;
+    });
     const manager = new SessionManager({
       store,
       runStore,
@@ -12491,107 +12848,33 @@ describe('SessionManager permission mode updates', () => {
     });
     const session = await manager.createSession(makeInput());
 
-    await drain(manager.sendMessage(session.id, { turnId: 'turn-1', text: 'hello' }));
-
-    const header = await store.readHeader(session.id);
-    expect(header.status).toBe('waiting_for_user');
-    expect(header.blockedReason).toBe(undefined);
-    const [run] = await runStore.listSessionRuns(session.id);
-    const events = await runStore.readEvents(session.id, run!.runId);
-    expect(
-      events.some(
-        (event) =>
-          event.type === 'run_status_changed' && event.data?.sessionStatus === 'waiting_for_user',
-      ),
-    ).toBe(true);
-  });
-
-  test('startup recovery does not treat permission handoff as a completed run fact', async () => {
-    const store = new MemorySessionStore();
-    const runStore = new MemoryAgentRunStore();
-    const backends = new BackendRegistry();
-    backends.register(
-      'fake',
-      (ctx) =>
-        new EventBackend(ctx, [
-          {
-            type: 'permission_request',
-            kind: 'tool_permission',
-            requestId: 'pr-1',
-            toolUseId: 'tool-1',
-            toolName: 'Bash',
-            category: 'shell_safe',
-            reason: 'custom',
-            args: {},
-            rememberForTurnAllowed: true,
-          },
-          { type: 'complete', stopReason: 'permission_handoff' },
-        ]),
-    );
-    const manager = new SessionManager({
-      store,
-      runStore,
-      runtimeEventStore: runStore,
-      backends,
-      newId: nextId(),
-      now: nextNow(9_010),
+    const iterator = manager
+      .sendMessage(session.id, { turnId: 'turn-1', text: 'hello' })
+      [Symbol.asyncIterator]();
+    expect((await iterator.next()).value?.type).toBe('sandbox_boundary_request');
+    const [activeBoundaryRequest] = await manager.listActiveSandboxBoundaryRequests(session.id);
+    expect(activeBoundaryRequest).toMatchObject({
+      type: 'sandbox_boundary_request',
+      requestId: 'boundary-1',
+      toolUseId: 'tool-1',
+      turnId: 'turn-1',
     });
-    const session = await manager.createSession(makeInput());
 
-    await drain(manager.sendMessage(session.id, { turnId: 'turn-1', text: 'hello' }));
-    const [runBeforeRecovery] = await runStore.listSessionRuns(session.id);
-    expect(runBeforeRecovery?.status).toBe('waiting_for_user');
-
-    await manager.recoverInterruptedSessions();
-
-    const [runAfterRecovery] = await runStore.listSessionRuns(session.id);
-    expect(runAfterRecovery?.status).toBe('failed');
-    expect(runAfterRecovery?.failureClass).toBe('app_restarted');
-    const [turn] = await store.listTurns(session.id);
-    expect(turn?.status).toBe('failed');
-    expect(turn?.errorClass).toBe('app_restarted');
-    const terminalEvents = (
-      await runStore.readRuntimeEvents(session.id, runAfterRecovery!.runId)
-    ).filter(isTerminalRuntimeEvent);
-    expect(terminalEvents).toHaveLength(1);
-    expect(terminalEvents[0]?.status).toBe('failed');
-  });
-
-  test('rejects mode changes while a tool permission request is waiting', async () => {
-    const store = new MemorySessionStore();
-    const backends = new BackendRegistry();
-    backends.register(
-      'fake',
-      (ctx) =>
-        new EventBackend(ctx, [
-          {
-            type: 'permission_request',
-            kind: 'tool_permission',
-            requestId: 'pr-1',
-            toolUseId: 'tool-1',
-            toolName: 'Bash',
-            category: 'shell_safe',
-            reason: 'custom',
-            args: {},
-            rememberForTurnAllowed: true,
-          },
-          { type: 'complete', stopReason: 'permission_handoff' },
-        ]),
-    );
-    const manager = new SessionManager({ store, backends, newId: nextId(), now: nextNow(9_500) });
-    const session = await manager.createSession(makeInput({ permissionMode: 'ask' }));
-
-    await drain(manager.sendMessage(session.id, { turnId: 'turn-1', text: 'hello' }));
-
-    await expectRejects(
-      manager.setPermissionMode(session.id, 'execute'),
-      /当前有工具调用正在等待确认/,
-    );
+    expect((await store.readHeader(session.id)).status).toBe('waiting_for_user');
+    const [run] = await runStore.listSessionRuns(session.id);
+    expect(run?.status).toBe('waiting_for_user');
+    await expectRejects(manager.setPermissionMode(session.id, 'bypass'), /当前对话正在运行/);
     expect((await store.readHeader(session.id)).permissionMode).toBe('ask');
-    const messages = await store.readMessages(session.id);
-    expect(
-      messages.some((message) => message.type === 'system_note' && message.kind === 'mode_change'),
-    ).toBe(false);
+
+    await manager.respondToSandboxBoundary(session.id, {
+      requestId: 'boundary-1',
+      decision: 'deny',
+    });
+    expect(backend?.responses).toEqual([{ requestId: 'boundary-1', decision: 'deny' }]);
+    expect((await iterator.next()).value?.type).toBe('sandbox_boundary_decision_ack');
+    expect(await manager.listActiveSandboxBoundaryRequests(session.id)).toEqual([]);
+    while (!(await iterator.next()).done) {}
+    expect((await store.readHeader(session.id)).status).toBe('active');
   });
 
   test('marks backend errors as blocked with a generalized reason', async () => {
@@ -14804,6 +15087,12 @@ describe('SessionManager permission mode updates', () => {
       now: nextNow(12_830),
     });
     const session = await manager.createSession(makeInput({ status: 'waiting_for_user' }));
+    await store.createSandboxBoundaryRequest({
+      sessionId: session.id,
+      requestId: 'boundary-before-restart',
+      expansion: { network: { enabled: true } },
+      justification: 'Fetch a dependency.',
+    });
     await seedRunningTurn(store, session.id, 'turn-1');
     await seedRun(
       runStore,
@@ -14833,6 +15122,7 @@ describe('SessionManager permission mode updates', () => {
     const [run] = await runStore.listSessionRuns(session.id);
     expect(run?.status).toBe('failed');
     expect(run?.failureClass).toBe('app_restarted');
+    expect(await store.listPendingSandboxBoundaryRequests(session.id)).toEqual([]);
   });
 
   test('startup recovery repairs stale completed model tails without leaving running runs', async () => {
@@ -15203,6 +15493,53 @@ describe('SessionManager permission mode updates', () => {
       childMessages.some((message) => (message as { turnId?: string }).turnId === 'after'),
     ).toBe(false);
     expect(childMessages.some((message) => message.type === 'turn_state')).toBe(false);
+  });
+
+  test('conversation copies inherit the authoritative execution boundary', async () => {
+    const store = new AtomicBoundaryMemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    backends.register(
+      'fake',
+      (ctx) => new EventBackend(ctx, [{ type: 'complete', stopReason: 'end_turn' }]),
+    );
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId: nextId(),
+      now: nextNow(15_050),
+    });
+    const boundaries: ExecutionBoundary[] = [
+      {
+        kind: 'managed',
+        revision: 4,
+        profile: applySandboxBoundaryExpansion(createWorkspaceWritePermissionProfile(), {
+          filesystem: {
+            entries: [{ path: '/approved/release.txt', access: 'write', scope: 'exact' }],
+          },
+        }),
+      },
+      { kind: 'external', revision: 3 },
+    ];
+
+    for (const [index, boundary] of boundaries.entries()) {
+      const source = await manager.createSession(makeInput({ name: `Source ${index}` }));
+      await drain(manager.sendMessage(source.id, { turnId: 'first', text: 'keep' }));
+      await drain(manager.sendMessage(source.id, { turnId: 'second', text: 'replace' }));
+      store.forceBoundary(source.id, boundary);
+
+      const branch = await manager.branchFromTurn(source.id, { sourceTurnId: 'first' });
+      const revision = await manager.reviseBeforeTurn(source.id, { sourceTurnId: 'second' });
+
+      for (const copy of [branch, revision]) {
+        expect(await store.readExecutionBoundary(copy.id)).toEqual({
+          ...boundary,
+          revision: 0,
+        });
+      }
+    }
   });
 
   test('branchFromTurn preserves an explicit no-project association', async () => {
@@ -15861,12 +16198,6 @@ describe('SessionManager steering and followup queues', () => {
           identities.push(identity);
           return {
             ...identity,
-            acceptPermissionRequest: async () => ({ state: 'pending' }),
-            commitPermissionAnswer: async ({ answer }) => ({
-              kind: 'permission_answer',
-              answer,
-            }),
-            commitPermissionTimeout: async () => ({ kind: 'closure', reason: 'timed_out' }),
             acceptUserQuestionRequest: async () => {},
             close: async (reason) => {
               lifecycle.push(`close:${reason}`);
@@ -15891,263 +16222,6 @@ describe('SessionManager steering and followup queues', () => {
     expect(lifecycle).toEqual(['close:turn_terminal', 'release']);
   });
 
-  test('hosted permission answer waits for its durable ack before resuming and entering the tool', {
-    timeout: 2_000,
-  }, async (t) => {
-    const ackAppendStarted = makeGate();
-    const releaseAckAppend = makeGate();
-    t.after(() => releaseAckAppend.release());
-    let toolExecutions = 0;
-    let continuation: RuntimePermissionContinuation | undefined;
-    let answerPermission: (() => Promise<void>) | undefined;
-    let ackDurable: boolean | undefined;
-    const runStore = new MemoryAgentRunStore({
-      beforeRuntimeEventAppend: async (_sessionId, _runId, event, options) => {
-        if (!event.actions?.permissionAnswerAccepted) return;
-        ackDurable = options?.durable;
-        ackAppendStarted.release();
-        await releaseAckAppend.promise;
-      },
-    });
-    const interactionAuthority: RuntimeInteractionAuthority = {
-      bindRun: (identity) => ({
-        ...identity,
-        acceptPermissionRequest: async ({ continuation: accepted }) => {
-          continuation = accepted;
-          answerPermission = () => accepted.applyAnswer({ decision: 'allow' });
-          return { state: 'pending' };
-        },
-        commitPermissionAnswer: async ({ continuation: accepted, answer }) => {
-          await accepted.applyAnswer(answer);
-          return { kind: 'permission_answer', answer };
-        },
-        commitPermissionTimeout: async ({ continuation: accepted }) => {
-          await accepted.applyClosure('timed_out');
-          return { kind: 'closure', reason: 'timed_out' };
-        },
-        acceptUserQuestionRequest: async () => {},
-        close: async () => {},
-        release: () => {},
-      }),
-    };
-    const model = steeringToolThenDoneModel(true);
-    const { manager, session, store } = await steeringDeliverySession(
-      runStore,
-      model,
-      async () => {
-        const [run] = await runStore.listSessionRuns(session.id);
-        const runtimeEvents = await runStore.readRuntimeEvents(session.id, run!.runId);
-        expect(runtimeEvents.some((event) => event.actions?.permissionAnswerAccepted)).toBe(true);
-        expect(run?.status).toBe('running');
-        expect((await store.readHeader(session.id)).status).toBe('running');
-        toolExecutions += 1;
-      },
-      {
-        permissionRequired: true,
-        permissionMode: 'ask',
-        interactionAuthority,
-      },
-    );
-
-    const turn = drainAll(
-      manager.sendMessage(
-        session.id,
-        { turnId: 'turn-hosted-answer-durable', text: 'go' },
-        { durability: 'required' },
-      ),
-    );
-    await waitUntil(() => continuation !== undefined);
-    await waitUntil(async () => {
-      const [run] = await runStore.listSessionRuns(session.id);
-      return (
-        run?.status === 'waiting_for_user' &&
-        (await store.readHeader(session.id)).status === 'waiting_for_user'
-      );
-    });
-
-    await answerPermission!();
-    await ackAppendStarted.promise;
-    expect(ackDurable).toBe(true);
-    const [waitingRun] = await runStore.listSessionRuns(session.id);
-    expect(toolExecutions).toBe(0);
-    expect(waitingRun?.status).toBe('waiting_for_user');
-    expect((await store.readHeader(session.id)).status).toBe('waiting_for_user');
-    expect(
-      (await runStore.readRuntimeEvents(session.id, waitingRun!.runId)).some(
-        (event) => event.actions?.permissionAnswerAccepted,
-      ),
-    ).toBe(false);
-
-    releaseAckAppend.release();
-    await turn;
-    expect(toolExecutions).toBe(1);
-    expect(model.doStreamCalls.length).toBe(2);
-  });
-
-  test('hosted permission answer fails stop when its durable ack append is rejected', {
-    timeout: 2_000,
-  }, async () => {
-    let toolExecutions = 0;
-    let continuation: RuntimePermissionContinuation | undefined;
-    let answerPermission: (() => Promise<void>) | undefined;
-    let ackDurable: boolean | undefined;
-    const runStore = new MemoryAgentRunStore({
-      beforeRuntimeEventAppend: (_sessionId, _runId, event, options) => {
-        if (!event.actions?.permissionAnswerAccepted) return;
-        ackDurable = options?.durable;
-        throw new Error('permission answer ack append rejected');
-      },
-    });
-    const interactionAuthority: RuntimeInteractionAuthority = {
-      bindRun: (identity) => ({
-        ...identity,
-        acceptPermissionRequest: async ({ continuation: accepted }) => {
-          continuation = accepted;
-          answerPermission = () => accepted.applyAnswer({ decision: 'allow' });
-          return { state: 'pending' };
-        },
-        commitPermissionAnswer: async ({ continuation: accepted, answer }) => {
-          await accepted.applyAnswer(answer);
-          return { kind: 'permission_answer', answer };
-        },
-        commitPermissionTimeout: async ({ continuation: accepted }) => {
-          await accepted.applyClosure('timed_out');
-          return { kind: 'closure', reason: 'timed_out' };
-        },
-        acceptUserQuestionRequest: async () => {},
-        close: async () => {},
-        release: () => {},
-      }),
-    };
-    const { manager, session } = await steeringDeliverySession(
-      runStore,
-      steeringToolThenDoneModel(true),
-      () => {
-        toolExecutions += 1;
-      },
-      {
-        permissionRequired: true,
-        permissionMode: 'ask',
-        interactionAuthority,
-      },
-    );
-
-    const turn = drainAll(
-      manager.sendMessage(
-        session.id,
-        { turnId: 'turn-hosted-answer-rejected', text: 'go' },
-        { durability: 'required' },
-      ),
-    );
-    await waitUntil(() => continuation !== undefined);
-    await answerPermission!();
-    let failure: unknown;
-    try {
-      await turn;
-    } catch (error) {
-      failure = error;
-    }
-
-    expect((failure as Error).message).toBe('permission answer ack append rejected');
-    expect(ackDurable).toBe(true);
-    expect(toolExecutions).toBe(0);
-    const [run] = await runStore.listSessionRuns(session.id);
-    expect(
-      (await runStore.readRuntimeEvents(session.id, run!.runId)).some(
-        (event) => event.actions?.permissionAnswerAccepted,
-      ),
-    ).toBe(false);
-  });
-
-  test('hosted permission timeout waits for its durable closure ack before continuing with a synthetic error', {
-    timeout: 2_000,
-  }, async (t) => {
-    const ackAppendStarted = makeGate();
-    const releaseAckAppend = makeGate();
-    t.after(() => releaseAckAppend.release());
-    let toolExecutions = 0;
-    let closureApplications = 0;
-    let ackDurable: boolean | undefined;
-    const runStore = new MemoryAgentRunStore({
-      beforeRuntimeEventAppend: async (_sessionId, _runId, event, options) => {
-        if (!event.actions?.permissionClosureAccepted) return;
-        ackDurable = options?.durable;
-        ackAppendStarted.release();
-        await releaseAckAppend.promise;
-      },
-    });
-    const interactionAuthority: RuntimeInteractionAuthority = {
-      bindRun: (identity) => ({
-        ...identity,
-        acceptPermissionRequest: async () => ({ state: 'pending' }),
-        commitPermissionAnswer: async ({ continuation, answer }) => {
-          await continuation.applyAnswer(answer);
-          return { kind: 'permission_answer', answer };
-        },
-        commitPermissionTimeout: async ({ continuation }) => {
-          closureApplications += 1;
-          await continuation.applyClosure('timed_out');
-          return { kind: 'closure', reason: 'timed_out' };
-        },
-        acceptUserQuestionRequest: async () => {},
-        close: async () => {},
-        release: () => {},
-      }),
-    };
-    const model = steeringToolThenDoneModel(true);
-    const { manager, session, store } = await steeringDeliverySession(
-      runStore,
-      model,
-      () => {
-        toolExecutions += 1;
-      },
-      {
-        permissionRequired: true,
-        permissionMode: 'ask',
-        permissionTimeoutMs: 5,
-        interactionAuthority,
-      },
-    );
-
-    const turn = drainAll(
-      manager.sendMessage(
-        session.id,
-        { turnId: 'turn-hosted-timeout-durable', text: 'go' },
-        { durability: 'required' },
-      ),
-    );
-    await ackAppendStarted.promise;
-    expect(ackDurable).toBe(true);
-    const [waitingRun] = await runStore.listSessionRuns(session.id);
-    expect(closureApplications).toBe(1);
-    expect(toolExecutions).toBe(0);
-    expect(waitingRun?.status).toBe('waiting_for_user');
-    expect((await store.readHeader(session.id)).status).toBe('waiting_for_user');
-    expect(
-      (await runStore.readRuntimeEvents(session.id, waitingRun!.runId)).some(
-        (event) => event.actions?.permissionClosureAccepted,
-      ),
-    ).toBe(false);
-    expect(model.doStreamCalls.length).toBe(1);
-
-    releaseAckAppend.release();
-    const events = await turn;
-    const runtimeEvents = await runStore.readRuntimeEvents(session.id, waitingRun!.runId);
-    expect(
-      runtimeEvents.some(
-        (event) => event.actions?.permissionClosureAccepted?.reason === 'timed_out',
-      ),
-    ).toBe(true);
-    expect(
-      runtimeEvents.some(
-        (event) => event.content?.kind === 'function_response' && event.content.isError === true,
-      ),
-    ).toBe(true);
-    expect(events.some((event) => event.type === 'permission_closure_ack')).toBe(true);
-    expect(toolExecutions).toBe(0);
-    expect(model.doStreamCalls.length).toBe(2);
-  });
-
   test('hosted stopped question abandonment preserves stop closure before release', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
@@ -16165,12 +16239,6 @@ describe('SessionManager steering and followup queues', () => {
       interactionAuthority: {
         bindRun: (identity) => ({
           ...identity,
-          acceptPermissionRequest: async () => ({ state: 'pending' }),
-          commitPermissionAnswer: async ({ answer }) => ({
-            kind: 'permission_answer',
-            answer,
-          }),
-          commitPermissionTimeout: async () => ({ kind: 'closure', reason: 'timed_out' }),
           acceptUserQuestionRequest: async ({ continuation }) => {
             question = continuation;
           },
@@ -16223,12 +16291,6 @@ describe('SessionManager steering and followup queues', () => {
       interactionAuthority: {
         bindRun: (identity) => ({
           ...identity,
-          acceptPermissionRequest: async () => ({ state: 'pending' }),
-          commitPermissionAnswer: async ({ answer }) => ({
-            kind: 'permission_answer',
-            answer,
-          }),
-          commitPermissionTimeout: async () => ({ kind: 'closure', reason: 'timed_out' }),
           acceptUserQuestionRequest: async () => {},
           close: async () => {},
           release: () => {
@@ -17082,7 +17144,7 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<v
 }
 
 /** Mock model: first request calls the Probe tool, second finishes with text. */
-function steeringToolThenDoneModel(permissionRequired = false): MockLanguageModelV4 {
+function steeringToolThenDoneModel(): MockLanguageModelV4 {
   const usage = {
     inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: 10, text: 10, reasoning: 0 },
@@ -17097,8 +17159,8 @@ function steeringToolThenDoneModel(permissionRequired = false): MockLanguageMode
               {
                 type: 'tool-call',
                 toolCallId: 'tool-1',
-                toolName: permissionRequired ? 'Bash' : 'Probe',
-                input: JSON.stringify(permissionRequired ? { command: 'echo x' } : { q: 'x' }),
+                toolName: 'Probe',
+                input: JSON.stringify({ q: 'x' }),
               },
               { type: 'finish', finishReason: { unified: 'tool-calls', raw: 'tool_calls' }, usage },
             ]
@@ -17127,59 +17189,44 @@ async function steeringDeliverySession(
   runStore: MemoryAgentRunStore,
   model: MockLanguageModelV4,
   duringTool: (manager: SessionManager, sessionId: string) => Promise<void> | void,
-  options: {
-    permissionRequired?: boolean;
-    permissionMode?: PermissionMode;
-    permissionTimeoutMs?: number;
-    interactionAuthority?: RuntimeInteractionAuthority;
-  } = {},
 ) {
   const store = new MemorySessionStore();
   const backends = new BackendRegistry();
   let manager!: SessionManager;
   let sessionId = '';
-  backends.register(
-    'fake',
-    (ctx) =>
-      new AiSdkBackend({
-        sessionId: ctx.sessionId,
-        header: ctx.header,
-        appendMessage: async () => {},
-        connection: {
-          slug: 'mock-main',
-          name: 'Mock',
-          providerType: 'anthropic',
-          defaultModel: 'mock-model-id',
-          enabled: true,
-          createdAt: 1,
-          updatedAt: 1,
-        } satisfies LlmConnection,
-        apiKey: 'sk-test',
-        modelId: 'mock-model-id',
-        permissionEngine: new PermissionEngine({ newId: () => 'perm-1', now: () => 1 }),
-        modelFactory: () => model,
-        ...(options.permissionTimeoutMs !== undefined
-          ? { permissionTimeoutMs: options.permissionTimeoutMs }
-          : {}),
-        tools: [
-          {
-            name: options.permissionRequired ? 'Bash' : 'Probe',
-            description: options.permissionRequired ? 'Shell description' : 'Probe description',
-            parameters: options.permissionRequired
-              ? z.object({ command: z.string() })
-              : z.object({ q: z.string() }),
-            permissionRequired: options.permissionRequired ?? false,
-            impl: async () => {
-              await duringTool(manager, sessionId);
-              return { ok: true };
-            },
+  backends.register('fake', (ctx) =>
+    createTestAiSdkBackend({
+      sessionId: ctx.sessionId,
+      header: ctx.header,
+      appendMessage: async () => {},
+      connection: {
+        slug: 'mock-main',
+        name: 'Mock',
+        providerType: 'anthropic',
+        defaultModel: 'mock-model-id',
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1,
+      } satisfies LlmConnection,
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [
+        {
+          name: 'Probe',
+          description: 'Probe description',
+          parameters: z.object({ q: z.string() }),
+          impl: async () => {
+            await duringTool(manager, sessionId);
+            return { ok: true };
           },
-        ],
-        loadTurnRuntimeEvents: ctx.loadTurnRuntimeEvents,
-        allowMidTurnHistoryCompaction: ctx.allowMidTurnHistoryCompaction,
-        newId: nextId(),
-        now: nextNow(1),
-      }),
+        },
+      ],
+      loadTurnRuntimeEvents: ctx.loadTurnRuntimeEvents,
+      allowMidTurnHistoryCompaction: ctx.allowMidTurnHistoryCompaction,
+      newId: nextId(),
+      now: nextNow(1),
+    }),
   );
   const managerDeps = {
     store,
@@ -17189,15 +17236,9 @@ async function steeringDeliverySession(
     newId: nextId(),
     now: nextNow(1_000),
   };
-  manager = options.interactionAuthority
-    ? new SessionManager({
-        ...managerDeps,
-        interactionAuthority: options.interactionAuthority,
-        canonicalPermissionOutcomes: noCanonicalPermissionOutcomes,
-      })
-    : new SessionManager(managerDeps);
+  manager = new SessionManager(managerDeps);
   const session = await manager.createSession(
-    makeInput({ backend: 'fake', permissionMode: options.permissionMode ?? 'bypass' }),
+    makeInput({ backend: 'fake', permissionMode: 'bypass' }),
   );
   sessionId = session.id;
   return { manager, session, store };
@@ -17272,7 +17313,7 @@ class GatedSteeringBackend implements AgentBackend {
     for (const turnId of this.gates.keys()) this.release(turnId);
   }
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
 
   async dispose(): Promise<void> {}
 }
@@ -17342,9 +17383,9 @@ class DelegatingRuntimeKernel implements RuntimeKernelLike {
     this.stopped.push(sessionId);
   }
 
-  async respondToPermission(
+  async respondToSandboxBoundary(
     sessionId: string,
-    _response: Parameters<RuntimeKernelLike['respondToPermission']>[1],
+    _response: Parameters<RuntimeKernelLike['respondToSandboxBoundary']>[1],
   ): Promise<void> {
     this.permissionResponses.push(sessionId);
   }
@@ -17413,7 +17454,7 @@ class UnadmittedQuestionBackend implements AgentBackend {
 
   async stop(): Promise<void> {}
 
-  async respondToPermission(): Promise<void> {}
+  async respondToSandboxBoundary(): Promise<void> {}
 
   async dispose(): Promise<void> {}
 }
@@ -17459,7 +17500,7 @@ class TestBackend implements AgentBackend {
     this.stopCalls += 1;
     this.stopModes.push(mode);
   }
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
 
   async dispose(): Promise<void> {
     if (this.ctx.store instanceof MemorySessionStore) {
@@ -17471,7 +17512,7 @@ class TestBackend implements AgentBackend {
 class PermissionBroadcastBackend extends TestBackend {
   permissionResponses = 0;
 
-  override async respondToPermission(_decision: PermissionDecision): Promise<void> {
+  override async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {
     this.permissionResponses += 1;
   }
 }
@@ -17743,7 +17784,7 @@ class HighVolumeDeltaBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -17783,7 +17824,7 @@ class TextCompleteBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -17820,7 +17861,7 @@ class LateErrorBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {
     if (this.ctx.store instanceof MemorySessionStore) {
       this.ctx.store.disposeCount += 1;
@@ -17879,7 +17920,7 @@ class StopControlledAbortBackend implements AgentBackend {
     this.releaseStop();
   }
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -17921,7 +17962,7 @@ class TurnScriptBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -17950,7 +17991,66 @@ class EventBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
+  async dispose(): Promise<void> {}
+}
+
+class SandboxBoundaryWaitBackend implements AgentBackend {
+  readonly kind = 'fake' as const;
+  readonly sessionId: string;
+  readonly responses: SandboxBoundaryResponse[] = [];
+  private readonly responseGate = makeGate();
+
+  constructor(ctx: BackendFactoryContext) {
+    this.sessionId = ctx.sessionId;
+  }
+
+  async *send(input: BackendSendInput): AsyncIterable<SessionEvent> {
+    yield {
+      type: 'sandbox_boundary_request',
+      id: `${input.turnId}-request`,
+      turnId: input.turnId,
+      ts: 1,
+      requestId: 'boundary-1',
+      toolUseId: 'tool-1',
+      justification: 'Write the requested export.',
+      expansion: {
+        filesystem: {
+          entries: [{ path: '/tmp/export.txt', access: 'write', scope: 'exact' }],
+        },
+      },
+    };
+    await this.responseGate.promise;
+    const response = this.responses[0]!;
+    yield {
+      type: 'sandbox_boundary_decision_ack',
+      id: `${input.turnId}-decision`,
+      turnId: input.turnId,
+      ts: 2,
+      requestId: response.requestId,
+      toolUseId: 'tool-1',
+      decision: response.decision,
+      status: response.decision === 'allow' ? 'approved' : 'denied',
+      revision: response.decision === 'allow' ? 1 : 0,
+    };
+    yield {
+      type: 'complete',
+      id: `${input.turnId}-complete`,
+      turnId: input.turnId,
+      ts: 3,
+      stopReason: 'end_turn',
+    };
+  }
+
+  async stop(): Promise<void> {
+    this.responseGate.release();
+  }
+
+  async respondToSandboxBoundary(response: SandboxBoundaryResponse): Promise<void> {
+    this.responses.push(response);
+    this.responseGate.release();
+  }
+
   async dispose(): Promise<void> {}
 }
 
@@ -17982,7 +18082,7 @@ class ThrowAfterTerminalBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18007,7 +18107,7 @@ class ThrowBeforeTerminalBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18038,7 +18138,7 @@ class PartialAbortBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18092,7 +18192,7 @@ class TraceBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18154,7 +18254,7 @@ class ProviderRequestTraceBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18195,7 +18295,7 @@ class ProviderCaptureGateBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18278,7 +18378,7 @@ class ProviderCaptureAfterAttemptFailureBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18304,7 +18404,7 @@ class ActiveCompactBlockBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18349,7 +18449,7 @@ class HistoryCompactCheckpointBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18401,7 +18501,7 @@ class HistoryCompactCheckpointCacheProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18458,7 +18558,7 @@ class HistoryCompactCheckpointMonotonicProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18513,7 +18613,7 @@ class SameCoverageCheckpointReplacementProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18571,7 +18671,7 @@ class SerializedCheckpointProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18634,7 +18734,7 @@ class RecoveringCheckpointWriteProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18691,7 +18791,7 @@ class CheckpointRecorderContractProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18754,7 +18854,7 @@ class InitialCheckpointLoadRaceProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -18808,6 +18908,8 @@ function activeCompactBlockFixture(sessionId: string, turnId: string): ActiveFul
 class MemorySessionStore implements SessionStore {
   private headers = new Map<string, SessionHeader>();
   private messages = new Map<string, StoredMessage[]>();
+  private executionBoundaries = new Map<string, ExecutionBoundary>();
+  private sandboxBoundaryRequests = new Map<string, SandboxBoundaryRequest>();
   readonly failReadMessagesFor = new Set<string>();
   readonly failNextReadMessagesFor = new Map<string, number>();
   readonly failListTurnsFor = new Set<string>();
@@ -18821,6 +18923,7 @@ class MemorySessionStore implements SessionStore {
 
   async createSubagent(
     input: CreateSessionInput,
+    initialBoundary?: ExecutionBoundary,
   ): Promise<{ header: SessionHeader; created: boolean }> {
     const parent = input.subagentParent;
     const spawn = input.subagentSpawn;
@@ -18846,15 +18949,16 @@ class MemorySessionStore implements SessionStore {
       }
       return { header: existing, created: false };
     }
-    return { header: await this.create(input), created: true };
+    return { header: await this.create(input, initialBoundary), created: true };
   }
 
   async createAgentGraphOperator(
     input: CreateSessionInput,
     request: AgentGraphOperatorProvisionRequest,
     _expectedRevision: number,
+    initialBoundary?: ExecutionBoundary,
   ): Promise<{ header: SessionHeader } & AgentGraphOperatorProvisionResult> {
-    const header = await this.create(input);
+    const header = await this.create(input, initialBoundary);
     return {
       header,
       created: true,
@@ -18867,7 +18971,10 @@ class MemorySessionStore implements SessionStore {
     };
   }
 
-  async create(input: CreateSessionInput): Promise<SessionHeader> {
+  async create(
+    input: CreateSessionInput,
+    initialBoundary?: ExecutionBoundary,
+  ): Promise<SessionHeader> {
     const header: SessionHeader = {
       id: `session-${this.headers.size + 1}`,
       workspaceRoot: '/tmp/workspace',
@@ -18911,7 +19018,87 @@ class MemorySessionStore implements SessionStore {
     };
     this.headers.set(header.id, header);
     this.messages.set(header.id, []);
+    this.executionBoundaries.set(
+      header.id,
+      initialBoundary
+        ? { ...initialBoundary, revision: 0 }
+        : createGenesisExecutionBoundary(header.permissionMode),
+    );
     return header;
+  }
+
+  async setExecutionBoundaryKind(
+    sessionId: string,
+    kind: 'managed' | 'bypass',
+    projection?: {
+      permissionMode: SessionHeader['permissionMode'];
+      labels?: readonly string[];
+    },
+  ) {
+    const current = await this.readHeader(sessionId);
+    const permissionMode =
+      projection?.permissionMode ??
+      (kind === 'bypass'
+        ? 'bypass'
+        : current.permissionMode === 'bypass'
+          ? 'ask'
+          : current.permissionMode);
+    await this.updateHeader(sessionId, {
+      permissionMode,
+      ...(projection?.labels ? { labels: [...projection.labels] } : {}),
+    });
+    const boundary = createGenesisExecutionBoundary(permissionMode);
+    this.executionBoundaries.set(sessionId, boundary);
+    return boundary;
+  }
+
+  async readExecutionBoundary(sessionId: string): Promise<ExecutionBoundary> {
+    const boundary = this.executionBoundaries.get(sessionId);
+    if (!boundary) throw new Error(`Unknown session ${sessionId}`);
+    return boundary;
+  }
+
+  async createSandboxBoundaryRequest(
+    input: CreateSandboxBoundaryRequest,
+  ): Promise<SandboxBoundaryRequest> {
+    const boundary = await this.readExecutionBoundary(input.sessionId);
+    const request: SandboxBoundaryRequest = {
+      ...input,
+      status: 'pending',
+      baseRevision: boundary.revision,
+      createdAt: 1,
+    };
+    this.sandboxBoundaryRequests.set(`${input.sessionId}:${input.requestId}`, request);
+    return request;
+  }
+
+  async listPendingSandboxBoundaryRequests(sessionId: string): Promise<SandboxBoundaryRequest[]> {
+    return [...this.sandboxBoundaryRequests.values()].filter(
+      (request) => request.sessionId === sessionId && request.status === 'pending',
+    );
+  }
+
+  async settleSandboxBoundaryRequest(
+    input: SettleSandboxBoundaryRequest,
+  ): Promise<SandboxBoundarySettlement> {
+    const key = `${input.sessionId}:${input.requestId}`;
+    const request = this.sandboxBoundaryRequests.get(key);
+    if (!request) throw new Error(`Unknown sandbox boundary request ${input.requestId}`);
+    const settled =
+      request.status === 'pending'
+        ? {
+            ...request,
+            status: input.decision === 'allow' ? ('approved' as const) : ('denied' as const),
+            settledAt: 2,
+            ...(input.closureReason ? { outcomeReason: input.closureReason } : {}),
+          }
+        : request;
+    this.sandboxBoundaryRequests.set(key, settled);
+    return {
+      request: settled,
+      boundary: await this.readExecutionBoundary(input.sessionId),
+      changed: false,
+    };
   }
 
   async list(_filter?: SessionListFilter): Promise<SessionSummary[]> {
@@ -19032,6 +19219,80 @@ class MemorySessionStore implements SessionStore {
   async remove(sessionId: string): Promise<void> {
     this.headers.delete(sessionId);
     this.messages.delete(sessionId);
+    this.executionBoundaries.delete(sessionId);
+  }
+}
+
+class AtomicBoundaryMemorySessionStore extends MemorySessionStore {
+  failAppends = false;
+  readonly boundaryCalls: Array<{
+    sessionId: string;
+    kind: 'managed' | 'bypass';
+    projection:
+      | {
+          permissionMode: SessionHeader['permissionMode'];
+          labels?: readonly string[];
+        }
+      | undefined;
+  }> = [];
+  private readonly boundaries = new Map<string, ExecutionBoundary>();
+  private projectingBoundary = false;
+
+  forceBoundary(sessionId: string, boundary: ExecutionBoundary): void {
+    this.boundaries.set(sessionId, boundary);
+  }
+
+  override async readExecutionBoundary(sessionId: string): Promise<ExecutionBoundary> {
+    return this.boundaries.get(sessionId) ?? super.readExecutionBoundary(sessionId);
+  }
+
+  async setExecutionBoundaryKind(
+    sessionId: string,
+    kind: 'managed' | 'bypass',
+    projection?: {
+      permissionMode: SessionHeader['permissionMode'];
+      labels?: readonly string[];
+    },
+  ) {
+    this.boundaryCalls.push({ sessionId, kind, projection });
+    const current = await this.readHeader(sessionId);
+    const permissionMode =
+      projection?.permissionMode ??
+      (kind === 'bypass'
+        ? 'bypass'
+        : current.permissionMode === 'bypass'
+          ? 'ask'
+          : current.permissionMode);
+    this.projectingBoundary = true;
+    try {
+      await super.updateHeader(sessionId, {
+        permissionMode,
+        ...(projection?.labels ? { labels: [...projection.labels] } : {}),
+      });
+    } finally {
+      this.projectingBoundary = false;
+    }
+    const boundary = {
+      ...createGenesisExecutionBoundary(permissionMode),
+      revision: 1,
+    };
+    this.boundaries.set(sessionId, boundary);
+    return boundary;
+  }
+
+  override async updateHeader(
+    sessionId: string,
+    patch: Partial<SessionHeader>,
+  ): Promise<SessionHeader> {
+    if (!this.projectingBoundary && Object.hasOwn(patch, 'permissionMode')) {
+      throw new Error('permissionMode must be projected by the boundary transition');
+    }
+    return super.updateHeader(sessionId, patch);
+  }
+
+  override async appendMessage(sessionId: string, message: StoredMessage): Promise<void> {
+    if (this.failAppends) throw new Error('audit append failed');
+    return super.appendMessage(sessionId, message);
   }
 }
 
@@ -19299,7 +19560,7 @@ class ForgingQueueBackend implements AgentBackend {
 
   async stop(): Promise<void> {}
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
 
   async dispose(): Promise<void> {}
 }
@@ -19353,7 +19614,7 @@ class ProviderRetryProgressBackend implements AgentBackend {
 
   async stop(): Promise<void> {}
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
 
   async dispose(): Promise<void> {}
 }
@@ -19558,7 +19819,7 @@ function createGraphOperatorSession(
         profile: LOCAL_READ_AGENT_PROFILE,
         systemPrompt: LOCAL_READ_AGENT_DEFINITION.systemPrompt,
         toolNames: [...LOCAL_READ_AGENT_DEFINITION.tools],
-        categoryPolicy: { ...LOCAL_READ_AGENT_DEFINITION.categoryPolicy },
+        categoryPolicy: {},
         permissionCeiling: 'ask',
       },
     }),
@@ -19729,7 +19990,6 @@ function testTool(name: string): MakaTool {
     name,
     description: `${name} test tool`,
     parameters: {},
-    permissionRequired: false,
     impl: async () => ({ ok: true }),
   };
 }
@@ -20125,12 +20385,6 @@ function testInteractionAuthority(): RuntimeInteractionAuthority {
   return {
     bindRun: (identity) => ({
       ...identity,
-      acceptPermissionRequest: async () => ({ state: 'pending' }),
-      commitPermissionAnswer: async ({ answer }) => ({
-        kind: 'permission_answer',
-        answer,
-      }),
-      commitPermissionTimeout: async () => ({ kind: 'closure', reason: 'timed_out' }),
       acceptUserQuestionRequest: async () => {},
       close: async () => {},
       release: () => {},

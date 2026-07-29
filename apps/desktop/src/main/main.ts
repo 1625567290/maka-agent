@@ -34,7 +34,6 @@ import {
   AgentGraphSupervisorWakeCoordinator,
   BackendRegistry,
   FakeBackend,
-  PermissionEngine,
   SessionManager,
   createLocalContinuationSafetyInspector,
   buildDeepResearchTools,
@@ -84,6 +83,7 @@ import {
   errorMessage,
   requireReadyConnection,
 } from './chat-readiness.js';
+import { assertDesktopExecutionBoundary } from './desktop-execution-admission.js';
 import { createFileCredentialStore } from './credential-store.js';
 import { bindOnboardingDeps, createOnboardingService } from './onboarding-service.js';
 import { createDailyReviewArchiveStore } from './daily-review-archive-store.js';
@@ -643,7 +643,6 @@ const openGateway = new OpenGatewayService({
   },
 });
 const backends = new BackendRegistry();
-const permissionEngine = new PermissionEngine({ newId: randomUUID, now: Date.now });
 const shellRuns = new ShellRunProcessManager({
   store: shellRunStore,
   newId: randomUUID,
@@ -806,7 +805,6 @@ backends.register('ai-sdk', createAiSdkBackendFactory({
   ...desktopBackendToolSurfaceDeps,
   buildSubscriptionModelFetch,
   systemPromptService,
-  permissionEngine,
   telemetryRepo,
   artifactStore,
   desktopSessionSkillHosts,
@@ -1199,9 +1197,7 @@ const { normalizeSettingsPatch, applySettingsRuntimeEffects, handleExternalSetti
     botRegistry,
     openGateway,
     keepSystemAwake,
-    runtime,
     safeSendToRenderer,
-    emitSessionsChanged,
   });
 
 const streamEvents = createSessionStreamer({
@@ -1217,6 +1213,8 @@ const streamEvents = createSessionStreamer({
 });
 
 async function ensureSessionCanSend(sessionId: string): Promise<void> {
+  const boundary = await runtime.readExecutionBoundary(sessionId);
+  assertDesktopExecutionBoundary(sessionId, boundary);
   const header = await readAvailableSessionHeader(sessionId);
   let result: Awaited<ReturnType<typeof ensureSessionCanSendOrRebind>>;
   try {

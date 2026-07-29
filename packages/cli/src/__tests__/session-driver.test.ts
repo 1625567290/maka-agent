@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import type {
   CreateSessionInput,
+  ExecutionBoundary,
   PermissionMode,
-  PermissionResponse,
   QueueEnqueueOutcome,
   SessionEvent,
   SessionSummary,
@@ -474,6 +474,52 @@ describe('Maka session driver', () => {
     }
   });
 
+  test('rejects externally isolated sessions outside their owning harness', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'maka-external-session-'));
+    try {
+      const runtime = new RecordingRuntime();
+      runtime.sessionSummaries = [sessionSummary({ id: 'external', cwd: repo })];
+      runtime.executionBoundaries.set('external', { kind: 'external', revision: 0 });
+      const driver = createMakaSessionDriver({
+        runtime,
+        cwd: repo,
+        llmConnectionSlug: 'anthropic',
+        model: 'claude-sonnet-4-5',
+      });
+
+      await assert.rejects(
+        driver.switchSession('external'),
+        /externally isolated session external/,
+      );
+      assert.equal(driver.getSessionId(), null);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('derives the resumed TUI mode from the authoritative boundary', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'maka-bypass-session-'));
+    try {
+      const runtime = new RecordingRuntime();
+      runtime.sessionSummaries = [
+        sessionSummary({ id: 'bypass', cwd: repo, permissionMode: 'ask' }),
+      ];
+      runtime.executionBoundaries.set('bypass', { kind: 'bypass', revision: 3 });
+      const driver = createMakaSessionDriver({
+        runtime,
+        cwd: repo,
+        llmConnectionSlug: 'anthropic',
+        model: 'claude-sonnet-4-5',
+      });
+
+      const resumed = await driver.switchSession('bypass');
+
+      assert.equal(resumed.summary.permissionMode, 'bypass');
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
   test('uses a resumed session cwd without injecting a synthetic reminder', async () => {
     const oldCwd = await mkdtemp(join(tmpdir(), 'maka-move-persisted-old-'));
     const nextCwd = join(oldCwd, 'worktree-next');
@@ -683,7 +729,7 @@ describe('Maka session driver', () => {
     );
   });
 
-  test('routes permission responses to the active session', async () => {
+  test('routes sandbox boundary responses to the active session', async () => {
     const runtime = new RecordingRuntime();
     const driver = createMakaSessionDriver({
       runtime,
@@ -694,19 +740,17 @@ describe('Maka session driver', () => {
     });
 
     await collectPrompt(driver, 'run tests');
-    await driver.respondToPermission({
-      requestId: 'permission-1',
+    await driver.respondToSandboxBoundary({
+      requestId: 'boundary-1',
       decision: 'allow',
-      rememberForTurn: true,
     });
 
-    assert.deepEqual(runtime.permissionResponses, [
+    assert.deepEqual(runtime.sandboxBoundaryResponses, [
       {
         sessionId: 'session-1',
         response: {
-          requestId: 'permission-1',
+          requestId: 'boundary-1',
           decision: 'allow',
-          rememberForTurn: true,
         },
       },
     ]);
@@ -996,7 +1040,10 @@ class RecordingRuntime {
   readonly compacted: Array<{ sessionId: string; input: { turnId?: string } }> = [];
   readonly resumePlanSessions: string[] = [];
   readonly resumedContinuations: RuntimeContinuation[] = [];
-  readonly permissionResponses: Array<{ sessionId: string; response: PermissionResponse }> = [];
+  readonly sandboxBoundaryResponses: Array<{
+    sessionId: string;
+    response: import('@maka/core/sandbox-boundary').SandboxBoundaryResponse;
+  }> = [];
   readonly userQuestionResponses: Array<{ sessionId: string; response: UserQuestionResponse }> = [];
   readonly permissionModes: Array<{ sessionId: string; mode: PermissionMode }> = [];
   readonly orchestrationModes: Array<{
@@ -1016,6 +1063,7 @@ class RecordingRuntime {
   readonly branched: Array<{ sessionId: string; sourceTurnId: string }> = [];
   readonly branchedBefore: Array<{ sessionId: string; sourceTurnId: string }> = [];
   readonly sessionMessages = new Map<string, StoredMessage[]>();
+  readonly executionBoundaries = new Map<string, ExecutionBoundary>();
   sessionSummaries: SessionSummary[] = [];
   updatedSessionName = 'New Chat';
 
@@ -1138,8 +1186,11 @@ class RecordingRuntime {
     return this.retractText;
   }
 
-  async respondToPermission(sessionId: string, response: PermissionResponse): Promise<void> {
-    this.permissionResponses.push({ sessionId, response });
+  async respondToSandboxBoundary(
+    sessionId: string,
+    response: import('@maka/core/sandbox-boundary').SandboxBoundaryResponse,
+  ): Promise<void> {
+    this.sandboxBoundaryResponses.push({ sessionId, response });
   }
 
   async respondToUserQuestion(sessionId: string, response: UserQuestionResponse): Promise<void> {
@@ -1209,6 +1260,20 @@ class RecordingRuntime {
 
   async getMessages(sessionId: string): Promise<StoredMessage[]> {
     return this.sessionMessages.get(sessionId) ?? [];
+  }
+
+  async readExecutionBoundary(sessionId: string): Promise<ExecutionBoundary> {
+    return (
+      this.executionBoundaries.get(sessionId) ?? {
+        kind: 'managed',
+        profile: {
+          type: 'managed',
+          fileSystem: { kind: 'restricted', entries: [] },
+          network: { kind: 'restricted' },
+        },
+        revision: 0,
+      }
+    );
   }
 
   async branchFromTurn(

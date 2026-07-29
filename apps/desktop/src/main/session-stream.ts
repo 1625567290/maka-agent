@@ -22,7 +22,6 @@ import type {
   BackendFactory,
   GoalTurnOutcome,
   HostCapabilities,
-  PermissionEngine,
   SessionActivityLease,
   SessionActivityRegistry,
   SessionManager,
@@ -65,7 +64,6 @@ const SKILL_CATALOG_TRACE_DECISION_LIMIT = 100;
 export interface AiSdkBackendFactoryDeps extends DesktopBackendToolSurfaceDeps {
   buildSubscriptionModelFetch: SubscriptionModelFetchBuilder;
   systemPromptService: SystemPromptMainService;
-  permissionEngine: PermissionEngine;
   telemetryRepo: TelemetryRepo;
   artifactStore: ArtifactStore;
   desktopSessionSkillHosts: Map<string, HostCapabilities>;
@@ -94,7 +92,6 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
   const {
     buildSubscriptionModelFetch,
     systemPromptService,
-    permissionEngine,
     telemetryRepo,
     artifactStore,
     desktopSessionSkillHosts,
@@ -143,10 +140,14 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
       sessionId: ctx.sessionId,
       header: { ...ctx.header, model, permissionMode: effectivePermissionMode },
       appendMessage: ctx.appendMessage ?? ((message) => ctx.store.appendMessage(ctx.sessionId, message)),
+      readExecutionBoundary: () => ctx.store.readExecutionBoundary!(ctx.sessionId),
+      createSandboxBoundaryRequest: (request) =>
+        ctx.store.createSandboxBoundaryRequest!(request),
+      settleSandboxBoundaryRequest: (request) =>
+        ctx.store.settleSandboxBoundaryRequest!(request),
       connection,
       apiKey: apiKey ?? '',
       modelId: model,
-      permissionEngine,
       modelFactory: (input) => getAIModel({ ...input, fetch: modelFetch }),
       tools: selectedTools,
       sandboxDiagnosticsSnapshot,
@@ -448,8 +449,8 @@ export interface SessionStreamerDeps {
 }
 
 function isStatusChangingSessionEvent(event: SessionEvent): boolean {
-  return event.type === 'permission_request' ||
-    event.type === 'permission_decision_ack' ||
+  return event.type === 'sandbox_boundary_request' ||
+    event.type === 'sandbox_boundary_decision_ack' ||
     event.type === 'complete' ||
     event.type === 'abort' ||
     event.type === 'error';

@@ -15,7 +15,6 @@ import {
   AGENT_TOOL_GROUP_ID,
   AiSdkBackend,
   BackendRegistry,
-  PermissionEngine,
   PiAgentBackend,
   SessionManager,
   buildChildAgentTools,
@@ -91,7 +90,6 @@ import {
 import {
   buildHarborCellAiSdkTools,
   createHarborCellLocalToolExecutor,
-  prepareHarborCellAiSdkTools,
 } from './harbor-cell-tool-executor.js';
 import { createProviderEnvFetch, type ProviderEnvFetch } from './provider-env-fetch.js';
 
@@ -321,13 +319,18 @@ export async function runHarborCellWithStorage(
   const prompt = resolveHeadlessSystemPrompt(input.config, { heavyTaskMode, economyTaskMode });
   const config = { ...input.config, systemPrompt: prompt.systemPrompt };
   if (resumedSession) {
+    const boundary = await sessionStore.readExecutionBoundary(resumedSession.id);
+    if (boundary.kind !== 'external') {
+      throw new Error(
+        `Harbor resume session requires an external execution boundary, observed ${boundary.kind}`,
+      );
+    }
     const executionFacts = [
       ['cwd', input.cwd, resumedSession.cwd],
       ['backend', input.config.backend, resumedSession.backend],
       ['llmConnectionSlug', config.llmConnectionSlug, resumedSession.llmConnectionSlug],
       ['model', config.model, resumedSession.model],
       ['thinkingLevel', config.thinkingLevel, resumedSession.thinkingLevel],
-      ['permissionMode', 'execute', resumedSession.permissionMode],
     ] as const;
     for (const [name, expected, observed] of executionFacts) {
       if (expected !== observed) {
@@ -396,15 +399,18 @@ export async function runHarborCellWithStorage(
   });
   const session =
     resumedSession ??
-    (await manager.createSession({
-      cwd: input.cwd,
-      backend: input.config.backend,
-      llmConnectionSlug: config.llmConnectionSlug,
-      model: config.model,
-      ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
-      permissionMode: 'execute',
-      name: `harbor-cell:${input.config.id}`,
-    }));
+    (await manager.createSession(
+      {
+        cwd: input.cwd,
+        backend: input.config.backend,
+        llmConnectionSlug: config.llmConnectionSlug,
+        model: config.model,
+        ...(config.thinkingLevel ? { thinkingLevel: config.thinkingLevel } : {}),
+        permissionMode: 'ask',
+        name: `harbor-cell:${input.config.id}`,
+      },
+      { initialBoundary: { kind: 'external', revision: 0 } },
+    ));
   const graphControlStore = createAgentGraphControlStore(input.storageRoot);
   const graphCoordinator = new AgentGraphCoordinator({
     sessionStore,
@@ -453,7 +459,7 @@ export async function runHarborCellWithStorage(
       attemptedTurnId = turnId;
       attemptedRunId = runId;
       invocation = undefined;
-      for await (const event of manager.sendMessage(
+      for await (const _event of manager.sendMessage(
         session.id,
         { turnId, text: nextText },
         {
@@ -461,14 +467,7 @@ export async function runHarborCellWithStorage(
           ...(input.onRunStarted ? { onRunStarted: input.onRunStarted } : {}),
         },
       )) {
-        if ((event as { type?: string }).type === 'permission_request') {
-          const { requestId } = event as { requestId: string };
-          await manager.respondToPermission(session.id, {
-            requestId,
-            decision: 'deny',
-            rememberForTurn: true,
-          });
-        }
+        // Event consumption drives the externally isolated Harbor run.
       }
       if (!invocation)
         throw new Error('Harbor cell turn finished without a runtime invocation result');
@@ -772,7 +771,6 @@ export async function runHarborCellFromEnv(
               header: ctx.header,
               appendMessage:
                 ctx.appendMessage ?? ((message) => ctx.store.appendMessage(ctx.sessionId, message)),
-              permissionEngine: new PermissionEngine({ newId, now }),
               transport: new PiCliJsonTransport({
                 command: resolvedEnv.MAKA_PI_COMMAND ?? 'pi',
                 ...(piProvider ? { provider: piProvider } : {}),
@@ -1001,7 +999,6 @@ export function buildAiSdkCellBackendRegistration(input: {
     ? (key: string): PricingConfig | null =>
         key === modelKey ? pricingOverride : getBuiltinPricing(key)
     : getBuiltinPricing;
-  const permissionEngine = new PermissionEngine({ newId: input.newId, now: input.now });
   const contextBudgetBackendOptions = buildHarborCellContextBudgetBackendOptions(input.env);
   const streamConnectTimeoutMs = positiveIntEnv(
     input.env.MAKA_STREAM_CONNECT_TIMEOUT_MS,
@@ -1048,9 +1045,7 @@ export function buildAiSdkCellBackendRegistration(input: {
             policy: context.productToolSurface!.identity.policy,
           })
         : context.productToolSurface!;
-      const productTools = ctx.tools
-        ? [...productToolSurface.tools]
-        : prepareHarborCellAiSdkTools(productToolSurface.tools);
+      const productTools = [...productToolSurface.tools];
       const supplementalTools = ctx.tools
         ? []
         : buildIsolatedHeadlessSupplementalTools({
@@ -1069,10 +1064,10 @@ export function buildAiSdkCellBackendRegistration(input: {
         header: { ...ctx.header, model: input.model },
         appendMessage:
           ctx.appendMessage ?? ((message) => ctx.store.appendMessage(ctx.sessionId, message)),
+        readExecutionBoundary: () => ctx.store.readExecutionBoundary(ctx.sessionId),
         connection,
         apiKey,
         modelId: input.model,
-        permissionEngine,
         modelFactory: (modelInput) =>
           getAIModel({
             ...modelInput,

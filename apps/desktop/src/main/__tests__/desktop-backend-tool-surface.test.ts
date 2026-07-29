@@ -4,7 +4,6 @@ import type { LlmConnection, SessionHeader, TaskLedgerStore } from '@maka/core';
 import { emptyPlanSessionState, type PlanStore } from '@maka/core/plan';
 import type { McpClientManager } from '@maka/mcp';
 import {
-  PermissionEngine,
   type AiSdkBackendInput,
   type BackendFactoryContext,
   type MakaTool,
@@ -228,6 +227,31 @@ describe('Desktop backend tool surface', () => {
     assert.equal(host.toolNames.has('Write'), false);
   });
 
+  it('does not use the legacy permission ceiling as child admission authority', async () => {
+    const header = inputFor('claude-sonnet-4-5-20250929').header;
+    header.permissionMode = 'execute';
+    header.subagentParent = {} as SessionHeader['subagentParent'];
+    header.subagentRuntime = {
+      schemaVersion: 1,
+      definitionVersion: 1,
+      agentId: 'implementation-child',
+      agentName: 'Implementation child',
+      profile: 'implementation',
+      systemPrompt: 'Implement.',
+      toolNames: ['Write'],
+      categoryPolicy: {},
+      permissionCeiling: 'ask',
+    };
+
+    const host = await resolveDesktopSessionSkillHost(makeDeps(), {
+      sessionId: header.id,
+      header,
+      childTools: [readTool, writeTool],
+    });
+
+    assert.deepEqual([...host.toolNames], ['Write']);
+  });
+
   it('never previews Deep Research tools — the preview stands in for a plain chat', async () => {
     // #1433: this used to branch on a `mode` the Quick Chat panel passed in
     // before its session existed. That panel is gone; the only entry point
@@ -249,6 +273,26 @@ describe('Desktop backend tool surface', () => {
     });
 
     assert.equal(preview.toolNames.has('deep_research_status'), false);
+  });
+
+  it('keeps Deep Research on a read-only local tool surface without boundary expansion', async () => {
+    const requestBoundary = tool('request_sandbox_boundary', 'custom_tool');
+    const bash = tool('Bash', 'shell_unsafe');
+    const webSearch = tool('WebSearch', 'web_read');
+    const deepResearchStatus = tool('deep_research_status', 'read');
+    const deps = makeDeps({
+      builtinTools: [readTool, writeTool, requestBoundary, bash, webSearch],
+      deepResearchTools: [deepResearchStatus],
+    });
+    const input = inputFor('claude-sonnet-4-5-20250929');
+    input.header.labels = ['mode:deep_research'];
+
+    const surface = await resolveDesktopBackendToolSurface(deps, input);
+
+    assert.deepEqual(
+      surface.selectedTools.map((candidate) => candidate.name),
+      ['Read', 'WebSearch', 'deep_research_status'],
+    );
   });
 
   it('uses explicit preview inputs without reading a nonexistent session plan', async () => {
@@ -377,7 +421,6 @@ function makeFactoryDeps(
     systemPromptService: {
       buildLocalMemoryPromptFragment: async () => '',
     },
-    permissionEngine: new PermissionEngine({ newId: () => 'permission-id', now: () => 1 }),
     telemetryRepo: {},
     artifactStore: {},
     desktopSessionSkillHosts: new Map(),

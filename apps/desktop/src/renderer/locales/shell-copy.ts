@@ -306,6 +306,10 @@ type ShellCopy = {
   sessionSettingsActions: {
     permissionLabels: Record<ChatDefaultPermissionMode, string>;
     permissionDescriptions: Record<PermissionMode, string>;
+    bypassConfirmTitle: string;
+    bypassConfirmDescription: string;
+    bypassConfirmLabel: string;
+    bypassCancelLabel: string;
     permissionSwitched(label: string): string;
     permissionFailedTitle: string;
     permissionFallback: string;
@@ -906,16 +910,20 @@ const SHELL_COPY_BY_LOCALE = {
     },
     sessionSettingsActions: {
       permissionLabels: {
-        ask: '询问权限',
-        execute: '自动执行',
-        bypass: '跳过确认',
+        ask: '自动',
+        bypass: '绕过沙箱',
       },
       permissionDescriptions: {
-        explore: '只读工具直通，写入或网络仍需确认。',
-        ask: '所有敏感工具调用前都会停下来征求允许或拒绝。',
-        execute: '常见工具直通；破坏性操作、特权操作和浏览器操作仍然确认。',
-        bypass: '跳过全部工具确认，包括破坏性操作、特权操作和浏览器操作。',
+        explore: '兼容模式：使用只读托管边界。',
+        ask: '自动：工作区内可写，网络受限；需要更大范围时询问。',
+        execute: '兼容模式：映射到自动沙箱边界。',
+        bypass: '绕过 Maka 管理的本地沙箱边界。',
       },
+      bypassConfirmTitle: '切换到绕过模式？',
+      bypassConfirmDescription:
+        '本地工具将直接访问宿主机文件系统和网络。仅对你完全信任且已由外部环境隔离的任务使用。',
+      bypassConfirmLabel: '进入绕过模式',
+      bypassCancelLabel: '保持自动',
       permissionSwitched: (label: string) => `已切到 ${label}`,
       permissionFailedTitle: '切换权限模式失败',
       permissionFallback: '权限模式暂时无法切换，请稍后重试。',
@@ -974,14 +982,14 @@ const SHELL_COPY_BY_LOCALE = {
       settingsSections: ZH_SETTINGS_SECTIONS,
       permissionModes: {
         explore: { label: '权限 · 只读', hint: '读取和搜索直通，写入仍确认' },
-        ask: { label: '权限 · 询问权限', hint: '每条敏感工具都先确认（默认）' },
+        ask: { label: '权限 · 自动', hint: '在会话沙箱内运行；扩大文件或网络边界时再询问' },
         execute: {
           label: '权限 · 自动执行',
           hint: '常见工具直通，破坏性操作仍确认',
         },
         bypass: {
-          label: '权限 · 跳过确认',
-          hint: '全部工具直通，不再弹权限确认',
+          label: '权限 · Bypass',
+          hint: '关闭 Maka 沙箱，开放宿主机文件系统和网络',
         },
       },
       settingsCommand: (section: string) => `设置 · ${section}`,
@@ -1383,16 +1391,20 @@ const SHELL_COPY_BY_LOCALE = {
     },
     sessionSettingsActions: {
       permissionLabels: {
-        ask: 'Ask first',
-        execute: 'Auto execute',
-        bypass: 'Bypass confirmations',
+        ask: 'Auto',
+        bypass: 'Bypass sandbox',
       },
       permissionDescriptions: {
-        explore: 'Run read-only tools directly; confirm writes and network access.',
-        ask: 'Ask before every sensitive tool call.',
-        execute: 'Run common tools directly; confirm destructive, privileged, and browser actions.',
-        bypass: 'Skip all tool confirmations, including destructive, privileged, and browser actions.',
+        explore: 'Compatibility mode: use a managed read-only boundary.',
+        ask: 'Auto: write within the workspace, restrict network access, and ask before expanding.',
+        execute: 'Compatibility mode: map to the automatic sandbox boundary.',
+        bypass: 'Bypass the Maka-managed local sandbox boundary.',
       },
+      bypassConfirmTitle: 'Switch to Bypass?',
+      bypassConfirmDescription:
+        'Local tools will access the host filesystem and network directly. Use only for trusted tasks that are isolated externally.',
+      bypassConfirmLabel: 'Enter Bypass',
+      bypassCancelLabel: 'Keep Auto',
       permissionSwitched: (label: string) => `Switched to ${label}`,
       permissionFailedTitle: 'Could not change permission mode',
       permissionFallback: 'The permission mode could not be changed. Try again later.',
@@ -1455,16 +1467,16 @@ const SHELL_COPY_BY_LOCALE = {
           hint: 'Read and search directly; confirm writes',
         },
         ask: {
-          label: 'Permissions · Ask first',
-          hint: 'Confirm every sensitive tool call (default)',
+          label: 'Permissions · Auto',
+          hint: 'Run inside the session sandbox; ask only to expand filesystem or network access',
         },
         execute: {
           label: 'Permissions · Auto execute',
           hint: 'Run common tools; confirm destructive actions',
         },
         bypass: {
-          label: 'Permissions · Bypass confirmations',
-          hint: 'Run all tools without permission prompts',
+          label: 'Permissions · Bypass',
+          hint: 'Disable the Maka sandbox and expose host filesystem and network access',
         },
       },
       settingsCommand: (section: string) => `Settings · ${section}`,

@@ -189,10 +189,23 @@ async function openExecutionStoresForWrite<K extends StorageRootKind, E extends 
     kind,
     [executionStoresWriterBrand]: kind,
     sessionStore: {
-      create: (input) => run(() => sessionStore.create(input)),
-      createSubagent: (input) => run(() => sessionStore.createSubagent(input)),
-      createAgentGraphOperator: (input, request, expectedRevision) =>
-        run(() => sessionStore.createAgentGraphOperator(input, request, expectedRevision)),
+      create: (input, initialBoundary) => run(() => sessionStore.create(input, initialBoundary)),
+      createSubagent: (input, initialBoundary) =>
+        run(() => sessionStore.createSubagent(input, initialBoundary)),
+      createAgentGraphOperator: (input, request, expectedRevision, initialBoundary) =>
+        run(() =>
+          sessionStore.createAgentGraphOperator(input, request, expectedRevision, initialBoundary),
+        ),
+      readExecutionBoundary: (sessionId) =>
+        run(() => sessionStore.readExecutionBoundary(sessionId)),
+      createSandboxBoundaryRequest: (input) =>
+        run(() => sessionStore.createSandboxBoundaryRequest(input)),
+      listPendingSandboxBoundaryRequests: (sessionId) =>
+        run(() => sessionStore.listPendingSandboxBoundaryRequests(sessionId)),
+      settleSandboxBoundaryRequest: (input) =>
+        run(() => sessionStore.settleSandboxBoundaryRequest(input)),
+      setExecutionBoundaryKind: (sessionId, boundaryKind, projection) =>
+        run(() => sessionStore.setExecutionBoundaryKind(sessionId, boundaryKind, projection)),
       list: (filter) => run(() => sessionStore.list(filter)),
       listHeaders: () => run(() => sessionStore.listHeaders()),
       listForRecovery: () => run(() => sessionStore.listForRecovery()),

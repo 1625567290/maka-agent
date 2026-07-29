@@ -4,7 +4,7 @@
  * Ties together:
  *   SessionStore (storage)           — JSONL persistence
  *   AgentBackend (AiSdkBackend etc) — SDK adapter
- *   PermissionEngine                  — policy + parking
+ *   ExecutionBoundary                — session sandbox authority
  *
  * `SessionStore` comes from `@maka/storage`; its public interface owns
  * persistence and same-session serialization semantics.
@@ -47,9 +47,16 @@ import type {
   UserMessageInput,
   SessionListFilter,
 } from '@maka/core/runtime-inputs';
-import type { PermissionResponse } from '@maka/core/permission';
+import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import type { UserQuestionResponse } from '@maka/core/user-question';
 import type { PermissionMode } from '@maka/core/permission';
+import type {
+  CreateSandboxBoundaryRequest,
+  ExecutionBoundary,
+  SandboxBoundaryRequest,
+  SandboxBoundarySettlement,
+  SettleSandboxBoundaryRequest,
+} from '@maka/core';
 import type { CollaborationMode } from '@maka/core/collaboration';
 import type { OrchestrationMode } from '@maka/core/orchestration';
 import type {
@@ -65,9 +72,9 @@ import {
   SUBAGENT_SESSION_SPAWN_SCHEMA_VERSION,
   childSessionsForParent,
   decodeAgentGraphIntentClaim,
+  executionBoundaryContains,
   failureClassFromCompleteStopReason,
   isDeepResearchSession,
-  isPermissionModeWithinCeiling,
   isSessionInlineRun,
   subagentSessionRuntimeSummary,
 } from '@maka/core';
@@ -418,12 +425,32 @@ export interface AgentOutputResult {
 // StoredMessage rows remain a projection/cache surface for existing public
 // shapes. RuntimeEventStore is the semantic conversation ledger.
 export interface SessionStore {
-  create(input: CreateSessionInput): Promise<SessionHeader>;
-  createSubagent(input: CreateSessionInput): Promise<{ header: SessionHeader; created: boolean }>;
+  create(input: CreateSessionInput, initialBoundary?: ExecutionBoundary): Promise<SessionHeader>;
+  createSubagent(
+    input: CreateSessionInput,
+    initialBoundary?: ExecutionBoundary,
+  ): Promise<{ header: SessionHeader; created: boolean }>;
+  readExecutionBoundary(sessionId: string): Promise<ExecutionBoundary>;
+  createSandboxBoundaryRequest?(
+    input: CreateSandboxBoundaryRequest,
+  ): Promise<SandboxBoundaryRequest>;
+  listPendingSandboxBoundaryRequests?(sessionId: string): Promise<SandboxBoundaryRequest[]>;
+  settleSandboxBoundaryRequest?(
+    input: SettleSandboxBoundaryRequest,
+  ): Promise<SandboxBoundarySettlement>;
+  setExecutionBoundaryKind(
+    sessionId: string,
+    kind: 'managed' | 'bypass',
+    projection?: {
+      permissionMode: SessionHeader['permissionMode'];
+      labels?: readonly string[];
+    },
+  ): Promise<ExecutionBoundary>;
   createAgentGraphOperator?(
     input: CreateSessionInput,
     request: AgentGraphOperatorProvisionRequest,
     expectedRevision: number,
+    initialBoundary?: ExecutionBoundary,
   ): Promise<ProvisionAgentGraphOperatorResult>;
   list(filter?: SessionListFilter): Promise<SessionSummary[]>;
   readHeader(sessionId: string): Promise<SessionHeader>;
@@ -666,8 +693,11 @@ export class SessionManager {
   // Session lifecycle
   // --------------------------------------------------------------------------
 
-  async createSession(input: CreateSessionInput): Promise<SessionSummary> {
-    const header = await this.deps.store.create(input);
+  async createSession(
+    input: CreateSessionInput,
+    options: { initialBoundary?: ExecutionBoundary } = {},
+  ): Promise<SessionSummary> {
+    const header = await this.deps.store.create(input, options.initialBoundary);
     return headerToSummary(header);
   }
 
@@ -828,6 +858,29 @@ export class SessionManager {
     const recovered = new Set<string>();
     for (const session of interrupted) {
       if (this.runtimeKernel.hasActiveRuns(session.id)) continue;
+      if (
+        this.deps.store.listPendingSandboxBoundaryRequests &&
+        this.deps.store.settleSandboxBoundaryRequest
+      ) {
+        const pendingBoundaryRequests = await recoverOr(
+          policy,
+          () => this.deps.store.listPendingSandboxBoundaryRequests!(session.id),
+          [],
+        );
+        for (const request of pendingBoundaryRequests) {
+          await recoverOr(
+            policy,
+            () =>
+              this.deps.store.settleSandboxBoundaryRequest!({
+                sessionId: session.id,
+                requestId: request.requestId,
+                decision: 'deny',
+                closureReason: 'host_restarted',
+              }),
+            undefined,
+          );
+        }
+      }
       if (this.deps.planStore) {
         const planRecovery = await recoverOr(
           policy,
@@ -931,14 +984,22 @@ export class SessionManager {
       throw new Error('Cannot change backend configuration while a turn is running');
     }
 
-    const { name, titleIsManual: _titleIsManual, ...rest } = patch;
+    const { permissionMode, name, titleIsManual: _titleIsManual, ...rest } = patch;
+    const permissionSummary =
+      permissionMode === undefined
+        ? undefined
+        : await this.setPermissionMode(sessionId, permissionMode);
+    if (name === undefined && Object.keys(rest).length === 0) {
+      return permissionSummary ?? headerToSummary(await this.deps.store.readHeader(sessionId));
+    }
+
     if (name !== undefined) await this.deps.store.rename(sessionId, name);
     const next =
       Object.keys(rest).length > 0
         ? await this.deps.store.updateHeader(sessionId, rest)
         : await this.deps.store.readHeader(sessionId);
     this.runtimeKernel.updateCachedHeader(sessionId, next);
-    if (backendConfigChanged) {
+    if (changesBackendConfig(rest)) {
       // AgentBackend instances snapshot backend/model config at construction
       // time. If a stale session is rebound to a real default connection, the
       // next turn must build a fresh backend instead of reusing FakeBackend or
@@ -1004,18 +1065,28 @@ export class SessionManager {
     if (header) this.runtimeKernel.updateCachedHeader(sessionId, header);
   }
 
+  async readExecutionBoundary(sessionId: string): Promise<ExecutionBoundary> {
+    return this.deps.store.readExecutionBoundary(sessionId);
+  }
+
+  async listActiveSandboxBoundaryRequests(
+    sessionId: string,
+  ): Promise<Array<Extract<SessionEvent, { type: 'sandbox_boundary_request' }>>> {
+    await this.deps.store.readHeader(sessionId);
+    return this.runtimeKernel.listActiveSandboxBoundaryRequests?.(sessionId) ?? [];
+  }
+
   async setPermissionMode(sessionId: string, mode: PermissionMode): Promise<SessionSummary> {
     const previous = await this.deps.store.readHeader(sessionId);
-    if (
-      previous.subagentRuntime &&
-      !isPermissionModeWithinCeiling(mode, previous.subagentRuntime.permissionCeiling)
-    ) {
-      throw new Error(
-        `Child session permission mode "${mode}" exceeds its "${previous.subagentRuntime.permissionCeiling}" ceiling`,
-      );
-    }
+    const boundary = await this.deps.store.readExecutionBoundary(sessionId);
     const leavingDeepResearch = isDeepResearchSession(previous.labels) && mode !== 'explore';
-    if (previous.permissionMode === mode && !leavingDeepResearch) return headerToSummary(previous);
+    if (
+      previous.permissionMode === mode &&
+      executionBoundaryMatchesPermissionMode(boundary, mode) &&
+      !leavingDeepResearch
+    ) {
+      return headerToSummary(previous);
+    }
 
     if (this.runtimeKernel.hasActiveRuns(sessionId)) {
       throw new Error('当前对话正在运行，等结束后再切换权限模式。');
@@ -1024,25 +1095,125 @@ export class SessionManager {
       throw new Error('当前有工具调用正在等待确认，处理后再切换权限模式。');
     }
 
-    const next = await this.deps.store.updateHeader(sessionId, {
+    const labels = leavingDeepResearch
+      ? previous.labels.filter((label) => label !== DEEP_RESEARCH_SESSION_LABEL)
+      : previous.labels;
+    const nextKind = mode === 'bypass' ? 'bypass' : 'managed';
+    await this.commitExecutionBoundaryTransition(sessionId, boundary, nextKind, {
       permissionMode: mode,
-      labels: leavingDeepResearch
-        ? previous.labels.filter((label) => label !== DEEP_RESEARCH_SESSION_LABEL)
-        : previous.labels,
+      labels,
     });
-    await this.deps.store.appendMessage(sessionId, {
-      type: 'system_note',
-      id: this.deps.newId(),
-      ts: this.deps.now(),
-      kind: 'mode_change',
-      data: { from: previous.permissionMode, to: mode },
-    } satisfies SystemNoteMessage);
-
+    const next = await this.deps.store.readHeader(sessionId);
     this.runtimeKernel.updateCachedHeader(sessionId, next);
-    // AiSdkBackend snapshots the header at construction time. Rebuild the
-    // backend before the next turn so PermissionEngine receives the new mode.
-    await this.runtimeKernel.disposeBackend(sessionId);
+    await this.deps.store
+      .appendMessage(sessionId, {
+        type: 'system_note',
+        id: this.deps.newId(),
+        ts: this.deps.now(),
+        kind: 'mode_change',
+        data: { from: previous.permissionMode, to: mode },
+      } satisfies SystemNoteMessage)
+      .catch(() => undefined);
     return headerToSummary(next);
+  }
+
+  async setExecutionBoundaryKind(
+    sessionId: string,
+    kind: 'managed' | 'bypass',
+  ): Promise<ExecutionBoundary> {
+    if (this.runtimeKernel.hasActiveRuns(sessionId)) {
+      throw new Error('当前对话正在运行，等结束后再切换沙箱边界。');
+    }
+    const header = await this.deps.store.readHeader(sessionId);
+    if (header.status === 'waiting_for_user') {
+      throw new Error('当前有沙箱边界请求正在等待确认，处理后再切换。');
+    }
+    const current = await this.deps.store.readExecutionBoundary(sessionId);
+    const boundary = await this.commitExecutionBoundaryTransition(sessionId, current, kind);
+    return boundary;
+  }
+
+  private async commitExecutionBoundaryTransition(
+    sessionId: string,
+    current: ExecutionBoundary,
+    kind: 'managed' | 'bypass',
+    projection?: {
+      permissionMode: SessionHeader['permissionMode'];
+      labels?: readonly string[];
+    },
+  ): Promise<ExecutionBoundary> {
+    const narrowsShellAuthority =
+      (current.kind === 'bypass' && kind === 'managed') ||
+      (current.kind === 'managed' &&
+        kind === 'managed' &&
+        projection?.permissionMode === 'explore' &&
+        current.profile.name !== 'read-only');
+    const descendantSessionIds = narrowsShellAuthority
+      ? await this.listLinkedDescendantSessionIds(sessionId)
+      : [];
+    const lineageSessionIds = [sessionId, ...descendantSessionIds];
+    const descendantBoundaries = new Map<string, ExecutionBoundary>();
+    for (const descendantSessionId of descendantSessionIds) {
+      descendantBoundaries.set(
+        descendantSessionId,
+        await this.deps.store.readExecutionBoundary(descendantSessionId),
+      );
+    }
+    const shellRunCloses = [];
+    let boundary: ExecutionBoundary;
+    try {
+      if (narrowsShellAuthority) {
+        for (const lineageSessionId of lineageSessionIds) {
+          const close = await this.deps.shellRuns?.terminateSession(lineageSessionId);
+          if (close) shellRunCloses.push(close);
+        }
+      }
+      // Backends snapshot boundary-related session state at construction time.
+      // Dispose before the authority commit so a disposal failure cannot leave
+      // callers observing a rejected transition that was already committed.
+      await Promise.all(
+        lineageSessionIds.map((lineageSessionId) =>
+          this.runtimeKernel.disposeBackend(lineageSessionId),
+        ),
+      );
+      boundary = await this.deps.store.setExecutionBoundaryKind(sessionId, kind, projection);
+    } catch (error) {
+      for (const close of shellRunCloses) this.deps.shellRuns?.rollbackSessionClose(close);
+      throw error;
+    }
+    if (shellRunCloses.length > 0) {
+      for (const close of shellRunCloses) await this.deps.shellRuns?.commitSessionClose(close);
+      this.deps.shellRuns?.resumeSession(sessionId);
+      for (const [descendantSessionId, descendantBoundary] of descendantBoundaries) {
+        if (executionBoundaryContains(boundary, descendantBoundary)) {
+          this.deps.shellRuns?.resumeSession(descendantSessionId);
+        }
+      }
+    }
+    return boundary;
+  }
+
+  private async listLinkedDescendantSessionIds(sessionId: string): Promise<string[]> {
+    const sessions = await this.deps.store.list();
+    const childrenByParent = new Map<string, string[]>();
+    for (const session of sessions) {
+      const parentSessionId = session.subagentParent?.parentSessionId;
+      if (!parentSessionId) continue;
+      const children = childrenByParent.get(parentSessionId) ?? [];
+      children.push(session.id);
+      childrenByParent.set(parentSessionId, children);
+    }
+    const descendants: string[] = [];
+    const pending = [...(childrenByParent.get(sessionId) ?? [])];
+    const seen = new Set([sessionId]);
+    while (pending.length > 0) {
+      const descendantSessionId = pending.shift()!;
+      if (seen.has(descendantSessionId)) continue;
+      seen.add(descendantSessionId);
+      descendants.push(descendantSessionId);
+      pending.push(...(childrenByParent.get(descendantSessionId) ?? []));
+    }
+    return descendants;
   }
 
   async getPlanState(sessionId: string): Promise<PlanSessionState> {
@@ -1567,9 +1738,10 @@ export class SessionManager {
     if (input.source.sessionId.length === 0) {
       throw new Error('Graph operator provision requires a supervisor Session');
     }
-    const [parentHeader, sourceRun] = await Promise.all([
+    const [parentHeader, sourceRun, parentBoundary] = await Promise.all([
       this.deps.store.readHeader(input.source.sessionId),
       this.deps.runStore.readRun(input.source.sessionId, input.source.runId),
+      this.deps.store.readExecutionBoundary(input.source.sessionId),
     ]);
     if (
       sourceRun.sessionId !== input.source.sessionId ||
@@ -1581,7 +1753,6 @@ export class SessionManager {
 
     const definition = requireResolvedAgentDefinition(input.agentId);
     assertAgentDefinitionRunnable({
-      parentPermissionMode: parentHeader.permissionMode,
       definition,
       tools: this.deps.childTools ?? [],
       worktreeChildExecutorAvailable: this.deps.worktreeChildExecutor !== undefined,
@@ -1611,10 +1782,9 @@ export class SessionManager {
         workspace: definition.contract.workspace,
         permissionMode: childPermissionMode,
         toolNames: [...definition.tools],
-        categoryPolicy: { ...definition.categoryPolicy },
+        categoryPolicy: {},
         systemPrompt: definition.systemPrompt,
       },
-      parentPermissionCeiling: parentHeader.permissionMode,
     });
     const workspace = await this.provisionChildWorkspace(
       parentHeader,
@@ -1671,8 +1841,7 @@ export class SessionManager {
           profile: definition.profile,
           systemPrompt: definition.systemPrompt,
           toolNames: [...definition.tools],
-          categoryPolicy: { ...definition.categoryPolicy },
-          permissionCeiling: parentHeader.permissionMode,
+          categoryPolicy: {},
         },
         subagentSpawn: {
           schemaVersion: SUBAGENT_SESSION_SPAWN_SCHEMA_VERSION,
@@ -1684,6 +1853,7 @@ export class SessionManager {
       },
       request,
       input.expectedScheduleRevision,
+      parentBoundary,
     );
     const relation = result.header.subagentParent?.graph;
     if (
@@ -1831,6 +2001,10 @@ export class SessionManager {
     ) {
       throw new Error('Claimed graph execution target must be a linked child session');
     }
+    await this.assertLinkedChildBoundaryMatchesParent(
+      child.subagentParent.parentSessionId,
+      child.id,
+    );
     const rootExecution: RootExecutionDescriptor = {
       kind: 'claimed_agent_graph_intent',
       claim,
@@ -2135,16 +2309,16 @@ export class SessionManager {
     if (!this.deps.runStore || !this.deps.runtimeEventStore) {
       throw new Error('Child session creation requires AgentRunStore and RuntimeEventStore');
     }
-    const [parentHeader, parentRun] = await Promise.all([
+    const [parentHeader, parentRun, parentBoundary] = await Promise.all([
       this.deps.store.readHeader(parentSessionId),
       this.deps.runStore.readRun(parentSessionId, input.spawnedBy.parentRunId),
+      this.deps.store.readExecutionBoundary(parentSessionId),
     ]);
     this.assertActiveParentRun(parentSessionId, parentRun, input.spawnedBy.parentTurnId);
 
     const definition = requireBuiltinAgentDefinitionByProfile(input.agentProfile);
     const availableChildTools = this.deps.childTools ?? [];
     assertAgentDefinitionRunnable({
-      parentPermissionMode: parentHeader.permissionMode,
       definition,
       tools: availableChildTools,
       worktreeChildExecutorAvailable: this.deps.worktreeChildExecutor !== undefined,
@@ -2157,45 +2331,47 @@ export class SessionManager {
       definition,
       requestFingerprint,
     );
-    const creation = await this.deps.store.createSubagent({
-      cwd: workspace?.worktreePath ?? parentHeader.cwd,
-      ...(parentHeader.projectId !== undefined ? { projectId: parentHeader.projectId } : {}),
-      name: input.name ?? definition.name,
-      backend: parentHeader.backend,
-      llmConnectionSlug: parentHeader.llmConnectionSlug,
-      model: parentHeader.model,
-      ...(parentHeader.thinkingLevel !== undefined
-        ? { thinkingLevel: parentHeader.thinkingLevel }
-        : {}),
-      permissionMode: definition.permissionMode,
-      collaborationMode: 'agent',
-      orchestrationMode: 'default',
-      subagentParent: {
-        kind: 'subagent',
-        parentSessionId,
-        spawnedBy: input.spawnedBy,
-        ...(input.swarm ? { swarm: input.swarm } : {}),
-        lifecycle: 'foreground',
+    const creation = await this.deps.store.createSubagent(
+      {
+        cwd: workspace?.worktreePath ?? parentHeader.cwd,
+        ...(parentHeader.projectId !== undefined ? { projectId: parentHeader.projectId } : {}),
+        name: input.name ?? definition.name,
+        backend: parentHeader.backend,
+        llmConnectionSlug: parentHeader.llmConnectionSlug,
+        model: parentHeader.model,
+        ...(parentHeader.thinkingLevel !== undefined
+          ? { thinkingLevel: parentHeader.thinkingLevel }
+          : {}),
+        permissionMode: definition.permissionMode,
+        collaborationMode: 'agent',
+        orchestrationMode: 'default',
+        subagentParent: {
+          kind: 'subagent',
+          parentSessionId,
+          spawnedBy: input.spawnedBy,
+          ...(input.swarm ? { swarm: input.swarm } : {}),
+          lifecycle: 'foreground',
+        },
+        subagentRuntime: {
+          schemaVersion: SUBAGENT_SESSION_RUNTIME_SCHEMA_VERSION,
+          definitionVersion: definition.definitionVersion,
+          agentId: definition.id,
+          agentName: definition.name,
+          profile: definition.profile,
+          systemPrompt: definition.systemPrompt,
+          toolNames: [...definition.tools],
+          categoryPolicy: {},
+        },
+        subagentSpawn: {
+          schemaVersion: SUBAGENT_SESSION_SPAWN_SCHEMA_VERSION,
+          requestFingerprint,
+          initialTurnId: proposedTurnId,
+          initialRunId: proposedRunId,
+        },
+        ...(workspace ? { subagentWorkspace: workspace } : {}),
       },
-      subagentRuntime: {
-        schemaVersion: SUBAGENT_SESSION_RUNTIME_SCHEMA_VERSION,
-        definitionVersion: definition.definitionVersion,
-        agentId: definition.id,
-        agentName: definition.name,
-        profile: definition.profile,
-        systemPrompt: definition.systemPrompt,
-        toolNames: [...definition.tools],
-        categoryPolicy: { ...definition.categoryPolicy },
-        permissionCeiling: parentHeader.permissionMode,
-      },
-      subagentSpawn: {
-        schemaVersion: SUBAGENT_SESSION_SPAWN_SCHEMA_VERSION,
-        requestFingerprint,
-        initialTurnId: proposedTurnId,
-        initialRunId: proposedRunId,
-      },
-      ...(workspace ? { subagentWorkspace: workspace } : {}),
-    });
+      parentBoundary,
+    );
     const child = creation.header;
     const snapshot = child.subagentRuntime;
     const spawn = child.subagentSpawn;
@@ -2476,7 +2652,6 @@ export class SessionManager {
     const sessionHeader = await this.deps.store.readHeader(sessionId);
     await this.ensureChildWorkspace(sessionHeader);
     assertAgentDefinitionRunnable({
-      parentPermissionMode: sessionHeader.permissionMode,
       definition,
       tools: this.deps.childTools ?? [],
       worktreeChildExecutorAvailable: this.deps.worktreeChildExecutor !== undefined,
@@ -2602,14 +2777,11 @@ export class SessionManager {
     ) {
       throw new Error(`Child AgentRun resume source ${sourceRunId} was not found`);
     }
-    if (!isPermissionModeWithinCeiling(child.permissionMode, snapshot.permissionCeiling)) {
-      throw new Error('Child Session permission mode exceeds its durable runtime ceiling');
-    }
+    await this.assertLinkedChildBoundaryMatchesParent(parentSessionId, child.id);
     const runnableTools = buildToolsForAgentDefinition(this.deps.childTools ?? [], {
       id: snapshot.agentId,
       permissionMode: child.permissionMode,
       tools: snapshot.toolNames,
-      categoryPolicy: snapshot.categoryPolicy,
     });
     if (runnableTools.length !== snapshot.toolNames.length) {
       throw new Error('Child Session durable runtime tool snapshot is unavailable');
@@ -3041,6 +3213,19 @@ export class SessionManager {
     }
   }
 
+  private async assertLinkedChildBoundaryMatchesParent(
+    parentSessionId: string,
+    childSessionId: string,
+  ): Promise<void> {
+    const [parentBoundary, childBoundary] = await Promise.all([
+      this.deps.store.readExecutionBoundary(parentSessionId),
+      this.deps.store.readExecutionBoundary(childSessionId),
+    ]);
+    if (!executionBoundaryContains(parentBoundary, childBoundary)) {
+      throw new Error('Linked child execution boundary no longer matches its parent');
+    }
+  }
+
   private async retryChildAgentWithExecution(
     sessionId: string,
     input: RetryChildAgentInput,
@@ -3078,6 +3263,7 @@ export class SessionManager {
       ) {
         throw new Error('Child agent retry source does not belong to the parent Session');
       }
+      await this.assertLinkedChildBoundaryMatchesParent(sessionId, child.id);
       definition = {
         id: snapshot.agentId,
         name: snapshot.agentName,
@@ -3293,9 +3479,7 @@ export class SessionManager {
   }
 
   async listChildAgents(sessionId: string): Promise<AgentListResult> {
-    const header = await this.deps.store.readHeader(sessionId);
     const definitions = listBuiltinAgentDefinitions({
-      parentPermissionMode: header.permissionMode,
       tools: this.deps.childTools ?? [],
       worktreeChildExecutorAvailable: this.deps.worktreeChildExecutor !== undefined,
     });
@@ -3757,7 +3941,10 @@ export class SessionManager {
     copied: StoredMessage[],
     input: ReviseBeforeTurnInput,
   ): Promise<SessionSummary> {
-    const header = await this.deps.store.readHeader(sessionId);
+    const [header, boundary] = await Promise.all([
+      this.deps.store.readHeader(sessionId),
+      this.deps.store.readExecutionBoundary(sessionId),
+    ]);
     const revisionRootSessionId = header.revisionRootSessionId ?? sessionId;
     const family = (await this.deps.store.list()).filter(
       (candidate) =>
@@ -3766,29 +3953,32 @@ export class SessionManager {
     );
     const revisionIndex =
       Math.max(1, ...family.map((candidate) => candidate.revisionIndex ?? 1)) + 1;
-    const next = await this.deps.store.create({
-      cwd: header.cwd,
-      ...(header.projectId !== undefined ? { projectId: header.projectId } : {}),
-      backend: header.backend,
-      llmConnectionSlug: header.llmConnectionSlug,
-      model: header.model,
-      thinkingLevel: header.thinkingLevel,
-      permissionMode: header.permissionMode,
-      collaborationMode: header.collaborationMode,
-      orchestrationMode: header.orchestrationMode ?? 'default',
-      name: header.name,
-      labels: header.labels,
-      // A revision of a real branch remains in that branch's conversation
-      // slot; revision lineage itself must not create a branch banner.
-      parentSessionId: header.parentSessionId,
-      branchOfTurnId: header.branchOfTurnId,
-      revisionRootSessionId,
-      revisionParentSessionId: sessionId,
-      revisionOfTurnId: input.sourceTurnId,
-      revisionIndex,
-      revisionState: 'preparing',
-      status: 'active',
-    });
+    const next = await this.deps.store.create(
+      {
+        cwd: header.cwd,
+        ...(header.projectId !== undefined ? { projectId: header.projectId } : {}),
+        backend: header.backend,
+        llmConnectionSlug: header.llmConnectionSlug,
+        model: header.model,
+        thinkingLevel: header.thinkingLevel,
+        permissionMode: header.permissionMode,
+        collaborationMode: header.collaborationMode,
+        orchestrationMode: header.orchestrationMode ?? 'default',
+        name: header.name,
+        labels: header.labels,
+        // A revision of a real branch remains in that branch's conversation
+        // slot; revision lineage itself must not create a branch banner.
+        parentSessionId: header.parentSessionId,
+        branchOfTurnId: header.branchOfTurnId,
+        revisionRootSessionId,
+        revisionParentSessionId: sessionId,
+        revisionOfTurnId: input.sourceTurnId,
+        revisionIndex,
+        revisionState: 'preparing',
+        status: 'active',
+      },
+      boundary,
+    );
     await this.cloneConversationRuntimeLedger(next.id, sourceView, copied);
     if (copied.length > 0) await this.deps.store.appendMessages(next.id, copied);
     await this.deps.store.appendMessage(next.id, {
@@ -3817,23 +4007,29 @@ export class SessionManager {
     copied: StoredMessage[],
     input: BranchFromTurnInput,
   ): Promise<SessionSummary> {
-    const header = await this.deps.store.readHeader(sessionId);
-    const next = await this.deps.store.create({
-      cwd: header.cwd,
-      ...(header.projectId !== undefined ? { projectId: header.projectId } : {}),
-      backend: header.backend,
-      llmConnectionSlug: header.llmConnectionSlug,
-      model: header.model,
-      thinkingLevel: header.thinkingLevel,
-      permissionMode: header.permissionMode,
-      collaborationMode: header.collaborationMode,
-      orchestrationMode: header.orchestrationMode ?? 'default',
-      name: input.name ?? `${header.name} · 分支`,
-      labels: header.labels,
-      parentSessionId: sessionId,
-      branchOfTurnId: input.sourceTurnId,
-      status: 'active',
-    });
+    const [header, boundary] = await Promise.all([
+      this.deps.store.readHeader(sessionId),
+      this.deps.store.readExecutionBoundary(sessionId),
+    ]);
+    const next = await this.deps.store.create(
+      {
+        cwd: header.cwd,
+        ...(header.projectId !== undefined ? { projectId: header.projectId } : {}),
+        backend: header.backend,
+        llmConnectionSlug: header.llmConnectionSlug,
+        model: header.model,
+        thinkingLevel: header.thinkingLevel,
+        permissionMode: header.permissionMode,
+        collaborationMode: header.collaborationMode,
+        orchestrationMode: header.orchestrationMode ?? 'default',
+        name: input.name ?? `${header.name} · 分支`,
+        labels: header.labels,
+        parentSessionId: sessionId,
+        branchOfTurnId: input.sourceTurnId,
+        status: 'active',
+      },
+      boundary,
+    );
     await this.cloneConversationRuntimeLedger(next.id, sourceView, copied);
     if (copied.length > 0) await this.deps.store.appendMessages(next.id, copied);
     await this.deps.store.appendMessage(next.id, {
@@ -3846,13 +4042,16 @@ export class SessionManager {
     return headerToSummary(await this.deps.store.readHeader(next.id));
   }
 
-  async respondToPermission(sessionId: string, response: PermissionResponse): Promise<void> {
+  async respondToSandboxBoundary(
+    sessionId: string,
+    response: SandboxBoundaryResponse,
+  ): Promise<void> {
     if (this.deps.interactionAuthority) {
       throw new RuntimeInteractionInvariantError(
         'Hosted permission answers must use the captured continuation',
       );
     }
-    await this.runtimeKernel.respondToPermission(sessionId, response);
+    await this.runtimeKernel.respondToSandboxBoundary(sessionId, response);
   }
 
   async respondToUserQuestion(sessionId: string, response: UserQuestionResponse): Promise<void> {
@@ -4580,6 +4779,17 @@ export function changesBackendConfig(patch: Partial<SessionHeader>): boolean {
     // serving the remote sender.
     'permissionMode' in patch
   );
+}
+
+function executionBoundaryMatchesPermissionMode(
+  boundary: ExecutionBoundary,
+  mode: PermissionMode,
+): boolean {
+  if (mode === 'bypass') return boundary.kind === 'bypass';
+  if (boundary.kind !== 'managed') return false;
+  return mode === 'explore'
+    ? boundary.profile.name === 'read-only'
+    : boundary.profile.name !== 'read-only';
 }
 
 function agentRunStatusForSpawnResult(

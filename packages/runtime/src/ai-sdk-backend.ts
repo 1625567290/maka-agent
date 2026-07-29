@@ -3,8 +3,8 @@
  *
  * Provides one `streamText` API across Anthropic / OpenAI / Google / DeepSeek /
  * OpenAI-compatible endpoints, while keeping all of our home-grown
- * machinery: PermissionEngine (policy + park/resume), materializer,
- * AsyncEventQueue, SessionStore JSONL persistence.
+ * machinery: session sandbox boundaries, materializer, AsyncEventQueue,
+ * SessionStore JSONL persistence.
  *
  * Maka owns the agent loop. Each ModelAdapter call performs exactly one
  * provider request; returned tool calls settle through ToolRuntime, become
@@ -52,11 +52,10 @@ import type {
   BackendCompactHistoryInput,
   BackendCompactHistoryResult,
   BackendSendInput,
-  PermissionDecision,
 } from '@maka/core/backend-types';
 import type { AgentSpec } from '@maka/core/runtime-inputs';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
-import type { ToolPermissionRule } from '@maka/core/permission';
+import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import type { UserQuestionResponse } from '@maka/core/user-question';
 import {
   resolveEffectiveOrchestration,
@@ -88,13 +87,6 @@ import type {
 } from './model-protocol.js';
 import { z } from 'zod';
 
-import { PermissionEngine } from './permission-engine.js';
-import {
-  AiSdkAutoApprovalReviewer,
-  ApprovalCoordinator,
-  type AutoApprovalReviewContext,
-  type AutoApprovalReviewer,
-} from './approval-reviewer.js';
 import { AsyncEventQueue } from './async-queue.js';
 import { StreamWatchdog, formatStreamWatchdogError } from './stream-watchdog.js';
 import {
@@ -139,7 +131,6 @@ import { kimiReasoningFieldFromProviderOptions } from './kimi-openai-transport.j
 import { RunTrace, type RunTraceRecorder } from './run-trace.js';
 import {
   toSandboxRunTraceProjection,
-  type SandboxDiagnosticCapability,
   type SandboxDiagnosticsSnapshot,
 } from './sandbox/diagnostics.js';
 import { renderSandboxTurnTailPrompt } from './system-prompt/sandbox-context-prompt.js';
@@ -236,32 +227,6 @@ function joinPromptFragments(fragments: readonly (string | undefined)[]): string
   return joined.length > 0 ? joined : undefined;
 }
 
-function autoApprovalSandboxContext(
-  snapshot: SandboxDiagnosticsSnapshot,
-): NonNullable<AutoApprovalReviewContext['sandbox']> {
-  const { command, filesystem } = snapshot.capabilities;
-  return {
-    platform: snapshot.platform,
-    profileName: snapshot.profile.name,
-    fileSystem: snapshot.profile.fileSystem,
-    network: snapshot.profile.network,
-    commandSandbox: formatSandboxCapability(command),
-    filesystemSandbox: formatSandboxCapability(filesystem),
-    ...(command.selectionReason ? { commandSandboxSelectionReason: command.selectionReason } : {}),
-    ...(filesystem.selectionReason
-      ? { filesystemSandboxSelectionReason: filesystem.selectionReason }
-      : {}),
-    ...(command.failure ? { commandSandboxFailureReason: command.failure.reason } : {}),
-    ...(filesystem.failure ? { filesystemSandboxFailureReason: filesystem.failure.reason } : {}),
-  };
-}
-
-function formatSandboxCapability(capability: SandboxDiagnosticCapability): string {
-  return capability.backend === 'none'
-    ? capability.status
-    : `${capability.status} (${capability.backend})`;
-}
-
 // ============================================================================
 // Constructor input — single object matches @kabi's BackendRegistry call site
 // ============================================================================
@@ -302,13 +267,13 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
   header: SessionHeader;
   /** Append-message function bound to this session (e.g. SessionStore wrapper). */
   appendMessage: AppendMessageFn;
+  /** Reads the authoritative session boundary immediately before every local tool invocation. */
+  readExecutionBoundary: ToolRuntimeInput['readExecutionBoundary'];
+  createSandboxBoundaryRequest?: ToolRuntimeInput['createSandboxBoundaryRequest'];
+  settleSandboxBoundaryRequest?: ToolRuntimeInput['settleSandboxBoundaryRequest'];
 
   // ── Process-singleton deps ─────────────────────────────────────────────
-  permissionEngine: PermissionEngine;
-  /** Optional override for execute-mode automatic permission review. */
-  autoApprovalReviewer?: AutoApprovalReviewer;
-  /** Canonical-named tools available this session. Backend wraps each with
-   *  permission gating before passing to ai-sdk. */
+  /** Canonical-named tools available this session. */
   tools: MakaTool[];
   /** Active profile and enforcement capability snapshot for this session backend. */
   sandboxDiagnosticsSnapshot?: SandboxDiagnosticsSnapshot;
@@ -342,14 +307,10 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
   maxSteps?: number;
   /** Timeout before first SDK stream event; default 30s. */
   streamConnectTimeoutMs?: number;
-  /** Timeout between SDK/tool events; paused while waiting on permission. Default 120s. */
+  /** Timeout between SDK/tool events; paused while a tool is active. Default 120s. */
   streamIdleTimeoutMs?: number;
   /** Test seam for the Runtime-owned provider retry clock. */
   providerRetrySleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
-  /** Timeout for a renderer/user permission decision. Default 300s. */
-  permissionTimeoutMs?: number;
-  /** Invocation-local allow/deny rules evaluated before the session mode. */
-  permissionRules?: readonly ToolPermissionRule[];
   /** Optional system prompt (skills + workspace AGENTS.md merged upstream). */
   systemPrompt?:
     | string
@@ -595,19 +556,15 @@ export class AiSdkBackend implements AgentBackend {
       input.toolAvailability,
       buildInvalidMakaTool(),
     );
-    const autoApprovalReviewer =
-      input.autoApprovalReviewer ??
-      new AiSdkAutoApprovalReviewer({
-        resolveModel: () => this.modelAdapter.resolveModel(),
-        ...(input.providerOptions ? { providerOptions: input.providerOptions } : {}),
-      });
     this.toolRuntime = new ToolRuntime({
       sessionId: input.sessionId,
       header: input.header,
       connection: input.connection,
       modelId: input.modelId,
       appendMessage: input.appendMessage,
-      permissionEngine: input.permissionEngine,
+      readExecutionBoundary: input.readExecutionBoundary,
+      createSandboxBoundaryRequest: input.createSandboxBoundaryRequest,
+      settleSandboxBoundaryRequest: input.settleSandboxBoundaryRequest,
       newId: this.newId,
       now: this.now,
       getPermissionPauseTarget: () => this.currentWatchdog,
@@ -617,7 +574,6 @@ export class AiSdkBackend implements AgentBackend {
       materializeDefaultToolResultOutput: ({ toolCallId, output }) =>
         this.materializeToolResultOutput(output, false, toolCallId),
       getCurrentOrchestration: () => this.currentOrchestration,
-      permissionRules: input.permissionRules,
       spawnChildAgent: input.spawnChildAgent,
       spawnChildSession: input.spawnChildSession,
       prepareChildAgentResume: input.prepareChildAgentResume,
@@ -626,47 +582,9 @@ export class AiSdkBackend implements AgentBackend {
       listChildAgents: input.listChildAgents,
       readChildAgentOutput: input.readChildAgentOutput,
       getRunTrace: () => this.currentRunTrace,
-      permissionTimeoutMs: input.permissionTimeoutMs,
       recordToolInvocation: input.recordToolInvocation,
       runtimeCommitSink: input.runtimeCommitSink,
       recordToolArtifacts: input.recordToolArtifacts,
-      approvalCoordinator: new ApprovalCoordinator({
-        autoReviewer: autoApprovalReviewer,
-        observer: {
-          onAutoReviewStarted: (request) =>
-            this.currentRunTrace?.emit(
-              'permission',
-              'auto_review_started',
-              'Automatic permission review started',
-              { requestId: request.requestId, toolUseId: request.toolUseId, kind: request.kind },
-            ),
-          onAutoReviewDecided: (request, decision) =>
-            this.currentRunTrace?.emit(
-              'permission',
-              'auto_review_decided',
-              'Automatic permission review decided',
-              {
-                requestId: request.requestId,
-                toolUseId: request.toolUseId,
-                decision: decision.outcome,
-                riskLevel: decision.riskLevel,
-              },
-            ),
-          onAutoReviewFailed: (request) =>
-            this.currentRunTrace?.emit(
-              'permission',
-              'auto_review_failed',
-              'Automatic permission review failed closed',
-              { requestId: request.requestId, toolUseId: request.toolUseId },
-            ),
-        },
-      }),
-      getAutoApprovalReviewContext: () => ({
-        ...(this.currentUserIntent !== undefined ? { userIntent: this.currentUserIntent } : {}),
-        ...(input.sandboxDiagnosticsSnapshot
-          ? { sandbox: autoApprovalSandboxContext(input.sandboxDiagnosticsSnapshot) }
-          : {}),
-      }),
     });
   }
 
@@ -692,7 +610,6 @@ export class AiSdkBackend implements AgentBackend {
       input.orchestration ??
       resolveEffectiveOrchestration(this.input.header.orchestrationMode, undefined);
     this.currentUserIntent = input.text;
-    this.input.permissionEngine.beginTurn(turnId);
     this.toolRuntime.beginTurn(turnId, input.hostedInteraction);
     const turnAbortController = new AbortController();
     this.abortController = turnAbortController;
@@ -882,7 +799,7 @@ export class AiSdkBackend implements AgentBackend {
         stopReason: 'error',
       } satisfies CompleteEvent);
       queue.close();
-      this.cleanupAfterTurn(turnId);
+      await this.cleanupAfterTurn(turnId);
       yield* this.drain(queue);
       return;
     }
@@ -943,7 +860,7 @@ export class AiSdkBackend implements AgentBackend {
         stopReason: 'error',
       } satisfies CompleteEvent);
       queue.close();
-      this.cleanupAfterTurn(turnId);
+      await this.cleanupAfterTurn(turnId);
       yield* this.drain(queue);
       return;
     }
@@ -1961,7 +1878,7 @@ export class AiSdkBackend implements AgentBackend {
     } finally {
       if (!drainedNormally) turnAbortController.abort();
       await pumpDone.catch(() => {});
-      this.cleanupAfterTurn(turnId);
+      await this.cleanupAfterTurn(turnId);
     }
   }
 
@@ -2025,17 +1942,16 @@ export class AiSdkBackend implements AgentBackend {
     this.abortController?.abort();
     this.compaction.abortHistoryCompact();
     if (this.currentTurnId !== null) {
-      this.input.permissionEngine.endTurn(this.currentTurnId, 'aborted');
-      this.toolRuntime.endTurn(this.currentTurnId, 'aborted');
+      await this.toolRuntime.endTurn(this.currentTurnId, 'aborted');
     }
     this.currentRunTrace?.abortRequested(_reason);
   }
 
-  async respondToPermission(decision: PermissionDecision): Promise<void> {
-    if (this.currentTurnId === null) return;
-    this.input.permissionEngine.recordResponse(this.currentTurnId, decision);
-    // PermissionDecisionMessage + ack event are written inside ToolRuntime settlement
-    // after parked.resolve() returns, so no further work here.
+  async respondToSandboxBoundary(decision: SandboxBoundaryResponse): Promise<void> {
+    if (await this.toolRuntime.respondToSandboxBoundaryResponse(decision)) {
+      return;
+    }
+    throw new Error(`No pending sandbox boundary request ${decision.requestId}`);
   }
 
   async respondToUserQuestion(response: UserQuestionResponse): Promise<void> {
@@ -2928,8 +2844,7 @@ export class AiSdkBackend implements AgentBackend {
     }
   }
 
-  private cleanupAfterTurn(turnId: string): void {
-    this.input.permissionEngine.endTurn(turnId, this.aborted ? 'aborted' : 'completed');
+  private async cleanupAfterTurn(turnId: string): Promise<void> {
     this.abortController = null;
     this.currentQueue = null;
     this.currentTurnId = null;
@@ -2941,8 +2856,11 @@ export class AiSdkBackend implements AgentBackend {
     this.loopStopRequested = false;
     this.handoffStopReason = undefined;
     this.injectedSteeringMessages = [];
-    this.toolRuntime.endTurn(turnId, this.aborted ? 'aborted' : 'completed');
-    this.aborted = false;
+    try {
+      await this.toolRuntime.endTurn(turnId, this.aborted ? 'aborted' : 'completed');
+    } finally {
+      this.aborted = false;
+    }
   }
 
   /**
@@ -3103,7 +3021,6 @@ function buildInvalidMakaTool(): MakaTool<{ tool?: string; error?: string }, nev
       tool: z.string().optional(),
       error: z.string().optional(),
     }),
-    permissionRequired: false,
     impl: ({ tool, error }) => {
       const requested = tool ? ` "${tool}"` : '';
       throw new Error(

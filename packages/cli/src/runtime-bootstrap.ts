@@ -9,13 +9,13 @@ import {
   AutomationScheduler,
   BackendRegistry,
   GoalManager,
-  PermissionEngine,
   RuntimeReadModel,
   SessionManager,
   ShellRunProcessManager,
   applyRuntimeEventContextBudget,
   buildAutomationTool,
   buildAskUserQuestionTool,
+  buildRequestSandboxBoundaryTool,
   buildBuiltinTools,
   buildRuntimeEventModelReplayPlan,
   buildChildAgentTools,
@@ -78,7 +78,6 @@ import {
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import { resolveStorageRoot } from '@maka/storage/root-authority';
 import { resolveWorkspaceIdentity } from '@maka/storage/workspace-identity';
-import type { ToolPermissionRule } from '@maka/core/permission';
 import { fetchProviderModels } from '@maka/runtime';
 import { createApiKeyOnboardingSurface, type MakaOnboardingSurface } from './onboarding.js';
 import { resolveModelVisionSupport } from '@maka/core';
@@ -160,7 +159,6 @@ export interface CreateMakaCliRuntimeContextInput {
   maxSteps?: number;
   /** Compose the durable Graph control plane and Git-worktree child executor. */
   enableAgentGraph?: boolean;
-  permissionRules?: readonly ToolPermissionRule[];
   /** Canonical cwd used for one resumed session without rewriting its stored header. */
   sessionCwdOverride?: { sessionId: string; cwd: string };
   runtimeInvocationObserver?: (result: InvocationResult) => void | Promise<void>;
@@ -253,7 +251,6 @@ export async function createMakaCliRuntimeContext(
     ? await resolveSessionTargetForSlug(input.requestedConnectionSlug, targetInput)
     : await resolveDefaultSessionTarget(targetInput);
   const modelChoices = await listReadyModelChoices({ connectionStore, credentialStore });
-  const permissionEngine = new PermissionEngine({ newId: randomUUID, now: Date.now });
   const backends = new BackendRegistry();
   const shellRunListeners = new Set<(update: ShellRunUpdate) => void>();
   const shellRuns = new ShellRunProcessManager({
@@ -302,8 +299,6 @@ export async function createMakaCliRuntimeContext(
     ...(filesystemWorker
       ? {
           filesystemWorker,
-          enableBashAdditionalPermissions: true,
-          enableFileToolAdditionalPermissions: true,
         }
       : {}),
   });
@@ -320,8 +315,6 @@ export async function createMakaCliRuntimeContext(
           ...(filesystemWorker
             ? {
                 filesystemWorker,
-                enableBashAdditionalPermissions: true,
-                enableFileToolAdditionalPermissions: true,
               }
             : {}),
         }),
@@ -572,7 +565,8 @@ export async function createMakaCliRuntimeContext(
         })
       : [];
   const subagentTools = agentGraphEnabled ? buildParentAgentTools() : [];
-  const surfaceTools = input.surface === 'tui' ? [buildAskUserQuestionTool()] : [];
+  const surfaceTools =
+    input.surface === 'tui' ? [buildAskUserQuestionTool(), buildRequestSandboxBoundaryTool()] : [];
   let cliProductToolSurface: EffectiveProductToolSurface;
   const resolveCliSkillHost: HostCapabilitiesResolver = () =>
     cliProductToolSurface.hostCapabilities;
@@ -656,10 +650,18 @@ export async function createMakaCliRuntimeContext(
       header: { ...header, model: ready.model },
       appendMessage:
         ctx.appendMessage ?? ((message) => ctx.store.appendMessage(ctx.sessionId, message)),
+      readExecutionBoundary: () => ctx.store.readExecutionBoundary!(ctx.sessionId),
+      ...(input.surface === 'tui'
+        ? {
+            createSandboxBoundaryRequest: (request) =>
+              ctx.store.createSandboxBoundaryRequest!(request),
+            settleSandboxBoundaryRequest: (request) =>
+              ctx.store.settleSandboxBoundaryRequest!(request),
+          }
+        : {}),
       connection: ready.connection,
       apiKey: ready.apiKey,
       modelId: ready.model,
-      permissionEngine,
       modelFactory: (modelInput) => getAIModel({ ...modelInput, fetch: modelFetch }),
       tools: backendTools,
       sandboxDiagnosticsSnapshot,
@@ -766,7 +768,6 @@ export async function createMakaCliRuntimeContext(
       newId: randomUUID,
       now: Date.now,
       ...(input.maxSteps !== undefined ? { maxSteps: input.maxSteps } : {}),
-      ...(input.permissionRules !== undefined ? { permissionRules: input.permissionRules } : {}),
       ...(runtimePersistence.runtimeCommitStore
         ? { runtimeCommitSink: runtimePersistence.runtimeCommitStore }
         : {}),

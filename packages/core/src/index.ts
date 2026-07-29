@@ -46,6 +46,8 @@ export type {
   ShellRunUpdate,
   SandboxDenialSignal,
   SandboxDenialRecovery,
+  SandboxBoundaryRequestEvent,
+  SandboxBoundaryDecisionAckEvent,
   AdditionalPermissionRequestEvent,
   SandboxEscalationRequestEvent,
   AnyPermissionRequestEvent,
@@ -428,7 +430,6 @@ export type {
   PermissionMode,
   ApprovalsReviewer,
   ApprovalRiskLevel,
-  ActiveApprovalRoutingPolicy,
   ToolCategory,
   PolicyDecision,
   ToolExecutionFacts,
@@ -436,23 +437,18 @@ export type {
   ToolExecutionNetwork,
   ToolExecutionSecrets,
   ToolExecutionWriteBack,
-  PreToolUseInput,
-  PreToolUseResult,
   AdditionalPermissionRequest,
   SandboxEscalationRequest,
   SandboxEscalationRiskSummary,
   PermissionRequest,
   PermissionRequestPayload,
   PermissionResponse,
-  ToolPermissionRule,
-  ToolPermissionRuleMatchInput,
 } from './permission.js';
 export {
   PERMISSION_MODES,
   APPROVALS_REVIEWERS,
   APPROVAL_RISK_LEVELS,
   TOOL_CATEGORIES,
-  PERMISSION_POLICY,
   BUILTIN_TOOL_CATEGORY,
   PRIVILEGED_SHELL_PREFIXES,
   PRIVILEGED_SHELL_PATTERNS,
@@ -460,12 +456,9 @@ export {
   DESTRUCTIVE_GIT_PATTERNS,
   categorizeBash,
   classifyToolUse,
-  approvalRoutingPolicyForMode,
   isPermissionMode,
   isPermissionModeWithinCeiling,
   isToolCategory,
-  matchToolPermissionRules,
-  preToolUse,
 } from './permission.js';
 
 // computer-use.ts
@@ -542,6 +535,48 @@ export {
   isProtectedMetadataPath,
 } from './permission-profile.js';
 
+// sandbox-boundary.ts
+export type {
+  ExecutionBoundary,
+  CreateSandboxBoundaryRequest,
+  LegacyPermissionMode,
+  SandboxBoundaryAccess,
+  SandboxBoundaryExpansion,
+  SandboxBoundaryExpansionAssessment,
+  SandboxBoundaryExpansionValidationFailureReason,
+  SandboxBoundaryExpansionValidationResult,
+  SandboxBoundaryFilesystemEntry,
+  SandboxBoundaryDecision,
+  SandboxBoundaryResponse,
+  SandboxBoundaryRequest,
+  SandboxBoundaryRequestStatus,
+  SandboxBoundarySettlement,
+  SandboxBoundaryScope,
+  SandboxProfile,
+  SettleSandboxBoundaryRequest,
+} from './sandbox-boundary.js';
+export {
+  MAX_EXECUTION_BOUNDARY_SERIALIZED_BYTES,
+  MAX_SANDBOX_BOUNDARY_FILESYSTEM_ENTRIES,
+  MAX_SANDBOX_BOUNDARY_PATH_CHARS,
+  MAX_SANDBOX_BOUNDARY_SERIALIZED_BYTES,
+  SANDBOX_BOUNDARY_ACCESS_MODES,
+  SANDBOX_BOUNDARY_REQUEST_STATUSES,
+  SANDBOX_BOUNDARY_SCOPES,
+  applySandboxBoundaryExpansion,
+  assertExecutionBoundaryCapacity,
+  assessSandboxBoundaryExpansion,
+  compactSandboxBoundaryFilesystemEntries,
+  createBypassExecutionBoundary,
+  createExternalExecutionBoundary,
+  createGenesisExecutionBoundary,
+  createManagedExecutionBoundary,
+  decodeExecutionBoundary,
+  executionBoundaryContains,
+  sandboxBoundaryExpansionAllowsPath,
+  validateSandboxBoundaryExpansion,
+} from './sandbox-boundary.js';
+
 // additional-permissions.ts
 export type {
   AdditionalFileSystemPermission,
@@ -558,10 +593,6 @@ export {
   MAX_ADDITIONAL_FILESYSTEM_ENTRIES,
   MAX_ADDITIONAL_PERMISSION_PATH_CHARS,
   MAX_ADDITIONAL_PERMISSION_SERIALIZED_BYTES,
-  additionalPermissionAllowsPath,
-  additionalPermissionMatchesPath,
-  additionalPermissionRequiredForPath,
-  applyAdditionalPermissionProfile,
   compactAdditionalFileSystemPermissions,
   serializeAdditionalPermissionProfile,
   validateAdditionalPermissionProfile,
@@ -573,20 +604,6 @@ export type {
   CompiledPermissionProfile,
 } from './permission-profile-compiler.js';
 export { compilePermissionProfile } from './permission-profile-compiler.js';
-
-// permission-request-health.ts
-export type {
-  PermissionRequestHealth,
-  PermissionRequestHealthStatus,
-} from './permission-request-health.js';
-export {
-  PERMISSION_REQUEST_EXPIRED_AFTER_MS,
-  PERMISSION_REQUEST_HEALTH_STATUSES,
-  PERMISSION_REQUEST_STALE_AFTER_MS,
-  derivePermissionRequestHealth,
-  formatPermissionRequestWait,
-  isPermissionRequestHealthStatus,
-} from './permission-request-health.js';
 
 // connections.ts
 export type {
@@ -1187,7 +1204,6 @@ export {
 export type {
   BackendSendInput,
   RuntimeContinuationMetadata,
-  PermissionDecision,
   AgentBackend,
   BackendCompactHistoryInput,
   BackendCompactHistoryResult,

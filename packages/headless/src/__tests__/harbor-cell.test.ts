@@ -12,14 +12,11 @@ import type {
   SessionEvent,
   SessionHeader,
 } from '@maka/core';
-import type {
-  BackendSendInput,
-  BackendStopMode,
-  PermissionDecision,
-} from '@maka/core/backend-types';
+import type { BackendSendInput, BackendStopMode } from '@maka/core/backend-types';
+import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
+import { createSessionStore } from '@maka/storage';
 import {
   BackendRegistry,
-  PermissionEngine,
   PiAgentBackend,
   type AgentBackend,
   type AiSdkBackendInput,
@@ -97,7 +94,6 @@ function registerTestPiAgentBackend(
         header: ctx.header,
         appendMessage:
           ctx.appendMessage ?? ((message) => ctx.store.appendMessage(ctx.sessionId, message)),
-        permissionEngine: new PermissionEngine({ newId: () => 'perm-id', now: () => 123 }),
         transport: transportFactory({ header: ctx.header, store: ctx.store }),
       }),
   );
@@ -145,7 +141,7 @@ class CellReportingBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -189,7 +185,7 @@ class CellChildAdmissionProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -218,7 +214,7 @@ class RunStartOrderingProbeBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -243,7 +239,7 @@ class ThrowingBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -296,7 +292,7 @@ class DeadlineSettlingBackend implements AgentBackend {
     this.releaseStop();
   }
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -357,7 +353,7 @@ class NonCooperativeDeadlineBackend implements AgentBackend {
     this.releaseStop();
   }
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -423,7 +419,7 @@ class ActiveIsolatedToolDeadlineBackend implements AgentBackend {
     if (mode === 'immediate') this.controller.abort();
   }
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -461,7 +457,7 @@ class TerminalClaimBeforeDeadlineBackend implements AgentBackend {
     this.stopCalls += 1;
   }
 
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -539,7 +535,7 @@ class StepCapThenCompleteBackend implements AgentBackend {
   }
 
   async stop(): Promise<void> {}
-  async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+  async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
   async dispose(): Promise<void> {}
 }
 
@@ -1013,6 +1009,15 @@ describe('runHarborCell', () => {
       );
       assert.match(runtimeEvents, /"id":"cell-usage"/);
       assert.match(runtimeEvents, /"systemPromptHash":"sha256:cell-prompt"/);
+      const sessions = createSessionStore(storageRoot);
+      try {
+        assert.deepEqual(await sessions.readExecutionBoundary(result.invocation.sessionId), {
+          kind: 'external',
+          revision: 0,
+        });
+      } finally {
+        await sessions.close?.();
+      }
     });
   });
 
@@ -1095,6 +1100,53 @@ describe('runHarborCell', () => {
           resumeSessionId: first.invocation.sessionId,
         }),
         /resume session model.*different-model.*fake-model/i,
+      );
+    });
+  });
+
+  test('uses the external boundary instead of a legacy Execute mode authority', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const result = await runHarborCell({
+        config,
+        instruction: 'run under harness isolation',
+        cwd: workspaceDir,
+        outputDir,
+        storageRoot,
+      });
+      const sessions = createSessionStore(storageRoot);
+
+      const header = await sessions.readHeaderSnapshot(result.invocation.sessionId);
+      const boundary = await sessions.readExecutionBoundary(result.invocation.sessionId);
+      await sessions.close?.();
+
+      assert.equal(header?.permissionMode, 'ask');
+      assert.equal(boundary.kind, 'external');
+    });
+  });
+
+  test('rejects resuming a session that is not externally isolated', async () => {
+    await withDirs(async ({ workspaceDir, outputDir, storageRoot }) => {
+      const sessions = createSessionStore(storageRoot);
+      const managed = await sessions.create({
+        cwd: workspaceDir,
+        backend: config.backend,
+        llmConnectionSlug: config.llmConnectionSlug,
+        model: config.model,
+        permissionMode: 'execute',
+        name: 'managed-session',
+      });
+      await sessions.close?.();
+
+      await assert.rejects(
+        runHarborCell({
+          config,
+          instruction: 'resume without external isolation',
+          cwd: workspaceDir,
+          outputDir,
+          storageRoot,
+          resumeSessionId: managed.id,
+        }),
+        /external execution boundary/i,
       );
     });
   });
@@ -1305,7 +1357,7 @@ describe('runHarborCell', () => {
         }
 
         async stop(): Promise<void> {}
-        async respondToPermission(_decision: PermissionDecision): Promise<void> {}
+        async respondToSandboxBoundary(_decision: SandboxBoundaryResponse): Promise<void> {}
         async dispose(): Promise<void> {}
       }
 
@@ -2306,14 +2358,6 @@ describe('runHarborCell', () => {
       for (const unexpected of ['agent_spawn', 'agent_swarm', 'agent_list', 'agent_output']) {
         assert.ok(!toolNames.includes(unexpected), `unexpected default Agent tool ${unexpected}`);
       }
-      assert.equal(
-        backendInput.tools.find((tool) => tool.name === 'Bash')?.permissionRequired,
-        false,
-      );
-      assert.equal(
-        backendInput.tools.find((tool) => tool.name === 'Write')?.permissionRequired,
-        false,
-      );
       assert.match(
         typeof backendInput.systemPrompt === 'string' ? backendInput.systemPrompt : '',
         /Prefer Read, Glob, and Grep/,
@@ -4153,13 +4197,12 @@ describe('runHarborCell', () => {
     assert.equal(snapshot.synthesisCache?.schemaVersion, 1);
   });
 
-  test('Harbor tool builder keeps the six container-native tools non-interactive', () => {
+  test('Harbor tool builder exposes the six container-native tools', () => {
     const tools = buildHarborCellAiSdkTools(fakeToolExecutor());
     const names = tools.map((tool) => tool.name);
 
     for (const expected of ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']) {
       assert.ok(names.includes(expected), `expected Harbor tool ${expected}`);
-      assert.equal(tools.find((tool) => tool.name === expected)?.permissionRequired, false);
     }
   });
 

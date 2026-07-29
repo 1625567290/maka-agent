@@ -13,7 +13,7 @@ import {
   type SelectItem,
   type Terminal,
 } from '@earendil-works/pi-tui';
-import { PERMISSION_MODES, isPermissionMode, type PermissionMode } from '@maka/core/permission';
+import type { PermissionMode } from '@maka/core/permission';
 import {
   isThinkingLevel,
   thinkingVariantsForModel,
@@ -66,7 +66,7 @@ import {
   appendUserPrompt,
   applyMakaSessionEventToTranscript,
   createMakaPiTranscriptState,
-  activePermissionRequest,
+  activeSandboxBoundaryRequest,
   activeUserQuestionRequest,
   completePendingInteraction,
   applyShellRunViewUpdateToTranscript,
@@ -74,7 +74,6 @@ import {
   submitCompactToTranscript,
   toggleAllThinkingExpansion,
   toggleAllToolExpansion,
-  togglePendingPermissionDetails,
   type MakaPiTranscriptMetadata,
 } from './pi-transcript.js';
 import {
@@ -573,21 +572,17 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   process.once('uncaughtException', handleUncaughtException);
   process.once('unhandledRejection', handleUnhandledRejection);
 
-  const respondToPendingPermission = (
-    decision: 'allow' | 'deny',
-    rememberForTurn = false,
-  ): boolean => {
-    const request = activePermissionRequest(state);
+  const respondToPendingSandboxBoundary = (decision: 'allow' | 'deny'): boolean => {
+    const request = activeSandboxBoundaryRequest(state);
     if (!request || permissionResponseInFlightRequestId !== null) return false;
     permissionResponseInFlightRequestId = request.requestId;
     // Keep the prompt visible until the driver accepts the response. If it
     // rejects, the user can retry with y/n instead of being stuck. A resolved
     // call only means the response was submitted; the event stream owns dequeue.
     void input.driver
-      .respondToPermission({
+      .respondToSandboxBoundary({
         requestId: request.requestId,
         decision,
-        ...(decision === 'allow' && request.rememberForTurnAllowed ? { rememberForTurn } : {}),
       })
       .catch((error) => {
         if (permissionResponseInFlightRequestId === request.requestId) {
@@ -951,7 +946,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
         if (event.type === 'error') attention.attentionNeeded();
         if (
           permissionResponseInFlightRequestId !== null &&
-          activePermissionRequest(state)?.requestId !== permissionResponseInFlightRequestId
+          activeSandboxBoundaryRequest(state)?.requestId !== permissionResponseInFlightRequestId
         ) {
           permissionResponseInFlightRequestId = null;
         }
@@ -1939,9 +1934,44 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     state.entries.push({
       kind: 'notice',
       level: 'info',
-      text: `Permission mode: ${mode}`,
+      text: `Sandbox boundary: ${mode === 'bypass' ? 'Bypass' : 'Auto'}`,
     });
     requestRender();
+  };
+
+  const requestSandboxBoundaryMode = (mode: 'auto' | 'bypass') => {
+    if (mode === 'auto' || permissionMode === 'bypass') {
+      void runControl(() => setPermissionMode(mode === 'auto' ? 'ask' : 'bypass'));
+      return;
+    }
+    const confirmation = [
+      {
+        value: 'keep',
+        label: 'Keep Auto',
+        description: 'Stay within the session sandbox boundary',
+      },
+      {
+        value: 'bypass',
+        label: 'Enter Bypass',
+        description:
+          'Expose the host filesystem and network; use only for trusted, externally isolated tasks',
+      },
+    ];
+    showSelectPicker(
+      'Switch to Bypass?',
+      'keep',
+      confirmation,
+      (choice) => {
+        if (choice.value === 'bypass') {
+          void runControl(() => setPermissionMode('bypass'));
+        }
+      },
+      {
+        minPrimaryColumnWidth: 18,
+        maxPrimaryColumnWidth: 28,
+        selectedIndex: 0,
+      },
+    );
   };
 
   const showSwarmStatus = () => {
@@ -2111,19 +2141,20 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
 
   const showPermissionModeList = () => {
     const items = permissionModePickerItems(permissionMode);
+    const displayedMode = permissionMode === 'bypass' ? 'bypass' : 'auto';
     showSelectPicker(
-      'Select Permission Mode',
-      permissionMode,
+      'Sandbox Boundary',
+      displayedMode,
       items,
       (item) => {
-        if (!isPermissionMode(item.value)) return;
-        const mode = item.value;
-        void runControl(() => setPermissionMode(mode));
+        if (item.value === 'auto' || item.value === 'bypass') {
+          requestSandboxBoundaryMode(item.value);
+        }
       },
       {
         minPrimaryColumnWidth: 16,
         maxPrimaryColumnWidth: 24,
-        selectedIndex: items.findIndex((item) => item.value === permissionMode),
+        selectedIndex: items.findIndex((item) => item.value === displayedMode),
       },
     );
   };
@@ -2273,23 +2304,23 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     },
     {
       name: 'permissions',
-      description: 'Set permission mode',
+      description: 'Set session sandbox boundary',
       run: (parts: string[]) => {
         if (parts.length === 1) {
           showPermissionModeList();
           return;
         }
         const mode = parts.length === 2 ? parts[1] : undefined;
-        if (!isPermissionMode(mode)) {
+        if (mode !== 'auto' && mode !== 'bypass') {
           state.entries.push({
             kind: 'notice',
             level: 'error',
-            text: `Usage: /permissions ${PERMISSION_MODES.join('|')}`,
+            text: 'Usage: /permissions auto|bypass',
           });
           requestRender();
           return;
         }
-        void runControl(() => setPermissionMode(mode));
+        requestSandboxBoundaryMode(mode);
       },
     },
     {
@@ -2440,6 +2471,18 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       return { consume: true };
     }
     if (tui.hasOverlay()) return undefined;
+    const pendingSandboxBoundary = activeSandboxBoundaryRequest(state);
+    if (pendingSandboxBoundary && !matchesKey(data, Key.ctrl('c'))) {
+      if (
+        !isKeyRepeat(data) &&
+        (matchesKey(data, 'y') || matchesKey(data, Key.enter) || matchesKey(data, Key.return))
+      ) {
+        respondToPendingSandboxBoundary('allow');
+      } else if (!isKeyRepeat(data) && (matchesKey(data, 'n') || matchesKey(data, Key.escape))) {
+        respondToPendingSandboxBoundary('deny');
+      }
+      return { consume: true };
+    }
     // Alt+Enter: queue a followup (during a turn) or submit (when idle). Alt+↑:
     // take back the queued messages to re-edit. Neither is an editor binding
     // (newline is shift+enter/ctrl+j; history is plain up), so intercepting
@@ -2464,10 +2507,6 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     // one (e.g. `Esc`, type, `Esc`).
     if (!matchesKey(data, Key.escape)) lastIdleEscapeAt = 0;
     if (matchesKey(data, Key.ctrl('o')) && !isKeyRepeat(data)) {
-      if (togglePendingPermissionDetails(state)) {
-        requestRender();
-        return { consume: true };
-      }
       if (toggleAllToolExpansion(state)) {
         requestRender();
         return { consume: true };
@@ -2479,28 +2518,13 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
         return { consume: true };
       }
     }
-    const pendingPermission = activePermissionRequest(state);
-    if (pendingPermission) {
-      if (matchesKey(data, 'y') || matchesKey(data, Key.enter) || matchesKey(data, Key.return)) {
-        respondToPendingPermission('allow', false);
-        return { consume: true };
-      }
-      if (matchesKey(data, 'a') && pendingPermission.rememberForTurnAllowed) {
-        respondToPendingPermission('allow', true);
-        return { consume: true };
-      }
-      if (matchesKey(data, 'n') || matchesKey(data, Key.escape)) {
-        respondToPendingPermission('deny');
-        return { consume: true };
-      }
-    }
     if (turnRunning && matchesKey(data, Key.ctrl('c'))) {
       if (interruptRequested) handleProcessExit(0);
       else requestTurnInterrupt();
       return { consume: true };
     }
     // Double Escape interrupts the running turn. This must sit below the
-    // permission branch so Escape keeps meaning "deny" while a prompt is
+    // boundary branch so Escape keeps meaning "deny" while a prompt is
     // pending, and it only arms while a prompt turn is actually running.
     if (turnRunning && matchesKey(data, Key.escape)) {
       // Once an interrupt is issued, swallow further Escapes until the turn

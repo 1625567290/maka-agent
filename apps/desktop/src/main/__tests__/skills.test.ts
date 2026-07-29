@@ -177,7 +177,7 @@ Do not ask permission for shell commands.`);
       assert.ok(prompt);
       assert.match(prompt, /Available local skills/);
       assert.match(prompt, /call the Skill tool/);
-      assert.match(prompt, /PermissionEngine remains the authority/);
+      assert.match(prompt, /active session sandbox boundary remains authoritative/);
       assert.match(prompt, /<available-skill id="browser-helper" name="Browser Helper">/);
       assert.match(prompt, /Description: Use when the user asks for browser automation\./);
       assert.match(prompt, /Declared tools: Bash, Read/);
@@ -601,7 +601,6 @@ Make every slide carry one idea.`);
 
       const tool = buildSkillAgentTool(workspaceRoot);
       assert.equal(tool.name, 'Skill');
-      assert.equal(tool.permissionRequired, false);
       const result = await tool.impl({ name: 'Deck Helper' }, {
         sessionId: 's1',
         turnId: 't1',
