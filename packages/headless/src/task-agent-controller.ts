@@ -10,17 +10,18 @@ import {
 } from '@maka/core';
 import {
   AgentGraphCoordinator,
+  AGENT_TOOL_GROUP_ID,
   AgentRun,
   AiSdkFlow,
   BackendRegistry,
   RuntimeRunner,
   SessionManager,
-  AGENT_TOOL_NAMES,
   buildChildAgentTools,
   type AgentRunActiveSession,
   type InvocationResult,
   type SessionStore,
 } from '@maka/runtime';
+import { createReadImageSnapshotter } from '@maka/storage';
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
 import type { Config, ResultRecord, Task } from './contracts.js';
 import { registerFakeBackend } from './backends.js';
@@ -59,7 +60,6 @@ import {
 import { observeHeavyTaskWorkspace } from './heavy-task-workspace-observation.js';
 import type { HeadlessBackendContext } from './isolation.js';
 import {
-  ISOLATED_HEADLESS_TOOL_NAMES,
   taskIsolationFacts,
   toolExecutorIdentity,
   validateRealBackendIsolation,
@@ -105,7 +105,7 @@ import { taskDefinitionFromTask } from './task-run-adapter.js';
 import { taskEvidenceRuntimeProvenanceLinks } from './task-evidence-provenance.js';
 import { taskAttemptExecutionEvidence } from './task-execution-lineage.js';
 import { bindSelfCheckEvidence } from './task-self-check-evidence.js';
-import { buildIsolatedHeadlessTools } from './tools.js';
+import { buildHeadlessProductToolSurfaceForBackend } from './tools.js';
 
 export interface RunTaskOnceDeps extends RunExperimentDeps {
   taskRunId?: string;
@@ -269,6 +269,15 @@ export async function runTaskOnceWithStorage(
   let graphControlStore: ReturnType<typeof createAgentGraphControlStore> | undefined;
   try {
     const agentWorkspaceDir = deps.realBackendIsolation?.workspaceDir ?? workspace.dir;
+    const productToolSurface = buildHeadlessProductToolSurfaceForBackend(
+      effectiveConfig.backend,
+      deps.realBackendIsolation?.toolExecutor,
+      {
+        agentTools: effectiveConfig.agentTools,
+        ...(heavyTaskEvidence ? { heavyTaskEvidence } : {}),
+        snapshotImage: createReadImageSnapshotter(storage.artifactStore),
+      },
+    );
     await appendTaskEvent(taskRunStore, taskRunId, {
       type: 'workspace_lease_recorded',
       id: newId(),
@@ -297,11 +306,25 @@ export async function runTaskOnceWithStorage(
         taskRunId,
         attemptId,
         isolation: deps.realBackendIsolation,
-        toolNames: toolNamesForIdentity(
-          Boolean(deps.realBackendIsolation?.toolExecutor),
-          heavyTaskMode.enabled,
-          effectiveConfig.agentTools === true,
-        ),
+        ...(productToolSurface
+          ? {
+              productToolSurface: productToolSurface.identity,
+              ...(heavyTaskMode.enabled
+                ? {
+                    supplementalToolSets: [
+                      {
+                        label: 'heavy_task_progress',
+                        toolNames: [...HEAVY_TASK_PROGRESS_TOOL_NAMES],
+                      },
+                      {
+                        label: 'heavy_task_self_check',
+                        toolNames: [...HEAVY_TASK_SELF_CHECK_TOOL_NAMES],
+                      },
+                    ],
+                  }
+                : {}),
+            }
+          : { toolNames: ['registered_backend'] }),
       }),
     });
     const backends = new BackendRegistry();
@@ -315,6 +338,7 @@ export async function runTaskOnceWithStorage(
       workspaceDir: agentWorkspaceDir,
       ...sessionCapabilities.capabilities,
       artifactStore: storage.artifactStore,
+      ...(productToolSurface ? { productToolSurface } : {}),
       heavyTaskMode,
       ...(heavyTaskProgress ? { heavyTaskProgress } : {}),
       ...(heavyTaskSelfCheck ? { heavyTaskSelfCheck } : {}),
@@ -333,11 +357,9 @@ export async function runTaskOnceWithStorage(
       runStore: agentRunStore,
       runtimeEventStore,
       backends,
-      ...(config.agentTools && deps.realBackendIsolation?.toolExecutor
+      ...(productToolSurface?.boundSurfaceIds.includes(AGENT_TOOL_GROUP_ID)
         ? {
-            childTools: buildChildAgentTools(
-              buildIsolatedHeadlessTools(deps.realBackendIsolation.toolExecutor),
-            ),
+            childTools: buildChildAgentTools(productToolSurface.tools),
           }
         : {}),
       isParentRunActive: (sessionId, runId, turnId) =>
@@ -943,18 +965,6 @@ function withOptionalStatePrompts(
     next = `${next}\n\n${prompt}`;
   }
   return next;
-}
-
-function toolNamesForIdentity(
-  hasIsolatedExecutor: boolean,
-  heavyTaskEnabled: boolean,
-  agentTools: boolean,
-): string[] {
-  const names = hasIsolatedExecutor ? [...ISOLATED_HEADLESS_TOOL_NAMES] : ['registered_backend'];
-  if (agentTools && hasIsolatedExecutor) names.push(...AGENT_TOOL_NAMES);
-  if (heavyTaskEnabled && hasIsolatedExecutor)
-    names.push(...HEAVY_TASK_PROGRESS_TOOL_NAMES, ...HEAVY_TASK_SELF_CHECK_TOOL_NAMES);
-  return names;
 }
 
 async function appendTaskAttemptExecutionLink(input: {
