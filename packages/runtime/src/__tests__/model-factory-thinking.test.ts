@@ -36,6 +36,25 @@ describe('buildProviderOptions: thinking level', () => {
     }
   });
 
+  test('Volcengine Agent Plan keeps Responses stateless while preserving reasoning replay', () => {
+    const expectedOptions = {
+      openai: {
+        store: false,
+        forceReasoning: true,
+      },
+    };
+    assert.deepEqual(
+      buildProviderOptions(conn('volcengine-agent-plan'), 'ark-code-latest'),
+      expectedOptions,
+    );
+    assert.deepEqual(thinkingVariantsForModel('volcengine-agent-plan', 'ark-code-latest'), []);
+    assert.deepEqual(thinkingVariantsForModel('volcengine-agent-plan', 'kimi-k3'), []);
+    assert.deepEqual(
+      buildProviderOptions(conn('volcengine-agent-plan'), 'kimi-k3', 'high'),
+      expectedOptions,
+    );
+  });
+
   test('anthropic effort model (opus-4-8) sends effort field directly; no budgetTokens mapping', () => {
     assert.deepEqual(buildProviderOptions(conn('anthropic'), 'claude-opus-4-8', 'high'), {
       anthropic: { cacheControl: { type: 'ephemeral' }, effort: 'high' },

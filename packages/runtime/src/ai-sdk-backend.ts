@@ -38,6 +38,7 @@ import type {
 import type {
   StoredMessage,
   AssistantMessage,
+  AssistantThinkingPart,
   ToolCallMessage,
   ToolResultMessage,
   PermissionDecisionMessage,
@@ -77,6 +78,7 @@ import type {
   JSONValue,
   ModelFinishReason,
   ModelMessage,
+  ReasoningPart,
   ModelToolSet,
   NormalizedUsage,
   ModelFailureKind,
@@ -711,6 +713,7 @@ export class AiSdkBackend implements AgentBackend {
     let stepThinking = '';
     let sawStepThinking = false;
     let stepThinkingProviderOptions: NonNullable<ModelMessage['providerOptions']> | undefined;
+    let stepResponsesThinkingParts: AssistantThinkingPart[] = [];
     let stepSignature: string | undefined;
     const startedAt = this.now();
 
@@ -727,6 +730,18 @@ export class AiSdkBackend implements AgentBackend {
       const hasThinking = sawStepThinking || stepSignature !== undefined;
       if (stepText.length === 0 && !hasThinking) return;
       const stepId = currentStepMessageId;
+      const thinkingParts: AssistantThinkingPart[] =
+        stepResponsesThinkingParts.length > 0
+          ? stepResponsesThinkingParts
+          : [
+              {
+                text: stepThinking,
+                ...(stepSignature !== undefined ? { signature: stepSignature } : {}),
+                ...(stepThinkingProviderOptions !== undefined
+                  ? { providerOptions: stepThinkingProviderOptions }
+                  : {}),
+              },
+            ];
       const msg: AssistantMessage = {
         type: 'assistant',
         id: stepId,
@@ -738,28 +753,33 @@ export class AiSdkBackend implements AgentBackend {
           ? {
               thinking: {
                 text: stepThinking,
-                ...(stepSignature !== undefined ? { signature: stepSignature } : {}),
-                ...(stepThinkingProviderOptions !== undefined
-                  ? { providerOptions: stepThinkingProviderOptions }
+                ...(thinkingParts.length === 1 && thinkingParts[0]!.signature !== undefined
+                  ? { signature: thinkingParts[0]!.signature }
                   : {}),
+                ...(thinkingParts.length === 1 && thinkingParts[0]!.providerOptions !== undefined
+                  ? { providerOptions: thinkingParts[0]!.providerOptions }
+                  : {}),
+                ...(thinkingParts.length > 1 ? { parts: thinkingParts } : {}),
               },
             }
           : {}),
       };
       await this.input.appendMessage(msg);
       if (hasThinking) {
-        queue.push({
-          type: 'thinking_complete',
-          id: this.newId(),
-          turnId,
-          ts: this.now(),
-          messageId: stepId,
-          text: stepThinking,
-          ...(stepSignature !== undefined ? { signature: stepSignature } : {}),
-          ...(stepThinkingProviderOptions !== undefined
-            ? { providerOptions: stepThinkingProviderOptions }
-            : {}),
-        } satisfies ThinkingCompleteEvent);
+        for (const part of thinkingParts) {
+          queue.push({
+            type: 'thinking_complete',
+            id: this.newId(),
+            turnId,
+            ts: this.now(),
+            messageId: stepId,
+            text: part.text,
+            ...(part.signature !== undefined ? { signature: part.signature } : {}),
+            ...(part.providerOptions !== undefined
+              ? { providerOptions: part.providerOptions }
+              : {}),
+          } satisfies ThinkingCompleteEvent);
+        }
       }
       queue.push({
         type: 'text_complete',
@@ -773,6 +793,7 @@ export class AiSdkBackend implements AgentBackend {
       stepThinking = '';
       sawStepThinking = false;
       stepThinkingProviderOptions = undefined;
+      stepResponsesThinkingParts = [];
       stepSignature = undefined;
     };
     let tokenUsage: NormalizedAiSdkUsage | undefined;
@@ -1372,6 +1393,33 @@ export class AiSdkBackend implements AgentBackend {
                   stepThinking += event.text;
                   if (event.providerOptions !== undefined) {
                     stepThinkingProviderOptions = event.providerOptions;
+                  }
+                  const openai = event.providerOptions?.openai;
+                  const itemId =
+                    openai && typeof openai === 'object' && !Array.isArray(openai)
+                      ? (openai as { itemId?: unknown }).itemId
+                      : undefined;
+                  if (typeof itemId === 'string' && itemId.length > 0) {
+                    let part = stepResponsesThinkingParts.find(
+                      (candidate) =>
+                        (candidate.providerOptions?.openai as { itemId?: unknown } | undefined)
+                          ?.itemId === itemId,
+                    );
+                    if (!part) {
+                      part = {
+                        text:
+                          stepResponsesThinkingParts.length === 0 && event.text.length === 0
+                            ? stepThinking
+                            : '',
+                        providerOptions: event.providerOptions,
+                      };
+                      stepResponsesThinkingParts.push(part);
+                    } else {
+                      part.providerOptions = event.providerOptions;
+                    }
+                    part.text += event.text;
+                  } else if (stepResponsesThinkingParts.length > 0) {
+                    stepResponsesThinkingParts.at(-1)!.text += event.text;
                   }
                   queue.push({
                     type: 'thinking_delta',
@@ -2379,14 +2427,18 @@ export class AiSdkBackend implements AgentBackend {
     type ToolCallItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
     type ToolResultItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>;
     type ThinkingItem = Extract<RuntimeEventModelReplayItem, { kind: 'thinking' }>;
+    type ReplayReasoning = {
+      part?: ReasoningPart;
+      providerOptions?: NonNullable<ModelMessage['providerOptions']>;
+    };
     const out: ModelMessage[] = [];
     let bufferedCalls: ToolCallItem[] = [];
     const results = new Map<string, ToolResultItem>();
-    const reasoningByStep = new Map<string, ThinkingItem>();
+    const reasoningByStep = new Map<string, ThinkingItem[]>();
     const textByStep = new Map<string, string>();
 
     const replaySupport = this.modelAdapter.runtimeEventReplaySupport();
-    const reasoningReplay = (item: ThinkingItem) => {
+    const reasoningReplay = (item: ThinkingItem): ReplayReasoning | undefined => {
       if (item.signature) {
         return replaySupport.signedThinking
           ? {
@@ -2397,6 +2449,32 @@ export class AiSdkBackend implements AgentBackend {
               },
             }
           : undefined;
+      }
+      if (replaySupport.openAiResponsesThinking) {
+        const openai = item.providerOptions?.openai;
+        if (openai && typeof openai === 'object' && !Array.isArray(openai)) {
+          const { itemId, reasoningEncryptedContent } = openai as {
+            itemId?: unknown;
+            reasoningEncryptedContent?: unknown;
+          };
+          if (typeof itemId === 'string' && itemId.length > 0) {
+            return {
+              part: {
+                type: 'reasoning' as const,
+                text: item.text,
+                providerOptions: {
+                  openai: {
+                    itemId,
+                    ...(typeof reasoningEncryptedContent === 'string' ||
+                    reasoningEncryptedContent === null
+                      ? { reasoningEncryptedContent }
+                      : {}),
+                  },
+                },
+              },
+            };
+          }
+        }
       }
       if (!replaySupport.unsignedThinking) return undefined;
       const kimiReasoningField = kimiReasoningFieldFromProviderOptions(item.providerOptions);
@@ -2442,13 +2520,17 @@ export class AiSdkBackend implements AgentBackend {
     // Emit one assistant message for a step: reasoning (if any), text (if any),
     // then the step's tool calls, followed by those calls' tool results.
     const emitStep = async (
-      reasoning: ThinkingItem | undefined,
+      reasoning: readonly ThinkingItem[] | undefined,
       text: string,
       calls: readonly ToolCallItem[],
     ) => {
       const content: unknown[] = [];
-      const replayReasoning = reasoning ? reasoningReplay(reasoning) : undefined;
-      if (replayReasoning?.part) content.push(replayReasoning.part);
+      const replayReasoning = reasoning
+        ?.map(reasoningReplay)
+        .filter((item): item is ReplayReasoning => item !== undefined);
+      for (const item of replayReasoning ?? []) {
+        if (item.part) content.push(item.part);
+      }
       if (text.length > 0) content.push({ type: 'text', text });
       for (const call of calls) {
         content.push({
@@ -2459,13 +2541,14 @@ export class AiSdkBackend implements AgentBackend {
           ...(call.providerOptions !== undefined ? { providerOptions: call.providerOptions } : {}),
         });
       }
-      if (content.length > 0 || replayReasoning?.providerOptions) {
+      const replayProviderOptions = replayReasoning?.find(
+        (item) => item.providerOptions !== undefined,
+      )?.providerOptions;
+      if (content.length > 0 || replayProviderOptions) {
         out.push({
           role: 'assistant',
           content,
-          ...(replayReasoning?.providerOptions
-            ? { providerOptions: replayReasoning.providerOptions }
-            : {}),
+          ...(replayProviderOptions ? { providerOptions: replayProviderOptions } : {}),
         } as ModelMessage);
       }
       await pushToolResults(calls);
@@ -2527,7 +2610,9 @@ export class AiSdkBackend implements AgentBackend {
           break;
         case 'thinking':
           if (item.stepId !== undefined) {
-            reasoningByStep.set(item.stepId, item);
+            const stepReasoning = reasoningByStep.get(item.stepId) ?? [];
+            stepReasoning.push(item);
+            reasoningByStep.set(item.stepId, stepReasoning);
           } else {
             // Legacy standalone reasoning (pure-reasoning turn): emit on its own.
             await flushPendingSteps();
