@@ -713,6 +713,19 @@ const systemPromptService = createSystemPromptMainService({
   hostCapabilities: desktopProductToolSurface.hostCapabilities,
 });
 let lookupPricing = buildPricingLookup();
+let usageReadiness: Promise<void> | undefined;
+function ensureUsageReady(): Promise<void> {
+  if (!usageReadiness) {
+    const readiness = telemetryRepo.load().then(() => {
+      lookupPricing = buildPricingLookup(telemetryRepo.listPricingOverrides());
+    });
+    usageReadiness = readiness;
+    void readiness.catch(() => {
+      if (usageReadiness === readiness) usageReadiness = undefined;
+    });
+  }
+  return usageReadiness;
+}
 // Track the last status fields that affect persisted diagnostics. The reason
 // is part of the key because a running bridge can remain degraded while a
 // newer, more useful failure replaces the previous one.
@@ -806,6 +819,7 @@ backends.register('ai-sdk', createAiSdkBackendFactory({
   buildSubscriptionModelFetch,
   systemPromptService,
   telemetryRepo,
+  ensureUsageReady,
   artifactStore,
   desktopSessionSkillHosts,
   sandboxDiagnosticsProvider,
@@ -973,6 +987,7 @@ const dailyReview = createDailyReviewMainService({
   archiveStore: dailyReviewArchiveStore,
   connectionStore,
   telemetryRepo,
+  ensureUsageReady,
   listSessions: async () => collapseSessionRevisions(await runtime.listSessions()),
   resolveConnectionSecret,
   buildSubscriptionModelFetch,
@@ -1135,6 +1150,7 @@ function registerIpc(): void {
     settingsStore,
     connectionStore,
     telemetryRepo,
+    ensureUsageReady,
     botRegistry,
     getComputerUseCapabilityInput: computerUseCapabilityInput,
   });
@@ -1174,8 +1190,10 @@ function registerIpc(): void {
   registerGatewayIpc({ openGateway });
   registerDailyReviewIpc({ dailyReview, dailyReviewArchiveStore, mainWindowController });
   registerUsageIpc({
+    ipcMain,
     settingsStore,
     telemetryRepo,
+    ensureUsageReady,
     refreshPricingLookup: () => {
       lookupPricing = buildPricingLookup(telemetryRepo.listPricingOverrides());
     },
@@ -1379,6 +1397,7 @@ wireAppLifecycle({
   connectionStore,
   settingsStore,
   telemetryRepo,
+  ensureUsageReady,
   keepSystemAwake,
   botRegistry,
   openGateway,
@@ -1402,9 +1421,6 @@ wireAppLifecycle({
   emitSessionsChanged,
   handleExternalSettingsChange,
   getSettingsIpc: () => settingsIpc,
-  setLookupPricing: (value) => {
-    lookupPricing = value;
-  },
 });
 
 function computerUseCapabilityInput() {

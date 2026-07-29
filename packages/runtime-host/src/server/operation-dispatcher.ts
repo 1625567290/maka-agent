@@ -55,6 +55,7 @@ export type SessionContinuityOperationKey = Extract<
 export type TaskLedgerOperationKey = Extract<OperationKey, 'task.ledger.query'>;
 export type ArtifactOperationKey = Extract<OperationKey, `artifact.${string}`>;
 export type SkillCatalogOperationKey = Extract<OperationKey, `skill.catalog.${string}`>;
+export type UsagePricingOperationKey = Extract<OperationKey, 'usage.query' | `pricing.${string}`>;
 export type DomainOperationHandlerMap = Pick<OperationHandlerMap, DomainOperationKey>;
 export type TurnOperationHandlerMap = Pick<OperationHandlerMap, TurnOperationKey>;
 export type RuntimePolicyOperationHandlerMap = Pick<OperationHandlerMap, RuntimePolicyOperationKey>;
@@ -71,6 +72,7 @@ export type SessionContinuityOperationHandlerMap = Pick<
 export type TaskLedgerOperationHandlerMap = Pick<OperationHandlerMap, TaskLedgerOperationKey>;
 export type ArtifactOperationHandlerMap = Pick<OperationHandlerMap, ArtifactOperationKey>;
 export type SkillCatalogOperationHandlerMap = Pick<OperationHandlerMap, SkillCatalogOperationKey>;
+export type UsagePricingOperationHandlerMap = Pick<OperationHandlerMap, UsagePricingOperationKey>;
 
 export function composeOperationHandlers(
   ...handlerMaps: readonly Partial<OperationHandlerMap>[]

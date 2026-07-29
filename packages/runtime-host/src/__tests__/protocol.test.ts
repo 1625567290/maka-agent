@@ -60,6 +60,8 @@ describe('Runtime Host bootstrap protocol', () => {
       'host.status',
       'interaction.answer',
       'interaction.query',
+      'pricing.mutate',
+      'pricing.query',
       'queue.retract',
       'runtime.policy.mutate',
       'runtime.policy.query',
@@ -74,6 +76,7 @@ describe('Runtime Host bootstrap protocol', () => {
       'turn.query',
       'turn.start',
       'turn.stop',
+      'usage.query',
     ]);
     const errors = [
       'host_not_ready',

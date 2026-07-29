@@ -65,6 +65,7 @@ export interface AiSdkBackendFactoryDeps extends DesktopBackendToolSurfaceDeps {
   buildSubscriptionModelFetch: SubscriptionModelFetchBuilder;
   systemPromptService: SystemPromptMainService;
   telemetryRepo: TelemetryRepo;
+  ensureUsageReady: () => Promise<void>;
   artifactStore: ArtifactStore;
   desktopSessionSkillHosts: Map<string, HostCapabilities>;
   sandboxDiagnosticsProvider: AssembledTools['sandboxDiagnosticsProvider'];
@@ -93,6 +94,7 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
     buildSubscriptionModelFetch,
     systemPromptService,
     telemetryRepo,
+    ensureUsageReady,
     artifactStore,
     desktopSessionSkillHosts,
     sandboxDiagnosticsProvider,
@@ -108,6 +110,7 @@ export function createAiSdkBackendFactory(deps: AiSdkBackendFactoryDeps): Backen
   } = deps;
 
   return async (ctx) => {
+    await ensureUsageReady();
     const toolSurface = await resolveDesktopBackendToolSurface(deps, ctx);
     const {
       connection,

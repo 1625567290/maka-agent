@@ -422,6 +422,7 @@ function makeFactoryDeps(
       buildLocalMemoryPromptFragment: async () => '',
     },
     telemetryRepo: {},
+    ensureUsageReady: async () => {},
     artifactStore: {},
     desktopSessionSkillHosts: new Map(),
     sandboxDiagnosticsProvider: { resolve: async () => undefined },

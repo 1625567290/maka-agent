@@ -14,6 +14,7 @@ import {
   type HostIncompatible,
   type HostRegistration,
   type HostStatusResult,
+  HOST_OPERATION_SPECS,
   type OperationInput,
   type OperationKey,
   type OperationOutput,
@@ -30,6 +31,7 @@ import {
   validateProtocolRange,
 } from '../protocol/index.js';
 import { FramedTransport, RuntimeHostTransportError } from '../transport/framed-transport.js';
+import type { OperationSpec } from '../protocol/operation-spec.js';
 import {
   ClientSessionSubscription,
   RuntimeHostSubscriptionError,
@@ -191,6 +193,17 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     const boundedTimeoutMs =
       timeoutMs === undefined ? undefined : requireTimeout(timeoutMs, 'timeoutMs');
     if (this.#terminalError) return Promise.reject(this.#terminalError);
+    const spec = HOST_OPERATION_SPECS[operation] as OperationSpec<
+      OperationInput<K>,
+      OperationOutput<K>,
+      HostOperationErrorCode
+    >;
+    let canonicalInput: OperationInput<K>;
+    try {
+      canonicalInput = spec.decodeInput(input);
+    } catch (error) {
+      return Promise.reject(asError(error));
+    }
     const requestId = randomUUID();
     const result = new Promise<Result>((resolve, reject) => {
       const timer =
@@ -205,13 +218,17 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
             }, boundedTimeoutMs);
       this.#pendingRequests.set(requestId, {
         operation,
-        accept: (value) => accept(value as OperationOutput<K>),
+        accept: (value) => {
+          const output = value as OperationOutput<K>;
+          spec.assertOutputForInput?.(canonicalInput, output);
+          return accept(output);
+        },
         resolve: (value) => resolve(value as Result),
         reject,
         timer,
       });
     });
-    const frame = { requestId, operation, input } as RequestFrame;
+    const frame = { requestId, operation, input: canonicalInput } as RequestFrame;
     void this.#transport.write(frame).catch((error: unknown) => this.#fail(asError(error)));
     return result;
   }
