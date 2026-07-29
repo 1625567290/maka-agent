@@ -38,7 +38,11 @@ import {
   normalizeStopSessionInput,
   normalizeUserQuestionResponse,
 } from './permission-response-guard.js';
-import { getE2eFixtureState, type resolveE2eFixture } from './e2e-fixture.js';
+import {
+  getE2eFixtureState,
+  retireE2eFixtureSandboxBoundaryRequest,
+  type resolveE2eFixture,
+} from './e2e-fixture.js';
 import type { requireReadyConnection } from './chat-readiness.js';
 import type { MainTaskLedgerWiring } from './task-ledger-wiring.js';
 import type { MainGoalWiring } from './goal-wiring.js';
@@ -335,6 +339,8 @@ export function registerSessionsIpc(
     runtime.readExecutionBoundary(sessionId),
   );
   ipcMain.handle('sessions:listActiveSandboxBoundaryRequests', (_event, sessionId: string) => {
+    // Already filtered by retirement: `getE2eFixtureState` is the one owner of
+    // which fixture requests are still unanswered.
     const fixtureRequest = getE2eFixtureState(e2eFixture)?.sandboxBoundaryBySession?.[sessionId];
     return fixtureRequest
       ? [fixtureRequest]
@@ -349,8 +355,13 @@ export function registerSessionsIpc(
       // would model an "allow" that grants nothing and no surface built on the
       // boundary could be exercised against it (#1611).
       if (normalized.decision === 'allow') {
+        // Retired only once the grant has landed. The runtime drops an active
+        // request when the decision is acknowledged, not when it is received;
+        // hiding this one before the write succeeds would let the fixture
+        // swallow a settlement failure the renderer is about to be told about.
         await applyFixtureSandboxBoundaryExpansion(store, sessionId, fixtureRequest.expansion);
       }
+      retireE2eFixtureSandboxBoundaryRequest(normalized.requestId);
       return;
     }
     if (normalized.decision === 'allow') {
