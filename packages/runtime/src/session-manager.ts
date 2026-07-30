@@ -798,8 +798,8 @@ export class SessionManager {
   }
 
   /** Invalidate backend snapshots now, or immediately after active turns settle. */
-  async refreshIdleBackends(): Promise<void> {
-    await this.runtimeKernel.invalidateCachedBackends();
+  refreshIdleBackends(): Promise<void> {
+    return this.runtimeKernel.invalidateCachedBackends();
   }
 
   async getMessages(sessionId: string): Promise<StoredMessage[]> {

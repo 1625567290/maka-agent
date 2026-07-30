@@ -1053,10 +1053,15 @@ export type {
   ConnectionModelDiscoveryEffectOutcome,
   ConnectionTestEffectOutcome,
 } from './connection-effect-outcome.js';
-export { createConnectionEffectFetchTransport } from './network/scoped-fetch-transport.js';
+export {
+  createConnectionEffectFetchTransport,
+  createProxiedFetchTransport,
+} from './network/scoped-fetch-transport.js';
 export type {
   ConnectionEffectFetchTransport,
   ConnectionEffectProxySnapshot,
+  ProxiedFetchProxy,
+  ProxiedFetchTransport,
 } from './network/scoped-fetch-transport.js';
 
 export { materializeSession, applyAppendedMessage, setToolStatus } from './materializer.js';
@@ -1500,6 +1505,7 @@ export {
   SKILLS_PROMPT_CONTEXT_RATIO,
   resolveSkillsPromptCharBudget,
   buildSkillsPromptFragment,
+  buildSkillsPromptFragmentFromInventoryWithReport,
   buildSkillsPromptFragmentWithReport,
   selectSkillsForContext,
   selectSkillScanForContext,
@@ -1508,7 +1514,9 @@ export {
   gateSkillsByHostCapabilities,
   // skills-agent-tools
   buildSkillAgentTool,
+  buildSkillAgentToolFromInventory,
   buildSkillSearchAgentTool,
+  buildSkillSearchAgentToolFromInventory,
   SkillShadowSelectionTracker,
   SKILL_TOOL_NAME,
   SKILL_SEARCH_TOOL_NAME,
@@ -1603,5 +1611,6 @@ export type {
   LoadedSkillInstructions,
   LoadSkillInstructionsResult,
   // skills-agent-tools
+  SkillInventoryResolver,
   SkillToolOptions,
 } from './skills.js';
