@@ -129,7 +129,8 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     const providers = await readProviderSettingsCombinedSource();
     const main = await readMainProcessCombinedSource();
     const detail = providers.match(/function ConnectionDetail[\s\S]*?function modelIdListsEqual\(/)?.[0] ?? '';
-    const addForm = providers.match(/function AddProviderForm[\s\S]*?function nextSlug/)?.[0] ?? '';
+    const addForm =
+      providers.match(/function AddProviderForm[\s\S]*?function usesQuickApiKeyDialog/)?.[0] ?? '';
 
     assert.match(
       providers,

@@ -1248,6 +1248,7 @@ export {
   READY_PROVIDER_TYPES,
   backendKindOf,
   connectionEnabledModelIds,
+  deriveConnectionSlug,
   isWiredOAuthProvider,
   reconcileConnectionAfterModelFetch,
   effectiveBaseUrl,

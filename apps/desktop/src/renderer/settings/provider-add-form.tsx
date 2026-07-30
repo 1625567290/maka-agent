@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import {
   PROVIDER_DEFAULTS,
+  deriveConnectionSlug,
   isWiredOAuthProvider,
   validateSlug,
   type ProviderType,
@@ -17,7 +18,6 @@ import { providerDisplay } from './provider-display';
 import { useActionGuard } from './use-action-guard';
 import {
   categoryLabel,
-  nextSlug,
   providerPanelActionErrorMessage,
   type ConnectionsBridge,
 } from './provider-panel-shared';
@@ -35,7 +35,9 @@ export function AddProviderForm(props: {
   const defaults = PROVIDER_DEFAULTS[props.providerType];
   const display = providerDisplay(props.providerType, locale);
   const recommendedDefaultModel = buildCatalogRecommendedDefaultModel(props.providerType);
-  const [slug, setSlug] = useState(() => nextSlug(props.providerType, props.existingSlugs));
+  const [slug, setSlug] = useState(() =>
+    deriveConnectionSlug(props.providerType, props.existingSlugs),
+  );
   const [name, setName] = useState(display.name);
   const [baseUrl, setBaseUrl] = useState(defaults.baseUrl);
   const [cloudflareAccountId, setCloudflareAccountId] = useState('');

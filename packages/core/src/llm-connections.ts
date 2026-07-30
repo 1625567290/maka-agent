@@ -258,6 +258,20 @@ export function validateSlug(slug: string): string | null {
   return null;
 }
 
+/** Derive an unused connection slug from a catalog provider type. */
+export function deriveConnectionSlug(
+  providerType: ProviderType,
+  existingSlugs: readonly string[] = [],
+): string {
+  const base = providerType.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+  if (!existingSlugs.includes(base)) return base;
+
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = `${base}-${suffix}`;
+    if (!existingSlugs.includes(candidate)) return candidate;
+  }
+}
+
 /**
  * PR-UI-IPC-1 (@kenji msg 35260e29 + 2e495eb7): connection `baseUrl`
  * scheme allowlist gate.
