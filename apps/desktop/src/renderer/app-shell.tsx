@@ -55,6 +55,16 @@ import { AgentGraphPanel } from './agent-graph-panel';
 import { ChatComposerRegion } from './chat-composer-region';
 import { ChatWorkbar } from './chat-workbar';
 import {
+  consumeCompanionQuoteSnapshot,
+  removeStagedCompanionQuote,
+  stageCompanionQuote,
+  type QuoteCompanionPanelState,
+} from './quote-companion-panel-state';
+import {
+  applyCompanionForkVisibilityEvent,
+  reconcileCompanionForkVisibility,
+} from './quote-companion-visibility';
+import {
   PlanExecutionPanel,
   PlanProposalCard,
   usePlanModeState,
@@ -206,6 +216,7 @@ function AppShellContent({
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
   const {
     sessions,
+    authoritativeSessionIds,
     sessionsRef,
     setSessions,
     refreshSessions,
@@ -454,12 +465,26 @@ function AppShellContent({
   // `quotes` accumulates excerpts staged for the next follow-up — selecting more
   // text adds to the SAME panel rather than opening a new one; `sourceSessionId`
   // pins it to the main session the companion forks from.
-  const [quotePanel, setQuotePanel] = useState<
-    { sourceSessionId: string; quotes: QuoteRef[] } | null
-  >(null);
-  // The quote companion's ephemeral fork id, while its panel is open — hidden
-  // from the main session list (the fork is removed on panel dismiss).
-  const [companionForkId, setCompanionForkId] = useState<string | undefined>(undefined);
+  const [quotePanel, setQuotePanel] = useState<QuoteCompanionPanelState | null>(null);
+  // Created companion forks stay hidden until authoritative cleanup succeeds or
+  // a later authoritative session list confirms they are gone. A set preserves
+  // earlier failed cleanups when another companion opens.
+  const [hiddenCompanionForkIds, setHiddenCompanionForkIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const onCompanionForkVisibilityChange = useCallback(
+    (event: Parameters<typeof applyCompanionForkVisibilityEvent>[1]) =>
+      setHiddenCompanionForkIds((current) =>
+        applyCompanionForkVisibilityEvent(current, event),
+      ),
+    [],
+  );
+  useEffect(() => {
+    if (!authoritativeSessionIds) return;
+    setHiddenCompanionForkIds((current) =>
+      reconcileCompanionForkVisibility(current, authoritativeSessionIds),
+    );
+  }, [authoritativeSessionIds]);
   const [revisionDraft, setRevisionDraft] = useState<TurnRevisionDraft | null>(null);
   const revisionDraftRef = useRef<TurnRevisionDraft | null>(null);
   const commitRevisionDraft = useCallback((draft: TurnRevisionDraft | null) => {
@@ -515,9 +540,11 @@ function AppShellContent({
       // Exclude the quote companion's ephemeral fork so it stays hidden from the
       // main session list while its panel is open.
       filterLinkedSessionTree(sidebarSessionTree, (session) =>
-        session.id !== companionForkId ? sessionMatchesNavSelection(session, navSelection) : false,
+        !hiddenCompanionForkIds.has(session.id)
+          ? sessionMatchesNavSelection(session, navSelection)
+          : false,
       ),
-    [sidebarSessionTree, navSelection, companionForkId],
+    [sidebarSessionTree, navSelection, hiddenCompanionForkIds],
   );
   const visibleSessions = visibleSessionTree.roots;
   // PR-DAILY-REVIEW-MVP-0: bridge for the main Daily Review module.
@@ -2135,9 +2162,11 @@ function AppShellContent({
                         // Accumulate onto the open panel for this session rather
                         // than spawning a new one; otherwise start a fresh panel.
                         setQuotePanel((prev) =>
-                          prev && prev.sourceSessionId === activeId
-                            ? { ...prev, quotes: [...prev.quotes, quote] }
-                            : { sourceSessionId: activeId, quotes: [quote] },
+                          stageCompanionQuote(prev, {
+                            sourceSessionId: activeId,
+                            quote,
+                            newId: () => crypto.randomUUID(),
+                          }),
                         );
                         // Surface it inside the session workbar (as a tab) rather
                         // than a second right column — open the bar on the quote tab.
@@ -2408,10 +2437,13 @@ function AppShellContent({
                   quotePanel && quotePanel.sourceSessionId === activeId ? quotePanel : null
                 }
                 onClearQuote={() => setQuotePanel(null)}
-                onQuotesConsumed={() =>
-                  setQuotePanel((prev) => (prev ? { ...prev, quotes: [] } : prev))
+                onQuotesConsumed={(snapshot) =>
+                  setQuotePanel((prev) => consumeCompanionQuoteSnapshot(prev, snapshot))
                 }
-                onForkChange={setCompanionForkId}
+                onRemoveQuote={(target) =>
+                  setQuotePanel((prev) => removeStagedCompanionQuote(prev, target))
+                }
+                onForkVisibilityChange={onCompanionForkVisibilityChange}
                 sourceSession={activeSessionForView}
                 modelChoices={chatModelChoices}
               />
