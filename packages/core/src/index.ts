@@ -339,6 +339,7 @@ export type {
   ShellRunOperation,
   ShellRunPatch,
   ShellRunRecord,
+  ShellRunActiveStatus,
   ShellRunStatus,
   ShellRunStore,
   ShellRunTerminalStatus,
@@ -392,12 +393,15 @@ export {
 export { redactSecrets as displayRedactSecrets } from './display-redaction.js';
 export {
   SHELL_RUN_ID_MAX_CHARS,
+  SHELL_RUN_ACTIVE_STATUSES,
   SHELL_RUN_STATUSES,
   SHELL_RUN_TERMINAL_STATUSES,
   isShellOutput,
+  isActiveShellRunStatus,
   isShellRunId,
   isShellRunStatus,
   isValidShellRunState,
+  isValidShellRunStatusTransition,
   isTerminalShellRunStatus,
 } from './shell-run.js';
 

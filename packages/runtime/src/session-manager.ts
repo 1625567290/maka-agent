@@ -74,6 +74,7 @@ import {
   decodeAgentGraphIntentClaim,
   executionBoundaryContains,
   failureClassFromCompleteStopReason,
+  isActiveShellRunStatus,
   isDeepResearchSession,
   isSessionInlineRun,
   subagentSessionRuntimeSummary,
@@ -855,7 +856,7 @@ export class SessionManager {
         bashToolCalls.has(message.toolUseId) &&
         !ownToolCalls.has(message.toolUseId) &&
         message.content.kind === 'shell_run' &&
-        message.content.status === 'running'
+        isActiveShellRunStatus(message.content.status)
       ) {
         const { operation: _operation, ...result } = message.content;
         inherited.set(message.toolUseId, {
