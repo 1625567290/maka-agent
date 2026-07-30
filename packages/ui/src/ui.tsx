@@ -373,9 +373,12 @@ export const SelectItem = forwardRef<HTMLDivElement, React.ComponentPropsWithout
  * pin: the top layer paints above every z-index by definition, which is
  * how the popup outranks the Settings modal that triggers it (the bug
  * fixed for Select in WAWQAQ msg `d3ea9a33`). Focus restore on close is
- * Astryx's `useFocusTrap` restore effect — the imperative `showPopover()`
- * path does NOT get the declarative Popover API focus return, so the trap
- * is the authority (see useFocusTrap.js in @astryxdesign/core).
+ * native first: the show-popover algorithm records the previously focused
+ * element even for imperative `showPopover()`, and `hidePopover()` returns
+ * focus to it. Light dismiss deliberately skips that return (focus follows
+ * the user's click), and Astryx's `useFocusTrap` restore effect backstops
+ * whatever the browser leaves behind (its guard no-ops when focus already
+ * went home — see useFocusTrap.js in @astryxdesign/core).
  *
  * Deliberate Astryx-native deviations from the Base UI predecessor, all
  * invisible to the closed-state harness: the popup gains Astryx's hidden
@@ -418,9 +421,19 @@ interface PopoverRootProps {
 export function PopoverRoot({ children, open, onOpenChange, onOpenChangeComplete, label }: PopoverRootProps): React.ReactElement {
   const callbacksRef = React.useRef({ onOpenChange, onOpenChangeComplete });
   callbacksRef.current = { onOpenChange, onOpenChangeComplete };
-  const onShow = React.useCallback(() => callbacksRef.current.onOpenChange?.(true), []);
+  // Prop-driven reconcile transitions stay silent on `onOpenChange`: the
+  // parent initiated them, so echoing them back would double-report (with
+  // `open` held true, Escape reports false and the reconcile show() would
+  // otherwise report a spurious true). `useLayer` fires these callbacks
+  // synchronously inside show()/hide(), so a flag around the calls suffices.
+  // `onOpenChangeComplete` still fires — a settle is a settle no matter who
+  // initiated the transition, and TimePicker keys its settled state on it.
+  const reconcilingRef = React.useRef(false);
+  const onShow = React.useCallback(() => {
+    if (!reconcilingRef.current) callbacksRef.current.onOpenChange?.(true);
+  }, []);
   const onHide = React.useCallback(() => {
-    callbacksRef.current.onOpenChange?.(false);
+    if (!reconcilingRef.current) callbacksRef.current.onOpenChange?.(false);
     callbacksRef.current.onOpenChangeComplete?.(false);
   }, []);
   // Auto-focus is owned here (not by Astryx) so `initialFocus` can land on a
@@ -448,8 +461,13 @@ export function PopoverRoot({ children, open, onOpenChange, onOpenChangeComplete
   const { isOpen, show, hide } = popover;
   React.useEffect(() => {
     if (open === undefined) return;
-    if (open && !isOpen) show();
-    else if (!open && isOpen) hide();
+    reconcilingRef.current = true;
+    try {
+      if (open && !isOpen) show();
+      else if (!open && isOpen) hide();
+    } finally {
+      reconcilingRef.current = false;
+    }
   }, [open, isOpen, show, hide]);
 
   return <PopoverContext.Provider value={context}>{children}</PopoverContext.Provider>;
@@ -461,10 +479,14 @@ export const PopoverTrigger = forwardRef<HTMLButtonElement, React.ButtonHTMLAttr
 ) {
   const { popover } = usePopoverContext('PopoverTrigger');
   // The trigger is an outside element to `popover="auto"`, so pressing it
-  // while open light-dismisses on pointerdown — and the same gesture's click
-  // would then re-open. Track per-gesture causality instead of a hide
-  // timestamp (Astryx's own Popover uses a 50ms window, which also swallows
-  // a genuine fast re-open after dismissing elsewhere).
+  // while open light-dismisses during the press (on pointerup per the HTML
+  // spec) — and the same gesture's click would then re-open. Track
+  // per-gesture causality instead of a hide timestamp (Astryx's own Popover
+  // uses a 50ms window, which also swallows a genuine fast re-open after
+  // dismissing elsewhere). The guard judges only pointer-sourced clicks
+  // (`event.detail > 0`): a keyboard activation has no paired pointerdown,
+  // so a flag left behind by an aborted press (drag off, pointercancel —
+  // gestures that end without a click on the trigger) must not swallow it.
   const wasOpenAtPointerDownRef = React.useRef(false);
   return (
     <button
@@ -479,10 +501,11 @@ export const PopoverTrigger = forwardRef<HTMLButtonElement, React.ButtonHTMLAttr
         onPointerDown?.(event);
       }}
       onClick={(event) => {
+        const dismissedByThisGesture =
+          event.detail > 0 && wasOpenAtPointerDownRef.current && !popover.isOpen;
+        wasOpenAtPointerDownRef.current = false;
         onClick?.(event);
         if (event.defaultPrevented) return;
-        const dismissedByThisGesture = wasOpenAtPointerDownRef.current && !popover.isOpen;
-        wasOpenAtPointerDownRef.current = false;
         if (dismissedByThisGesture) return;
         popover.toggle();
       }}
@@ -509,7 +532,8 @@ export function PopoverPositioner({ children, align, sideOffset }: PopoverPositi
   return <PopoverPositionContext.Provider value={value}>{children}</PopoverPositionContext.Provider>;
 }
 
-const POPOVER_FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+const POPOVER_FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 interface PopoverPopupProps extends React.HTMLAttributes<HTMLDivElement> {
   /** Lands initial focus on a specific element instead of the first focusable one. */

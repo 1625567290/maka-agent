@@ -44,6 +44,24 @@ test('tooltip opens on hover in the top layer and dismisses on Escape', async ({
   await expect(tooltip).toBeVisible();
   await page.mouse.move(10, 300);
   await expect(tooltip).toBeHidden();
+
+  // Activating the trigger dismisses the tooltip (Base UI closeOnClick
+  // parity): clicking a chrome button must not leave its hint floating under
+  // the pointer. The one-shot check right after the click is what pins the
+  // fix — every other hide path (hover bridge, focusout) is delayed by at
+  // least 100ms, while the trigger's own dismissal is synchronous. The held
+  // re-check catches a show still pending its 200ms delay popping in late.
+  // The new-task button is the right subject: it resets only the main pane —
+  // no modal to inert the tooltip out of the role tree (the search trigger)
+  // and no chrome layout shift that could slide a neighboring trigger under
+  // the stationary pointer (the sidebar toggle).
+  const newTask = page.getByRole('button', { name: '新任务' });
+  await newTask.hover();
+  await expect(tooltip).toBeVisible();
+  await newTask.click();
+  expect(await tooltip.isHidden()).toBe(true);
+  await page.waitForTimeout(350);
+  await expect(tooltip).toBeHidden();
 });
 
 test('time-picker popover owns focus placement and every dismiss path', async ({
@@ -78,8 +96,9 @@ test('time-picker popover owns focus placement and every dismiss path', async ({
   await expect(minute).toBeFocused();
 
   // Clicking the open trigger closes the popover — native light dismiss
-  // fires on pointerdown and the trailing click must not re-open it (the
-  // upstream lastHideTime guard). Hold the assertion past the race window.
+  // fires during the press (on pointerup per the HTML spec) and the same
+  // gesture's trailing click must not re-open it. Hold the assertion past
+  // the race window.
   await trigger.click();
   await expect(dialog).toBeHidden();
   await page.waitForTimeout(150);
@@ -93,12 +112,40 @@ test('time-picker popover owns focus placement and every dismiss path', async ({
   await expect(trigger).not.toHaveAttribute('data-popup-open');
 
   // Escape closes the popover and hands focus back to the trigger. No
-  // settling wait before this click: a re-open right after dismissing
-  // elsewhere must work — the gesture guard must not swallow it the way a
-  // hide-timestamp window would.
+  // settling wait before this click: a fast re-open right after dismissing
+  // elsewhere must work. (Best-effort pin on the hide-timestamp regression —
+  // it caught the real ~40ms gap in practice, but Playwright cannot bound
+  // the inter-action gap below 50ms, so the gesture guard's real contract is
+  // the aborted-press journey below.)
   await trigger.click();
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
   await expect(trigger).toBeFocused();
+
+  // An aborted press must not poison the next keyboard activation: press on
+  // the open trigger (light dismiss closes the popover), drag off and
+  // release elsewhere — no click ever reaches the trigger, so a naive
+  // per-gesture flag would linger. The next Enter has no paired pointerdown
+  // and must still toggle the popover open. The release point sits beside
+  // the trigger, clear of the popup anchored below it: the spec's light
+  // dismiss deliberately ignores gestures whose down/up straddle a popover
+  // boundary (drag-out protection), so releasing inside would not dismiss.
+  await trigger.press('Enter');
+  await expect(dialog).toBeVisible();
+  const triggerBox = await trigger.boundingBox();
+  if (!triggerBox) throw new Error('trigger has no box');
+  await page.mouse.move(triggerBox.x + triggerBox.width / 2, triggerBox.y + triggerBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(triggerBox.x + triggerBox.width + 160, triggerBox.y + triggerBox.height / 2);
+  await page.mouse.up();
+  await expect(dialog).toBeHidden();
+  // `toBeHidden` tracks the DOM (`:popover-open` gone); the attribute tracks
+  // React state, which syncs through the layer's queued `toggle` task. Wait
+  // for it so Enter lands after the close fully settled.
+  await expect(trigger).not.toHaveAttribute('data-popup-open');
+  await trigger.press('Enter');
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
 });
