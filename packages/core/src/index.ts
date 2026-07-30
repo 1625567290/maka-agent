@@ -152,6 +152,7 @@ export {
   isRuntimeEventAuthor,
   isRuntimeEventStatus,
   decodeRuntimeEvent,
+  decodePersistedRuntimeEvent,
   isTerminalRuntimeEventStatus,
   isTerminalRuntimeEvent,
   isPartialRuntimeEvent,
