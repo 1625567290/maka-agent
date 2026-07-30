@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
+import childProcess, {
+  type ExecFileException,
+  type ExecFileOptionsWithStringEncoding,
+} from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { after, describe, test } from 'node:test';
+import { after, describe, test, type TestContext } from 'node:test';
 import type { ShellRunRecord, ShellRunStore, ShellRunUpdate, ToolResultContent } from '@maka/core';
 import { createShellRunStore } from '@maka/storage';
 
@@ -434,6 +439,65 @@ describe('ShellRunProcessManager', () => {
         ),
       /Background Bash timeout/,
     );
+  });
+
+  test('latches timeout while POSIX process discovery is pending', {
+    skip: process.platform === 'win32' ? 'POSIX process discovery only' : false,
+  }, async (context) => {
+    const processDiscovery = delayPosixProcessDiscovery(context);
+
+    const manager = await createTestManager();
+    try {
+      const initial = await manager.runBackgroundBash(
+        shellInput({
+          cwd: await workspace(),
+          command: nodeCommand('setTimeout(() => process.exit(0), 80);'),
+          timeoutMs: 50,
+        }),
+      );
+      assert.equal(initial.kind, 'shell_run');
+      await processDiscovery.started;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      processDiscovery.release();
+
+      const result = await waitForTerminalShellRun(manager, initial.ref);
+      assert.equal(result.status, 'timed_out');
+      assert.equal(result.exitCode, 124);
+    } finally {
+      processDiscovery.release();
+      await manager.terminateAll().catch(() => undefined);
+    }
+  });
+
+  test('preserves cancellation when timeout fires during POSIX process discovery', {
+    skip: process.platform === 'win32' ? 'POSIX process discovery only' : false,
+  }, async (context) => {
+    const processDiscovery = delayPosixProcessDiscovery(context);
+    const abort = new AbortController();
+    const manager = await createTestManager();
+    const run = manager.runForegroundBash(
+      shellInput({
+        cwd: await workspace(),
+        command: waitForeverCommand('ready'),
+        timeoutMs: 50,
+        abortSignal: abort.signal,
+        emitOutput: () => abort.abort(),
+      }),
+    );
+
+    try {
+      await processDiscovery.started;
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      processDiscovery.release();
+
+      const result = await run;
+      assert.equal(result.status, 'cancelled');
+      assert.equal(result.exitCode, 130);
+    } finally {
+      processDiscovery.release();
+      await run.catch(() => undefined);
+      await manager.terminateAll().catch(() => undefined);
+    }
   });
 
   test('aborting foreground Bash terminates the process without leaking a ref', async () => {
@@ -2294,6 +2358,41 @@ function isProcessAlive(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+function delayPosixProcessDiscovery(context: TestContext): {
+  started: Promise<void>;
+  release(): void;
+} {
+  const originalExecFile = childProcess.execFile;
+  const processTableStarted = deferred<void>();
+  const releaseProcessTable = deferred<void>();
+  childProcess.execFile = ((
+    file: string,
+    args: readonly string[],
+    options: ExecFileOptionsWithStringEncoding,
+    callback: (error: ExecFileException | null, stdout: string, stderr: string) => void,
+  ) => {
+    const processTableRead = file === '/bin/ps' || file === '/usr/bin/ps';
+    if (processTableRead) processTableStarted.resolve();
+    return originalExecFile(file, [...args], options, (error, stdout, stderr) => {
+      if (!processTableRead) {
+        callback(error, stdout, stderr);
+        return;
+      }
+      void releaseProcessTable.promise.then(() => callback(error, stdout, stderr));
+    });
+  }) as typeof childProcess.execFile;
+  syncBuiltinESMExports();
+  context.after(() => {
+    childProcess.execFile = originalExecFile;
+    syncBuiltinESMExports();
+  });
+
+  return {
+    started: processTableStarted.promise,
+    release: () => releaseProcessTable.resolve(),
+  };
 }
 
 function deferred<T>(): {
