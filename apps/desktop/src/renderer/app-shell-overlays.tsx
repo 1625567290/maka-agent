@@ -60,7 +60,7 @@ export function AppShellOverlays(props: {
   helpOpen: boolean;
   closeHelp(): void;
   searchModalOpen: boolean;
-  closeSearchModal: SearchModalProps['onClose'];
+  closeSearchModal(): void;
   searchModalDeps: SearchModalProps['deps'];
   searchModalOnNavigate: NonNullable<SearchModalProps['onNavigateToSession']>;
   paletteOpen: boolean;
@@ -123,20 +123,27 @@ export function AppShellOverlays(props: {
           />
         </Suspense>
       )}
-      {helpOpen && <KeyboardHelpModal onClose={closeHelp} />}
-      {searchModalOpen && (
-        <SearchModal
-          onClose={closeSearchModal}
-          deps={searchModalDeps}
-          onNavigateToSession={searchModalOnNavigate}
-        />
-      )}
-      {paletteOpen && (
-        <CommandPalette
-          onClose={closePalette}
-          commands={commands}
-        />
-      )}
+      <KeyboardHelpModal
+        isOpen={helpOpen}
+        onOpenChange={(open) => {
+          if (!open) closeHelp();
+        }}
+      />
+      <SearchModal
+        isOpen={searchModalOpen}
+        onOpenChange={(open) => {
+          if (!open) closeSearchModal();
+        }}
+        deps={searchModalDeps}
+        onNavigateToSession={searchModalOnNavigate}
+      />
+      <CommandPalette
+        isOpen={paletteOpen}
+        onOpenChange={(open) => {
+          if (!open) closePalette();
+        }}
+        commands={commands}
+      />
     </>
   );
 }

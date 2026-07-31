@@ -3,10 +3,14 @@ import { expect, test } from './fixtures';
 test('command palette follows the Astryx keyboard journey and dismisses', async ({
   window: page,
 }) => {
+  const trigger = page.getByRole('button', { name: '更多操作' });
   const dialog = page.getByRole('dialog', { name: '命令面板' });
   const openPalette = async (): Promise<void> => {
-    await page.getByRole('button', { name: '更多操作' }).click();
+    await trigger.click();
     await page.getByRole('menuitem', { name: '打开命令面板' }).click();
+    await expect(
+      dialog.getByRole('combobox', { name: '命令面板搜索' }),
+    ).toBeFocused();
   };
 
   await openPalette();
@@ -42,6 +46,7 @@ test('command palette follows the Astryx keyboard journey and dismisses', async 
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
 });
 
 test('new plan reminder command opens the existing form and applies a template', async ({
@@ -57,6 +62,8 @@ test('new plan reminder command opens the existing form and applies a template',
   await palette.getByRole('option', { name: /新建计划提醒/ }).click();
 
   const reminderDialog = page.getByRole('dialog', { name: '新建提醒' });
+  await expect(palette).toBeHidden();
+  await expect(page.locator('dialog[open]')).toHaveCount(1);
   await expect(reminderDialog).toBeVisible();
   const title = reminderDialog.getByRole('textbox', { name: '标题' });
   await expect(title).toBeFocused();

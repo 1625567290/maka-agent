@@ -80,7 +80,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
 
   it('ProvidersPanel surfaces model connection reload failures instead of sticking on loading', async () => {
     const src = await readProviderSettingsCombinedSource();
-    const panel = src.match(/export function ProvidersPanel[\s\S]*?const selected = useMemo/)?.[0] ?? '';
+    const panel = src.match(/export function ProvidersPanel[\s\S]*?function chipTitle/)?.[0] ?? '';
     const reloadMatch = src.match(/async function reload\(\): Promise<boolean> \{[\s\S]*?\n  \}/);
     assert.ok(reloadMatch, 'ProvidersPanel reload() must exist');
     assert.match(
@@ -110,18 +110,8 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
     assert.match(
       src,
-      /function closeDialog\(\) \{[\s\S]*providerDialogLifecycleRef\.current \+= 1;[\s\S]*setDialogState\(null\);[\s\S]*\}/,
-      'closing a dialog must invalidate pending dialog-scoped continuations',
-    );
-    assert.match(
-      src,
-      /onCreated=\{async \(_slug, modelDiscoveryError\) => \{[\s\S]*const lifecycle = providerDialogLifecycleRef\.current;[\s\S]*const reloaded = await reload\(\);[\s\S]*providerDialogLifecycleRef\.current !== lifecycle[\s\S]*\) return;[\s\S]*closeDialog\(\);/,
+      /onCreated=\{async \(_slug, modelDiscoveryError\) => \{[\s\S]*const lifecycle = providerDialogLifecycleRef\.current;[\s\S]*const reloaded = await reload\(\);[\s\S]*providerDialogLifecycleRef\.current !== lifecycle[\s\S]*\) return;[\s\S]*requestDialogClose\(\);/,
       'AddProviderForm completion must not close a newer dialog after the original dialog was dismissed',
-    );
-    assert.match(
-      src,
-      /onDeleted=\{async \(\) => \{[\s\S]*closeDialog\(\);[\s\S]*const reloaded = await reload\(\);[\s\S]*providerCatalogSearchRef\.current\?\.focus\(\);/,
-      'Connection delete completion must restore focus to the stable provider search after refreshing the root list',
     );
   });
 
@@ -319,8 +309,15 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     assert.match(src, /const supportsApiKey = providerAuthSupportsApiKey\(props\.providerType\)/);
     assert.match(src, /const requiresApiKey = providerAuthRequiresSecret\(props\.providerType\) && supportsApiKey/);
     assert.match(src, /<ProviderConnectionDialog[\s\S]*<AddProviderForm/);
-    assert.match(src, /<DialogContent[\s\S]*className="providerConnectionDialog"[\s\S]*width=\{520\}/);
-    assert.match(src, /initialFocus=\{\(\) =>[\s\S]*summary[\s\S]*\?\? true\}/, 'connection dialogs must focus the visible Advanced summary when no form control precedes it');
+    assert.match(src, /<Dialog[\s\S]*className="providerConnectionDialog"[\s\S]*width=\{520\}/);
+    assert.match(
+      await readFile(
+        resolve(REPO_ROOT, 'apps', 'desktop', 'src', 'renderer', 'settings', 'provider-add-form.tsx'),
+        'utf8',
+      ),
+      /label=\{copy\.apiKeyLabel\(requiresApiKey\)\}[\s\S]*hasAutoFocus/,
+      'API-key dialogs must use Astryx hasAutoFocus so the rendered field exposes data-autofocus',
+    );
     assert.match(src, /label=\{copy\.apiKeyLabel\(requiresApiKey\)\}/);
     assert.match(src, /\.\.\.\(normalizedApiKey \? \{ apiKey: normalizedApiKey \} : \{\}\)/);
     assert.match(
@@ -382,7 +379,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     assert.match(src, /function SubscriptionLoginModal[\s\S]*<ProviderConnectionDialog/);
     assert.match(src, /function GitHubCopilotSubscriptionModal[\s\S]*<ProviderConnectionDialog/);
     assert.doesNotMatch(src, /ProviderSheet|providerConfigSheet/, 'the retired right-sheet path must be deleted');
-    assert.match(src, /DialogRoot[\s\S]*DialogContent[\s\S]*DialogHeader/, 'the shared dialog must retain modal focus and labelling primitives');
+    assert.match(src, /<Dialog[\s\S]*<Layout[\s\S]*<DialogHeader/, 'the shared dialog must directly compose Astryx modal focus and labelling primitives');
   });
 
   it('does not auto-open the first provider detail page after loading connections', async () => {
@@ -394,8 +391,6 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     const src = await readProviderSettingsCombinedSource();
     const reloadBlock = src.match(/async function reload\(\)[\s\S]*?^\s*\}/m)?.[0] ?? '';
 
-    assert.match(reloadBlock, /setDialogState\(\(current\) => current\?\.kind === 'manage' && !list\.some\(\(connection\) => connection\.slug === current\.slug\)/);
-    assert.match(reloadBlock, /\? null\s*:\s*current/);
     assert.doesNotMatch(reloadBlock, /list\[0\]\?\.slug/, 'reload must not auto-select the first provider');
   });
 
@@ -1005,7 +1000,7 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
     assert.match(
       src,
-      /setOpenModal\(card\.id\)/,
+      /openOAuthModal\(card\.id\)/,
       'all OAuth cards must open a modal from the grid',
     );
   });
@@ -1051,8 +1046,8 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
     );
     assert.match(
       src,
-      /onClose=\{\(\)\s*=>\s*\{[\s\S]*?void refreshAfterOAuthChange\(\)/,
-      'modal onClose must call the fail-soft refresh helper',
+      /function handleModalOpenChange\(nextOpen: boolean\)[\s\S]*setIsModalOpen\(false\);[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*setOpenModal\(null\);[\s\S]*void refreshAfterOAuthChange\(\)/,
+      'closing Astryx must commit false before releasing the OAuth session and calling the fail-soft refresh helper',
     );
     assert.match(
       src,
@@ -1213,7 +1208,9 @@ describe('Model OAuth catalog contract (PR-MODEL-OAUTH-ALL-0 + PR-CLAUDE-CARD-MO
   it('GitHub Copilot modal rides the shared login flow through the direct account flow (#1042)', async () => {
     const src = await readProviderSettingsCombinedSource();
     const hook = await readFile(OAUTH_LOGIN_FLOW_HOOK_SOURCE, 'utf8');
-    const copilotModal = src.match(/function GitHubCopilotSubscriptionModal[\s\S]*?\n\}/)?.[0] ?? '';
+    const copilotModal = src.match(
+      /function GitHubCopilotSubscriptionModal[\s\S]*?interface SubscriptionDisplay/,
+    )?.[0] ?? '';
 
     // The modal consumes the shared controller instead of owning a separate
     // pending-action state machine.

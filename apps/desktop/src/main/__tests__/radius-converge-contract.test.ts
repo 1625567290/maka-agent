@@ -33,8 +33,7 @@
  *      modal→rounded-xl, pill→rounded-full/rounded-[var(--radius-pill)].
  *      Every --radius-* reference inside a component block must belong to the
  *      expected tier's alias set. A component that legitimately serves more
- *      than one tier declares `alsoTiers` (e.g. buttonVariants is a control
- *      that also offers the governed pill shape via shape="pill"); every
+ *      than one tier declares `alsoTiers`; every
  *      declared tier must then be present, and other tiers stay forbidden.
  *   6. Token values are pinned: control=6px, surface=8px, modal=12px, pill=999px.
  *   7. `--radius-button` is deleted; no stale references may remain.
@@ -285,9 +284,6 @@ const TIER_TOKENS: Record<Tier, Set<string>> = {
 const ALL_TIER_CLASSES = ['rounded-sm', 'rounded-md', 'rounded-lg', 'rounded-xl', 'rounded-full', 'rounded-[var(--radius-pill)]', 'rounded-[var(--radius-control)]', 'rounded-[var(--radius-surface)]', 'rounded-[var(--radius-modal)]'];
 
 const COMPONENT_RADIUS: ComponentRadiusCheck[] = [
-  // shape="pill" (the composer "+" / send affordance) is a governed pill-tier
-  // shape on the control-tier Button — both tiers must stay present.
-  { file: 'packages/ui/src/ui.tsx', name: 'buttonVariants', tier: 'control', alsoTiers: ['pill'] },
   { file: 'packages/ui/src/ui.tsx', name: 'inputClasses', tier: 'control' },
   { file: 'packages/ui/src/ui.tsx', name: 'Toggle', tier: 'control' },
   // Dialog radius is owned by Astryx Dialog.

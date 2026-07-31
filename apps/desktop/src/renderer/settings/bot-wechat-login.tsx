@@ -2,7 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Button as BaseButton } from '@base-ui/react/button';
 import type { BotChannelSettings } from '@maka/core';
 import type { WechatBridgeQrCodeResult } from '@maka/runtime';
-import { Alert, AlertDescription, Button, DialogContent, DialogHeader, DialogRoot, FormLayout, TextInput, useUiLocale } from '@maka/ui';
+import { Alert, AlertDescription, Button, FormLayout, TextInput, useUiLocale } from '@maka/ui';
+import {
+  Dialog,
+  DialogHeader,
+} from '@astryxdesign/core/Dialog';
+import { Layout, LayoutContent } from '@astryxdesign/core/Layout';
 import { PasswordInput } from './password-input';
 import { settingsActionErrorMessage } from './settings-error-copy';
 import { getBotSettingsCopy } from '../locales/settings-bot-copy';
@@ -76,7 +81,8 @@ export function BotWeChatFields(props: {
 }
 
 export function WechatQrLoginModal(props: {
-  onClose(): void;
+  isOpen: boolean;
+  onOpenChange(isOpen: boolean): void;
   onRefreshStatuses(): void | Promise<unknown>;
 }) {
   const locale = useUiLocale();
@@ -149,23 +155,25 @@ export function WechatQrLoginModal(props: {
   const error = result && !result.ok ? result : null;
 
   return (
-    <DialogRoot
-      open
-      onOpenChange={(open) => {
-        if (!open) props.onClose();
-      }}
+    <Dialog
+      isOpen={props.isOpen}
+      onOpenChange={props.onOpenChange}
+      className="settingsWechatQrModal"
+      width={360}
+      padding={0}
+      purpose="info"
     >
-      <DialogContent
-        className="settingsWechatQrModal"
-        width={360}
-      >
-        <DialogHeader
-          title={copy.title}
-          subtitle={copy.subtitle}
-          onClose={props.onClose}
-        />
-
-        <div className="settingsWechatQrBody">
+      <Layout
+        header={
+          <DialogHeader
+            title={copy.title}
+            subtitle={copy.subtitle}
+            onOpenChange={props.onOpenChange}
+          />
+        }
+        content={
+          <LayoutContent padding={0}>
+            <div className="settingsWechatQrBody">
           {loading ? (
             <div className="settingsWechatQrState" data-tone="loading">
               {copy.generating}
@@ -198,8 +206,10 @@ export function WechatQrLoginModal(props: {
               <Button variant="secondary" size="sm" isDisabled={loading} onClick={reloadQrCode} label={loading ? copy.fetching : copy.fetchAgain} />
             </div>
           )}
-        </div>
-      </DialogContent>
-    </DialogRoot>
+            </div>
+          </LayoutContent>
+        }
+      />
+    </Dialog>
   );
 }

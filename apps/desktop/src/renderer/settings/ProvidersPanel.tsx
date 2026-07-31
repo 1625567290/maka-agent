@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button as BaseButton } from '@base-ui/react/button';
 import { ChevronRight, Search } from '@maka/ui/icons';
 import {
@@ -34,9 +34,13 @@ export type { ConnectionsBridge } from './provider-panel-shared';
 export { ProviderLogo, providerDisplay } from './provider-display';
 
 type ProviderDialogState =
-  | { kind: 'create'; providerType: ProviderType }
-  | { kind: 'manage'; slug: string }
+  | { kind: 'create'; providerType: ProviderType; session: number }
+  | { kind: 'manage'; connection: LlmConnection; session: number }
   | null;
+
+type ProviderDialogInput =
+  | { kind: 'create'; providerType: ProviderType }
+  | { kind: 'manage'; connection: LlmConnection };
 
 type CatalogCategory = ProviderCatalogGroup | 'accounts';
 
@@ -66,6 +70,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
   const [connections, setConnections] = useState<LlmConnection[]>([]);
   const [defaultSlug, setDefaultSlug] = useState<string | null>(null);
   const [dialogState, setDialogState] = useState<ProviderDialogState>(null);
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [catalogCategory, setCatalogCategory] = useState<CatalogCategory>('recommended');
   const [catalogQuery, setCatalogQuery] = useState('');
   const [loading, setLoading] = useState(true);
@@ -73,7 +78,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
   const providersPanelMountedRef = useMountedRef();
   const providersReloadTicketRef = useRef(0);
   const providerDialogLifecycleRef = useRef(0);
-  const providersPanelRef = useRef<HTMLDivElement>(null);
+  const focusProviderSearchAfterCloseRef = useRef(false);
   const providerCatalogRef = useRef<HTMLElement>(null);
   const providerCatalogSearchRef = useRef<HTMLInputElement>(null);
   const locale = useUiLocale();
@@ -81,9 +86,28 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
   const copy = providerCopy.panel;
   const toast = useToast();
 
-  function closeDialog() {
+  function openDialog(nextState: ProviderDialogInput) {
+    const lifecycle = providerDialogLifecycleRef.current + 1;
+    providerDialogLifecycleRef.current = lifecycle;
+    setIsDialogOpen(false);
+    setDialogState({ ...nextState, session: lifecycle });
+    window.requestAnimationFrame(() => {
+      if (!providersPanelMountedRef.current || providerDialogLifecycleRef.current !== lifecycle) return;
+      setIsDialogOpen(true);
+    });
+  }
+
+  function requestDialogClose() {
     providerDialogLifecycleRef.current += 1;
-    setDialogState(null);
+    setIsDialogOpen(false);
+  }
+
+  function handleDialogOpenChange(nextOpen: boolean) {
+    if (nextOpen) {
+      setIsDialogOpen(true);
+      return;
+    }
+    requestDialogClose();
   }
 
   async function reload(): Promise<boolean> {
@@ -98,9 +122,6 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
       setDefaultSlug(defaultConnection);
       setLoadError(null);
       setLoading(false);
-      setDialogState((current) => current?.kind === 'manage' && !list.some((connection) => connection.slug === current.slug)
-        ? null
-        : current);
       return true;
     } catch (error) {
       if (!providersPanelMountedRef.current || providersReloadTicketRef.current !== ticket) return false;
@@ -130,26 +151,34 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
     providerCatalogSearchRef.current?.focus({ preventScroll: true });
   }, [initialPage, loading]);
 
+  useEffect(() => {
+    if (isDialogOpen || !focusProviderSearchAfterCloseRef.current) return;
+    focusProviderSearchAfterCloseRef.current = false;
+    const frame = window.requestAnimationFrame(() => {
+      providerCatalogSearchRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isDialogOpen]);
+
   const initialConnectionDetailOpenedRef = useRef(false);
   useEffect(() => {
     if (loading || !initialConnectionSlug || initialConnectionDetailOpenedRef.current) return;
-    if (!connections.some((connection) => connection.slug === initialConnectionSlug)) return;
+    const connection = connections.find((candidate) => candidate.slug === initialConnectionSlug);
+    if (!connection) return;
     initialConnectionDetailOpenedRef.current = true;
-    setDialogState({ kind: 'manage', slug: initialConnectionSlug });
+    openDialog({ kind: 'manage', connection });
   }, [loading, initialConnectionSlug, connections]);
 
   useEffect(() => {
     if (loading || !initialCreateProviderType) return;
-    setDialogState({ kind: 'create', providerType: initialCreateProviderType });
+    openDialog({ kind: 'create', providerType: initialCreateProviderType });
     onInitialCreateProviderConsumed?.();
   }, [loading, initialCreateProviderType, onInitialCreateProviderConsumed]);
 
-  const selected = useMemo(
-    () => dialogState?.kind === 'manage'
-      ? connections.find((connection) => connection.slug === dialogState.slug) ?? null
-      : null,
-    [connections, dialogState],
-  );
+  const selected = dialogState?.kind === 'manage'
+    ? connections.find((connection) => connection.slug === dialogState.connection.slug)
+      ?? dialogState.connection
+    : null;
 
   function chipTitle(connection: LlmConnection): string {
     const status = connectionChipStatus(connection, locale);
@@ -197,7 +226,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
   const createType = dialogState?.kind === 'create' ? dialogState.providerType : null;
 
   return (
-    <div ref={providersPanelRef} className="providersPanel providersMarketPanel" data-maka-contract="providers-panel">
+    <div className="providersPanel providersMarketPanel" data-maka-contract="providers-panel">
       <section className="providerMarket">
         <div className="enabledStrip" aria-label={copy.connectionsAria}>
           <SectionHeader
@@ -229,7 +258,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
                       data-disabled={connection.enabled ? undefined : 'true'}
                       aria-label={chipAriaLabel(connection)}
                       title={chipTitle(connection)}
-                      render={<button type="button" onClick={() => setDialogState({ kind: 'manage', slug: connection.slug })} />}
+                      render={<button type="button" onClick={() => openDialog({ kind: 'manage', connection })} />}
                     >
                       <ItemMedia><ProviderLogo type={connection.providerType} compact /></ItemMedia>
                       <ItemContent>
@@ -298,7 +327,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
                         key={type}
                         type={type}
                         count={configuredByType(type)}
-                        onSelect={() => setDialogState({ kind: 'create', providerType: type })}
+                        onSelect={() => openDialog({ kind: 'create', providerType: type })}
                       />
                     ))}
                   </div>
@@ -313,23 +342,24 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
 
       {createType && (
         <ProviderConnectionDialog
+          key={dialogState?.session}
           title={copy.connectTitle(providerDisplay(createType, locale).name)}
           subtitle={copy.createSubtitle}
           providerType={createType}
-          onClose={closeDialog}
-          finalFocus={() => providerFocusElement(providersPanelRef.current, { kind: 'catalog-provider', providerType: createType })}
+          isOpen={isDialogOpen}
+          onOpenChange={handleDialogOpenChange}
         >
           <AddProviderForm
             key={createType}
             bridge={bridge}
             providerType={createType}
             existingSlugs={connections.map((connection) => connection.slug)}
-            onCancel={closeDialog}
+            onCancel={requestDialogClose}
             onCreated={async (_slug, modelDiscoveryError) => {
               const lifecycle = providerDialogLifecycleRef.current;
               const reloaded = await reload();
               if (!reloaded || !providersPanelMountedRef.current || providerDialogLifecycleRef.current !== lifecycle) return;
-              closeDialog();
+              requestDialogClose();
               if (modelDiscoveryError) {
                 const providerName = providerDisplay(createType, locale).name;
                 toast.error(
@@ -347,11 +377,12 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
 
       {selected && (
         <ProviderConnectionDialog
+          key={dialogState?.session}
           title={selected.name}
           subtitle={connectionDialogSubtitle(selected, selected.slug === defaultSlug, locale)}
           providerType={selected.providerType}
-          onClose={closeDialog}
-          finalFocus={() => providerFocusElement(providersPanelRef.current, { kind: 'connection', slug: selected.slug })}
+          isOpen={isDialogOpen}
+          onOpenChange={handleDialogOpenChange}
         >
           <ConnectionDetail
             key={selected.slug}
@@ -360,10 +391,10 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
             isDefault={selected.slug === defaultSlug}
             onChanged={async () => { await reload(); }}
             onDeleted={async () => {
-              closeDialog();
               const reloaded = await reload();
               if (!reloaded || !providersPanelMountedRef.current) return;
-              providerCatalogSearchRef.current?.focus();
+              focusProviderSearchAfterCloseRef.current = true;
+              requestDialogClose();
             }}
           />
         </ProviderConnectionDialog>
@@ -378,18 +409,4 @@ function connectionDialogSubtitle(connection: LlmConnection, isDefault: boolean,
   const parts = providerName === connection.name ? [] : [providerName];
   parts.push(isDefault ? copy.defaultConnection : copy.connection);
   return parts.join(' · ');
-}
-
-type ProviderFocusTarget =
-  | { kind: 'catalog-provider'; providerType: ProviderType }
-  | { kind: 'connection'; slug: string };
-
-function providerFocusElement(panel: HTMLElement | null, target: ProviderFocusTarget): HTMLElement | null {
-  if (!panel) return null;
-  if (target.kind === 'catalog-provider') {
-    return [...panel.querySelectorAll<HTMLElement>('[data-provider][data-status="ready"]')]
-      .find((element) => element.dataset.provider === target.providerType) ?? null;
-  }
-  return [...panel.querySelectorAll<HTMLElement>('[data-connection-slug]')]
-    .find((element) => element.dataset.connectionSlug === target.slug) ?? null;
 }

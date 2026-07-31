@@ -339,13 +339,24 @@ describe('Bot settings UI contract', () => {
       /onConnected=\{async \(snapshot\) => \{[\s\S]*await props\.onReload\(\);[\s\S]*if \(!botDetailMountedRef\.current\) return;[\s\S]*await props\.onRefreshStatuses\(\);[\s\S]*toast\.success/,
       'Confirmed scan login must refresh persisted settings and runtime status before showing success',
     );
-    assert.match(onboardingModal, /return cancelCurrent;/, 'Closing or unmounting the unified QR modal must cancel its main-owned session');
+    assert.match(
+      onboardingModal,
+      /function requestClose\(\) \{[\s\S]*cancelCurrent\(\);[\s\S]*props\.onOpenChange\(false\);[\s\S]*\}/,
+      'Every user-requested close must synchronously invalidate and cancel the main-owned onboarding session before hiding the dialog',
+    );
+    assert.match(
+      onboardingModal,
+      /function handleOpenChange\(isOpen: boolean\) \{[\s\S]*if \(!isOpen\) requestClose\(\);[\s\S]*\}[\s\S]*<Dialog[\s\S]*onOpenChange=\{handleOpenChange\}[\s\S]*<DialogHeader[\s\S]*onOpenChange=\{handleOpenChange\}/,
+      'Astryx dismissal and the header close action must share the synchronous onboarding close boundary',
+    );
+    assert.doesNotMatch(onboardingModal, /onClick=\{close\}/, 'Onboarding actions must not bypass the synchronous close boundary');
+    assert.match(onboardingModal, /return cancelCurrent;/, 'Unmounting the unified QR modal must cancel its main-owned session');
     assert.match(onboardingModal, /onboarding\.start\([\s\S]*onboarding\.poll\(sessionId\)/, 'The unified QR modal must start and poll through typed onboarding IPC');
     assert.match(onboardingModal, /generation !== generationRef\.current/, 'Late QR responses must be ignored after refresh or close');
     assert.match(onboardingModal, /settingsActionErrorMessage\(result\.error\.message, locale\)/, 'Unified onboarding Result failures must be scrubbed for the active locale before rendering');
     assert.match(onboardingModal, /Promise\.resolve\(props\.onConnected\(snapshot\)\)\.catch/, 'Connected follow-up failures must not become unhandled rejections');
     assert.doesNotMatch(onboardingContract, /secret|token|deviceCode|opaqueToken/i, 'Renderer-safe onboarding snapshots must not contain provider secrets or device codes');
-    assert.match(onboardingModal, /<DialogContent[\s\S]*width=\{520\}/, 'Unified onboarding modal must configure its product width through Astryx');
+    assert.match(onboardingModal, /<Dialog[\s\S]*width=\{520\}/, 'Unified onboarding modal must configure its product width through Astryx');
     assert.doesNotMatch(styles, /\.settingsBotOnboardingModal\s*\{/, 'Astryx must own onboarding dialog positioning and surface styling');
     assert.match(settings, /function WechatQrLoginModal\b/, 'WeChat scan login must render its own QR modal');
     assert.match(settings, /const loadingQrRef = useRef\(false\)/, 'WeChat bridge QR modal must keep a synchronous reload guard');
@@ -358,13 +369,14 @@ describe('Bot settings UI contract', () => {
     assert.doesNotMatch(styles, /\.settingsWechatQrSecondary\b/, 'WeChat QR actions must not restore consumer-owned Button states');
     assert.match(settings, /window\.maka\.settings\.bots\.wechatQrCode\(\)/, 'QR modal must call the bridge QR IPC');
     assert.match(settings, /<img src=\{qrDataUrl\} alt=\{copy\.qrAlt\}/, 'QR modal must render a visible QR image with a localized accessible name');
-    assert.match(settings, /setWechatQrOpen\(true\)/, 'Scan-login button must open the QR modal');
+    assert.match(settings, /setWechatQrPhase\('mounting'\)/, 'Scan-login button must start the QR modal session in a closed mount phase');
+    assert.match(settings, /wechatQrPhase === 'closing'[\s\S]*requestAnimationFrame\(\(\) => setWechatQrPhase\('closed'\)\)/, 'QR modal must let Astryx observe the closed state before releasing its external session');
     assert.match(settings, /async function disconnectLinkedSession\(\)/, 'Saved QR session credentials must have a visible disconnect path');
     assert.match(settings, /detailCopy\.disconnectWechat/, 'WeChat action stack must expose the localized disconnect label after login');
     assert.match(settings, /token:\s*''[\s\S]*connected:\s*false[\s\S]*readiness:\s*'scaffolded'/, 'Disconnect must clear saved scan-login credentials and readiness');
     assert.match(settings, /const saved = await updateChannelFor\([\s\S]*token:\s*''[\s\S]*if \(!saved\) return;[\s\S]*toast\.success\(/, 'Disconnect must not report success if clearing saved credentials fails');
     assert.doesNotMatch(settings, /扫码登录由本机 wechat-bridge 处理/, 'Scan login must not be a toast-only handoff');
-    assert.match(settings, /<DialogContent[\s\S]*className="settingsWechatQrModal"[\s\S]*width=\{360\}/, 'QR modal must configure its product width through Astryx');
+    assert.match(settings, /<Dialog[\s\S]*className="settingsWechatQrModal"[\s\S]*width=\{360\}/, 'QR modal must configure its product width through Astryx');
     assert.doesNotMatch(styles, /\.settingsWechatQrModal\s*\{/, 'Astryx must own QR dialog surface styling');
     assert.match(styles, /\.settingsWechatQrFrame img\b/, 'QR image must have a stable frame style');
     assert.match(scanLogin, /get_bot_qrcode\?bot_type=3/, 'Main scan-login wrapper must use the iLink QR endpoint');

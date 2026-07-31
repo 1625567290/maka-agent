@@ -2,7 +2,6 @@ export * from './artifact-preview-registry.js';
 export * from './assistant-stream.js';
 export * from './chat-empty-hero.js';
 export * from './chat-model-helpers.js';
-export * from './clipboard-feedback.js';
 export * from './use-mounted-ref.js';
 export * from './components.js';
 export type { SandboxBoundaryPromptProps } from './sandbox-boundary-prompt.js';
@@ -25,7 +24,7 @@ export * from './input-history.js';
 export * from './daily-review-helpers.js';
 export * from './locale-helpers.js';
 export * from './locale-context.js';
-export * from './markdown.js';
+export { MakaUriContext } from './markdown.js';
 export * from './maka-uri.js';
 export * from './materialize.js';
 export * from './live-turn-projection.js';
@@ -58,8 +57,7 @@ export { Card, type CardProps, type CardVariant } from '@astryxdesign/core';
 // `markerVariants` / `toolVariants` are deliberately NOT re-exported here:
 // they are internal styling tables that the chat call sites apply via relative
 // import, so keeping them off the package barrel preserves the governance goal
-// — they stay renamable/removable without a public-API break. (Contrast
-// `buttonVariants`, which IS public because it has external consumers.)
+// — they stay renamable/removable without a public-API break.
 //
 // `previewVariants` (#332 PR4) IS re-exported: its file-diff parts have a second,
 // cross-package consumer — `apps/desktop`'s `artifact-preview.tsx` — which is the
@@ -76,8 +74,6 @@ export * from './primitives/empty.js';
 export * from './primitives/item.js';
 export * from './primitives/spinner.js';
 export * from './primitives/kbd.js';
-export * from './primitives/menu.js';
-export * from './primitives/dialog-header.js';
 export * from './primitives/stat-tile.js';
 export * from './primitives/data-table.js';
 export * from './primitives/section-header.js';
@@ -89,11 +85,6 @@ export {
   CollapsibleTrigger,
   CollapsiblePanel,
 } from './primitives/collapsible.js';
-export {
-  Tooltip,
-  TooltipTrigger,
-  TooltipContent,
-} from './primitives/tooltip.js';
 export {
   Tabs as PrimitiveTabs,
   TabsList as PrimitiveTabsList,

@@ -4,9 +4,6 @@ import { isMcpStdioConfig } from '@maka/core/mcp';
 import {
   Button,
   Chip,
-  DialogContent,
-  DialogHeader,
-  DialogRoot,
   EmptyState,
   IconButton,
   PageHeader,
@@ -25,6 +22,11 @@ import {
   useToast,
   useUiLocale,
 } from '@maka/ui';
+import {
+  Dialog,
+  DialogHeader,
+} from '@astryxdesign/core/Dialog';
+import { Layout, LayoutContent } from '@astryxdesign/core/Layout';
 import {
   FileCode,
   Globe,
@@ -79,11 +81,13 @@ export function McpPage(props: { hubHeader?: ModuleHubHeader }) {
   const [statuses, setStatuses] = useState<McpServerStatus[]>([]);
   const [editor, setEditor] = useState<EditorState>(null);
   const [editorErrors, setEditorErrors] = useState<McpEditorErrors>({});
+  const [editorOpen, setEditorOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'market' | 'installed'>('market');
   const [query, setQuery] = useState('');
   const [busy, setBusy] = useState<string | null>('load');
   const [installPhases, setInstallPhases] = useState<Record<string, InstallPhase>>({});
   const cancelledInstalls = useRef(new Set<string>());
+  const editorSessionRef = useRef(0);
   const mounted = useMountedRef();
   const toast = useToast();
 
@@ -125,13 +129,39 @@ export function McpPage(props: { hubHeader?: ModuleHubHeader }) {
       .some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
   });
 
-  function openManual(draft: Draft = emptyDraft()) {
+  function openEditor(next: Exclude<EditorState, null>) {
+    const session = ++editorSessionRef.current;
+    setEditorOpen(false);
     setEditorErrors({});
-    setEditor({ mode: 'manual', draft: { ...draft }, editingId: null });
+    setEditor(next);
+    window.requestAnimationFrame(() => {
+      if (mounted.current && editorSessionRef.current === session) {
+        setEditorOpen(true);
+      }
+    });
+  }
+
+  function closeEditor() {
+    const session = editorSessionRef.current;
+    setEditorOpen(false);
+    window.requestAnimationFrame(() => {
+      if (mounted.current && editorSessionRef.current === session) {
+        setEditor(null);
+        setEditorErrors({});
+      }
+    });
+  }
+
+  function openManual(draft: Draft = emptyDraft()) {
+    openEditor({ mode: 'manual', draft: { ...draft }, editingId: null });
   }
 
   function openEdit(serverId: string, server: McpServerConfig) {
-    setEditor({ mode: 'manual', draft: draftFromConfig(serverId, server), editingId: serverId });
+    openEditor({
+      mode: 'manual',
+      draft: draftFromConfig(serverId, server),
+      editingId: serverId,
+    });
   }
 
   async function installCatalogEntry(entry: McpCatalogEntry) {
@@ -196,7 +226,7 @@ export function McpPage(props: { hubHeader?: ModuleHubHeader }) {
       const next = await window.maka.mcp.upsert(editor.draft.id.trim(), configFromDraft(editor.draft, copy));
       if (!mounted.current) return;
       setConfig(next);
-      setEditor(null);
+      closeEditor();
       setActiveTab('installed');
       toast.success(copy.toast.saved, copy.toast.savedDetail);
     } catch (error) {
@@ -218,7 +248,7 @@ export function McpPage(props: { hubHeader?: ModuleHubHeader }) {
       });
       if (!mounted.current) return;
       setConfig(next);
-      setEditor(null);
+      closeEditor();
       setActiveTab('installed');
       toast.success(copy.toast.imported, copy.toast.importedDetail(Object.keys(imported.mcpServers).length));
     } catch (error) {
@@ -301,7 +331,7 @@ export function McpPage(props: { hubHeader?: ModuleHubHeader }) {
             />
             <Button
               variant="secondary"
-              onClick={() => setEditor({ mode: 'json', source: exampleJson() })}
+              onClick={() => openEditor({ mode: 'json', source: exampleJson() })}
               icon={<FileCode aria-hidden="true" />}
               label={copy.page.importJson}
             />
@@ -416,6 +446,7 @@ export function McpPage(props: { hubHeader?: ModuleHubHeader }) {
       {editor && (
         <McpEditorDialog
           state={editor}
+          isOpen={editorOpen}
           errors={editorErrors}
           copy={copy}
           saving={busy === 'save' || busy === 'import'}
@@ -448,9 +479,8 @@ export function McpPage(props: { hubHeader?: ModuleHubHeader }) {
               return nextErrors;
             });
           }}
-          onClose={() => {
-            setEditor(null);
-            setEditorErrors({});
+          onOpenChange={(open) => {
+            if (!open) closeEditor();
           }}
           onSave={saveDraft}
           onImport={importJson}
@@ -585,6 +615,7 @@ function McpServerRow(props: {
 
 function McpEditorDialog(props: {
   state: Exclude<EditorState, null>;
+  isOpen: boolean;
   errors: McpEditorErrors;
   copy: McpCopy;
   saving: boolean;
@@ -592,11 +623,12 @@ function McpEditorDialog(props: {
     next: Exclude<EditorState, null>,
     changedKey?: keyof Draft,
   ): void;
-  onClose(): void;
+  onOpenChange(isOpen: boolean): void;
   onSave(event: React.FormEvent): void;
   onImport(event: React.FormEvent): void;
 }) {
   const editing = props.state.mode === 'manual' && Boolean(props.state.editingId);
+
   const updateDraft = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     if (props.state.mode !== 'manual') return;
     props.onChange(
@@ -605,18 +637,26 @@ function McpEditorDialog(props: {
     );
   };
   return (
-    <DialogRoot open onOpenChange={(open) => { if (!open) props.onClose(); }}>
-      <DialogContent
-        className="maka-mcp-editor-dialog"
-        width="min(92vw, var(--maka-chat-measure))"
-        maxHeight="85dvh"
-      >
-        <DialogHeader
-          icon={props.state.mode === 'json' ? <FileCode /> : <Plug />}
-          title={props.state.mode === 'json' ? props.copy.editor.importTitle : editing ? props.copy.editor.editTitle(props.state.draft.id) : props.copy.editor.addTitle}
-          subtitle={props.state.mode === 'json' ? props.copy.editor.importSubtitle : props.copy.editor.manualSubtitle}
-          onClose={props.onClose}
-        />
+    <Dialog
+      isOpen={props.isOpen}
+      onOpenChange={props.onOpenChange}
+      className="maka-mcp-editor-dialog"
+      width="min(92vw, var(--maka-chat-measure))"
+      maxHeight="85dvh"
+      padding={0}
+      purpose="form"
+    >
+      <Layout
+        header={
+          <DialogHeader
+            startContent={props.state.mode === 'json' ? <FileCode /> : <Plug />}
+            title={props.state.mode === 'json' ? props.copy.editor.importTitle : editing ? props.copy.editor.editTitle(props.state.draft.id) : props.copy.editor.addTitle}
+            subtitle={props.state.mode === 'json' ? props.copy.editor.importSubtitle : props.copy.editor.manualSubtitle}
+            onOpenChange={props.onOpenChange}
+          />
+        }
+        content={
+          <LayoutContent padding={0}>
         {!editing && (
           <RadioList
             className="maka-mcp-editor-choice"
@@ -650,10 +690,10 @@ function McpEditorDialog(props: {
         {props.state.mode === 'json' ? (
           <form className="maka-mcp-json-form" onSubmit={props.onImport}>
             <div className="maka-mcp-json-field">
-              <TextArea label={props.copy.editor.jsonConfig} value={props.state.source} onChange={(value) => props.onChange({ mode: 'json', source: value })} hasSpellCheck={false} rows={14} />
+              <TextArea hasAutoFocus label={props.copy.editor.jsonConfig} value={props.state.source} onChange={(value) => props.onChange({ mode: 'json', source: value })} hasSpellCheck={false} rows={14} />
             </div>
             <p>{props.copy.editor.jsonHelp} <code>{'{ "mcpServers": { ... } }'}</code></p>
-            <div className="maka-mcp-editor-footer"><Button variant="ghost" onClick={props.onClose} label={props.copy.editor.cancel} /><Button type="submit" variant="primary" isDisabled={props.saving} label={props.saving ? props.copy.editor.importing : props.copy.editor.importConnect} /></div>
+            <div className="maka-mcp-editor-footer"><Button variant="ghost" onClick={() => props.onOpenChange(false)} label={props.copy.editor.cancel} /><Button type="submit" variant="primary" isDisabled={props.saving} label={props.saving ? props.copy.editor.importing : props.copy.editor.importConnect} /></div>
           </form>
         ) : (
           <form className="maka-mcp-manual-form" onSubmit={props.onSave}>
@@ -676,10 +716,10 @@ function McpEditorDialog(props: {
               />
             </RadioList>
             <div className="maka-mcp-form-fields">
-              <TextInput label={props.copy.editor.serverId} description={props.copy.editor.serverIdHelp} value={props.state.draft.id} onChange={(value) => updateDraft('id', value)} isDisabled={editing} isRequired placeholder="filesystem" status={props.errors.id ? { type: 'error', message: props.copy.editor.required } : undefined} />
+              <TextInput hasAutoFocus={!editing} label={props.copy.editor.serverId} description={props.copy.editor.serverIdHelp} value={props.state.draft.id} onChange={(value) => updateDraft('id', value)} isDisabled={editing} isRequired placeholder="filesystem" status={props.errors.id ? { type: 'error', message: props.copy.editor.required } : undefined} />
               {props.state.draft.kind === 'stdio' ? (
                 <>
-                  <TextInput label={props.copy.editor.command} value={props.state.draft.command} onChange={(value) => updateDraft('command', value)} isRequired placeholder="npx" status={props.errors.command ? { type: 'error', message: props.copy.editor.required } : undefined} />
+                  <TextInput hasAutoFocus={editing} label={props.copy.editor.command} value={props.state.draft.command} onChange={(value) => updateDraft('command', value)} isRequired placeholder="npx" status={props.errors.command ? { type: 'error', message: props.copy.editor.required } : undefined} />
                   <TextArea label={props.copy.editor.arguments} description={props.copy.editor.argumentsHelp} value={props.state.draft.args} onChange={(value) => updateDraft('args', value)} placeholder={props.copy.editor.argumentsPlaceholder} />
                   <details className="maka-mcp-advanced"><summary>{props.copy.editor.advanced}</summary><div>
                     <TextInput label={props.copy.editor.workingDirectory} value={props.state.draft.cwd} onChange={(value) => updateDraft('cwd', value)} placeholder={props.copy.editor.workingDirectoryPlaceholder} />
@@ -688,7 +728,7 @@ function McpEditorDialog(props: {
                 </>
               ) : (
                 <>
-                  <TextInput label={props.copy.editor.url} value={props.state.draft.url} onChange={(value) => updateDraft('url', value)} isRequired placeholder="https://example.com/mcp" status={props.errors.url ? { type: 'error', message: props.errors.url === 'required' ? props.copy.editor.required : props.copy.editor.invalidUrl } : undefined} />
+                  <TextInput hasAutoFocus={editing} label={props.copy.editor.url} value={props.state.draft.url} onChange={(value) => updateDraft('url', value)} isRequired placeholder="https://example.com/mcp" status={props.errors.url ? { type: 'error', message: props.errors.url === 'required' ? props.copy.editor.required : props.copy.editor.invalidUrl } : undefined} />
                   <details className="maka-mcp-advanced"><summary>{props.copy.editor.advanced}</summary><div>
                     <Selector
                       value={props.state.draft.transport}
@@ -706,11 +746,13 @@ function McpEditorDialog(props: {
                 </>
               )}
             </div>
-            <div className="maka-mcp-editor-footer"><Button variant="ghost" onClick={props.onClose} label={props.copy.editor.cancel} /><Button type="submit" variant="primary" isDisabled={props.saving} label={props.saving ? props.copy.editor.saving : props.copy.editor.saveConnect} /></div>
+            <div className="maka-mcp-editor-footer"><Button variant="ghost" onClick={() => props.onOpenChange(false)} label={props.copy.editor.cancel} /><Button type="submit" variant="primary" isDisabled={props.saving} label={props.saving ? props.copy.editor.saving : props.copy.editor.saveConnect} /></div>
           </form>
         )}
-      </DialogContent>
-    </DialogRoot>
+          </LayoutContent>
+        }
+      />
+    </Dialog>
   );
 }
 

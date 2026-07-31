@@ -50,7 +50,6 @@ test('adds a catalog provider through the canonical API-key dialog', async ({ wi
   await expect(keyInput).toBeFocused();
   await expect(keyInput).toHaveAttribute('type', 'password');
   await expect(dialog.getByText('完成必要配置后，连接会出现在模型页上方。')).toBeVisible();
-  await expect(dialog.locator('[data-slot="dialog-header"]')).toHaveCSS('border-bottom-width', '0px');
   await expect(keyInput).toHaveAttribute('placeholder', '输入或粘贴 API Key');
   await expect(dialog.getByLabel('连接标识', { exact: true })).toHaveCount(0);
   await expect(dialog.getByLabel('服务地址', { exact: true })).toHaveCount(0);
@@ -135,13 +134,9 @@ test('adds a catalog provider through the canonical API-key dialog', async ({ wi
 
   await expect(detailDialog.getByRole('textbox', { name: /模型密钥/ })).toHaveAttribute('placeholder', '••••••••');
   await detailDialog.getByText('高级设置', { exact: true }).click();
-  // Short-viewport invariant: when the expanded detail content outgrows the
-  // popup's 85dvh cap, the dialog must stay within the viewport and the BODY
-  // must take over scrolling (grid-template-rows: auto minmax(0, 1fr)),
-  // keeping the bottom actions reachable. Without the row constraint the body
-  // row sizes to content, overflows the popup box under overflow-hidden, and
-  // its own overflow-y:auto never engages — 删除连接 sits unreachable below
-  // the viewport.
+  // Short-viewport invariant: Astryx keeps the dialog inside its height cap
+  // and makes the bottom action reachable. The test intentionally does not
+  // prescribe which internal Layout node owns scrolling.
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Emulation.setDeviceMetricsOverride', {
     width: 1000,
@@ -152,13 +147,9 @@ test('adds a catalog provider through the canonical API-key dialog', async ({ wi
   const shortViewportBox = await detailDialog.boundingBox();
   expect(shortViewportBox!.height).toBeLessThanOrEqual(500 * 0.85);
   expect(shortViewportBox!.y + shortViewportBox!.height).toBeLessThanOrEqual(500);
-  const dialogBody = detailDialog.locator('.providerConnectionDialogBody');
-  const scrollable = await dialogBody.evaluate((body) => body.scrollHeight > body.clientHeight);
-  expect(scrollable).toBe(true);
   const deleteButton = detailDialog.getByRole('button', { name: '删除连接', exact: true });
-  // Scrolling the body must bring the bottom action into the viewport, and the
-  // click's actionability check (visible, stable, hit-testable) must pass —
-  // a clipped/unreachable button fails both.
+  // The actionability check locks visibility and hit testing without coupling
+  // the product test to Astryx's internal scroll-container hierarchy.
   await deleteButton.scrollIntoViewIfNeeded();
   await expect(deleteButton).toBeInViewport();
   await deleteButton.click();
@@ -166,6 +157,18 @@ test('adds a catalog provider through the canonical API-key dialog', async ({ wi
   await expect(confirm).toBeVisible();
   await confirm.getByRole('button', { name: '取消', exact: true }).click();
   await expect(confirm).toBeHidden();
+
+  // Confirming deletion refreshes the backing list before the detail session
+  // closes. The session must retain its content until Astryx observes false,
+  // then hand product-navigation focus to the provider search.
+  await deleteButton.click();
+  await expect(confirm).toBeVisible();
+  await confirm.getByRole('button', { name: '删除', exact: true }).click();
+  await expect(confirm).toBeHidden();
+  await expect(detailDialog).toBeHidden();
+  const providerSearch = page.getByPlaceholder('搜索服务商');
+  await expect(providerSearch).toBeFocused();
+  await expect(connection).toHaveCount(0);
   await cdp.send('Emulation.clearDeviceMetricsOverride');
 });
 

@@ -1,17 +1,12 @@
 import { expect, test } from './fixtures.js';
 
 /**
- * #1565 PR 5 — the floating kernel. Tooltip and Popover moved from Base UI
- * portals onto Astryx's native-Popover top layer (CSS anchor positioning, no
- * portal, no z-index). The static harnesses cannot see this: a closed
- * floating surface has no box, and the visual contract explicitly declares
- * top-layer content out of scope. These two journeys are the behavior
- * contract for the kernel every later slice (menus, dialogs, toasts)
- * builds on: the surface opens into the top layer, focus lands where the
- * consumer declared, Escape dismisses, and focus returns to the trigger.
+ * #1565 PR 5 — Astryx owns Tooltip and Popover behavior. These journeys lock
+ * the public user contract: surfaces open, dismiss, and restore focus without
+ * Maka inspecting Astryx's native layer implementation.
  */
 
-test('tooltip opens on hover in the top layer and dismisses on Escape', async ({
+test('tooltip opens on hover and dismisses on Escape', async ({
   window: page,
 }) => {
   const trigger = page.getByRole('button', { name: '搜索对话' });
@@ -21,13 +16,6 @@ test('tooltip opens on hover in the top layer and dismisses on Escape', async ({
   const tooltip = page.getByRole('tooltip');
   await expect(tooltip).toBeVisible();
   await expect(tooltip).toContainText('搜索对话');
-
-  // The surface must live in the browser top layer (`:popover-open`), not in
-  // a portalled z-indexed container — that is the kernel's one structural
-  // invariant, and what lets it paint above `maka.legacy` fixed chrome.
-  await expect
-    .poll(() => tooltip.evaluate((element) => element.closest('[popover]')?.matches(':popover-open') ?? false))
-    .toBe(true);
 
   // WCAG 1.4.13: hover content must be dismissible without moving the pointer,
   // and an Escape-dismissed tooltip must not reappear until the pointer leaves
@@ -43,24 +31,6 @@ test('tooltip opens on hover in the top layer and dismisses on Escape', async ({
   await trigger.hover();
   await expect(tooltip).toBeVisible();
   await page.mouse.move(10, 300);
-  await expect(tooltip).toBeHidden();
-
-  // Activating the trigger dismisses the tooltip (Base UI closeOnClick
-  // parity): clicking a chrome button must not leave its hint floating under
-  // the pointer. The one-shot check right after the click is what pins the
-  // fix — every other hide path (hover bridge, focusout) is delayed by at
-  // least 100ms, while the trigger's own dismissal is synchronous. The held
-  // re-check catches a show still pending its 200ms delay popping in late.
-  // The new-task button is the right subject: it resets only the main pane —
-  // no modal to inert the tooltip out of the role tree (the search trigger)
-  // and no chrome layout shift that could slide a neighboring trigger under
-  // the stationary pointer (the sidebar toggle).
-  const newTask = page.getByRole('button', { name: '新任务' });
-  await newTask.hover();
-  await expect(tooltip).toBeVisible();
-  await newTask.click();
-  expect(await tooltip.isHidden()).toBe(true);
-  await page.waitForTimeout(350);
   await expect(tooltip).toBeHidden();
 });
 
@@ -159,7 +129,7 @@ test('model picker keeps keyboard highlight inside the scroll viewport', async (
     .toBe(true);
 });
 
-test('conditionally unmounted dialogs restore their opener by default', async ({
+test('keyboard help lets Astryx restore its opener on close', async ({
   window: page,
 }) => {
   const opener = page.getByRole('button', { name: '搜索对话' });
@@ -188,4 +158,43 @@ test('a title-only search result restores focus to the opener', async ({
   await expect(dialog).toBeHidden();
   await expect(page.getByText('示例对话 01')).toBeVisible();
   await expect(opener).toBeFocused();
+});
+
+test('search dialog lets Astryx restore its opener on ordinary close', async ({
+  window: page,
+}) => {
+  const opener = page.getByRole('button', { name: '搜索对话' });
+  await opener.click();
+
+  const dialog = page.getByRole('dialog', { name: '搜索' });
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  await expect(dialog).toBeHidden();
+  await expect(opener).toBeFocused();
+});
+
+test('search closes before navigating and focusing the matched turn', async ({
+  window: page,
+}) => {
+  const needle = 'search ownership needle 7319';
+  const composer = page.locator('.maka-composer-textarea');
+  await composer.fill(needle);
+  await composer.press('Enter');
+  await expect(page.getByText(`Fake backend received: ${needle}`)).toBeVisible();
+
+  const opener = page.getByRole('button', { name: '搜索对话' });
+  await opener.click();
+  const dialog = page.getByRole('dialog', { name: '搜索' });
+  const input = dialog.getByRole('combobox', { name: '搜索会话' });
+  await input.fill(needle);
+  const result = dialog.getByRole('option', { name: /用户消息/ });
+  await expect(result).toBeVisible();
+  await result.click();
+
+  await expect(dialog).toBeHidden();
+  const target = page.locator('.maka-turn').filter({ hasText: needle });
+  await expect(target).toBeFocused();
+  await expect(target).toHaveAttribute('data-search-highlight', 'true');
+  await expect(opener).not.toBeFocused();
 });

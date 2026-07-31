@@ -5,8 +5,8 @@
  * `plan-reminder-panel.tsx`: the nine field states, editingId, the
  * submitPending single-flight owner, validation, and the close guard. The
  * panel keeps only list/runs/query state and opens this dialog with a
- * `PlanReminderFormSeed` (remounting per open via `key`, so fields always
- * initialize from the seed — same outcome as the old open-handler setters).
+ * `PlanReminderFormSeed`. It remounts the closed form session before opening,
+ * so Astryx always observes a false-to-true transition.
  *
  * Async-owner invariants (pinned by plan-reminder-panel-contract):
  *   - submit rejects re-entry synchronously via submitPendingRef before
@@ -40,18 +40,14 @@ import {
   Selector,
   TextInput,
 } from '@astryxdesign/core';
+import { IconButton } from '@astryxdesign/core';
+import { Dialog } from '@astryxdesign/core/Dialog';
+import { Layout, LayoutContent } from '@astryxdesign/core/Layout';
 import {
-  buttonVariants,
-  cn,
-  DialogClose,
-  DialogContent,
-  DialogRoot,
-} from './ui.js';
+  DropdownMenu,
+  DropdownMenuItem,
+} from '@astryxdesign/core/DropdownMenu';
 import { TextArea as UiTextarea } from '@astryxdesign/core';
-import {
-  Menu,
-  MenuItem,
-} from './primitives/menu.js';
 import {
   getPlanReminderCopy,
   type PlanReminderExampleTemplate,
@@ -87,7 +83,6 @@ export function PlanReminderFormDialog(props: {
   const [submitPending, setSubmitPending] = useState(false);
   const planReminderMountedRef = useMountedRef();
   const submitPendingRef = useRef(false);
-  const titleRef = useRef<HTMLInputElement>(null);
   const parsedRunAt = Date.parse(runAtLocal);
   const delivery: PlanReminderDeliveryTarget = deliveryChannel === 'bot'
     ? { channel: 'bot', platform: deliveryPlatform, chatId: deliveryChatId.trim() }
@@ -180,8 +175,8 @@ export function PlanReminderFormDialog(props: {
   }
 
   return (
-    <DialogRoot
-      open={props.open}
+    <Dialog
+      isOpen={props.open}
       onOpenChange={(open) => {
         if (open) {
           props.onOpenChange(true);
@@ -189,14 +184,16 @@ export function PlanReminderFormDialog(props: {
           closeReminderDialog();
         }
       }}
+      className="maka-plan-dialog"
+      width={680}
+      maxHeight="min(86dvh, 760px)"
+      aria-labelledby="maka-plan-dialog-title"
+      padding={0}
+      purpose="form"
     >
-      <DialogContent
-        className="maka-plan-dialog"
-        width={680}
-        maxHeight="min(86dvh, 760px)"
-        aria-labelledby="maka-plan-dialog-title"
-        initialFocus={titleRef}
-      >
+      <Layout
+        content={
+          <LayoutContent padding={0}>
         <form className="maka-plan-form" onSubmit={submit} aria-busy={submitPending ? 'true' : undefined}>
           <header className="maka-plan-form-header">
             <div>
@@ -205,7 +202,7 @@ export function PlanReminderFormDialog(props: {
             </div>
             <div className="maka-plan-form-header-actions">
               {!isEditing && (
-                <Menu
+                <DropdownMenu
                   button={{
                     label: copy.useTemplate,
                     variant: 'ghost',
@@ -216,30 +213,28 @@ export function PlanReminderFormDialog(props: {
                   className="maka-plan-template-menu"
                 >
                     {templates.map((template) => (
-                      <MenuItem
+                      <DropdownMenuItem
                         key={template.id}
                         onClick={() => applyTemplate(template)}
                         label={template.title}
                         endContent={template.scheduleLabel}
                       />
                     ))}
-                </Menu>
+                </DropdownMenu>
               )}
-              {/* #1565 PR 3: render-prop composition stays on legacy buttonVariants until its owning slice retires it. */}
-              <DialogClose
-                render={<button type="button" className={cn(buttonVariants({ variant: 'quiet', size: 'icon-sm' }))} />}
-                type="button"
+              <IconButton
                 onClick={closeReminderDialog}
-                disabled={formInteractionDisabled}
-                aria-label={copy.close}
-              >
-                <X size={16} aria-hidden="true" />
-              </DialogClose>
+                isDisabled={formInteractionDisabled}
+                label={copy.close}
+                icon={<X size={16} aria-hidden="true" />}
+                variant="ghost"
+                size="sm"
+              />
             </div>
           </header>
           <FormLayout direction="horizontal">
             <TextInput
-              ref={titleRef}
+              hasAutoFocus
               label={copy.field.title}
               value={title}
               onChange={(value) => setTitle(value.slice(0, 120))}
@@ -374,7 +369,9 @@ export function PlanReminderFormDialog(props: {
             />
           </footer>
         </form>
-      </DialogContent>
-    </DialogRoot>
+          </LayoutContent>
+        }
+      />
+    </Dialog>
   );
 }
