@@ -12,7 +12,7 @@ import {
 } from '@maka/core';
 import {
   Chip,
-  InputGroup, InputGroupAddon, InputGroupInput,
+  TextInput,
   PrimitiveTabs, PrimitiveTabsList, PrimitiveTabsTrigger, PrimitiveTabsPanel,
   Item, ItemMedia, ItemContent, ItemTitle, ItemDescription, ItemActions,
   SectionHeader,
@@ -75,6 +75,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
   const providerDialogLifecycleRef = useRef(0);
   const providersPanelRef = useRef<HTMLDivElement>(null);
   const providerCatalogRef = useRef<HTMLElement>(null);
+  const providerCatalogSearchRef = useRef<HTMLInputElement>(null);
   const locale = useUiLocale();
   const providerCopy = getProviderSettingsCopy(locale);
   const copy = providerCopy.panel;
@@ -126,7 +127,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
   useEffect(() => {
     if (loading || initialPage !== 'catalog') return;
     providerCatalogRef.current?.scrollIntoView({ block: 'start' });
-    providerCatalogRef.current?.querySelector<HTMLInputElement>('[type="search"]')?.focus({ preventScroll: true });
+    providerCatalogSearchRef.current?.focus({ preventScroll: true });
   }, [initialPage, loading]);
 
   const initialConnectionDetailOpenedRef = useRef(false);
@@ -269,16 +270,18 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
                 </PrimitiveTabsTrigger>
               ))}
             </PrimitiveTabsList>
-            <InputGroup className="providerCatalogSearch">
-              <InputGroupAddon><Search aria-hidden="true" /></InputGroupAddon>
-              <InputGroupInput
-                type="search"
+            <div className="providerCatalogSearch">
+              <TextInput
+                ref={providerCatalogSearchRef}
                 value={catalogQuery}
-                onChange={(event) => setCatalogQuery(event.currentTarget.value)}
+                onChange={setCatalogQuery}
                 placeholder={copy.searchPlaceholder}
-                aria-label={copy.searchAria}
+                label={copy.searchAria}
+                isLabelHidden
+                startIcon={<Search aria-hidden="true" />}
+                width="100%"
               />
-            </InputGroup>
+            </div>
             <PrimitiveTabsPanel value={catalogCategory}>
               {(catalogCategory === 'recommended' || catalogCategory === 'accounts') && (
                 <ModelOAuthSection
@@ -360,7 +363,7 @@ export function ProvidersPanel({ bridge, initialPage = 'connections', initialCon
               closeDialog();
               const reloaded = await reload();
               if (!reloaded || !providersPanelMountedRef.current) return;
-              providerCatalogRef.current?.querySelector<HTMLInputElement>('[type="search"]')?.focus();
+              providerCatalogSearchRef.current?.focus();
             }}
           />
         </ProviderConnectionDialog>

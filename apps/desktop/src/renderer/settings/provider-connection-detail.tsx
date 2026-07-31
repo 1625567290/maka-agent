@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { PROVIDER_DEFAULTS } from '@maka/core';
 import {
   Alert,
@@ -6,15 +6,9 @@ import {
   AlertDescription,
   AlertTitle,
   Button,
-  FieldDescription,
-  FieldRoot,
-  Input,
-  Label,
-  ModelPicker,
   RelativeTime,
-  modelChoiceValue,
-  parseModelChoiceValue,
-  type ModelMenuGroup,
+  Selector,
+  TextInput,
   useMountedRef,
   useToast,
   useUiLocale,
@@ -128,44 +122,34 @@ function ConnectionDetailInner(props: ConnectionDetailProps) {
     remove,
     refreshAfterRelogin,
   } = useConnectionDetail(props);
-  const defaultModelGroups = useMemo<ModelMenuGroup[]>(() => {
-    const choices = modelChoices
-      .filter((entry) => entry.canUseAsChatDefault)
-      .map((entry) => ({
-        connectionSlug: connection.slug,
-        providerType: connection.providerType,
-        model: entry.id,
-        label: entry.displayName?.trim() || entry.id,
-      }));
-    return choices.length > 0
-      ? [{
-          connectionSlug: connection.slug,
-          providerType: connection.providerType,
-          heading: display.name,
-          choices,
-        }]
-      : [];
-  }, [connection.providerType, connection.slug, display.name, modelChoices]);
-  const selectedDefaultModelValue = modelChoiceValue(connection.slug, connection.defaultModel);
-  const selectedDefaultModelLabel =
-    defaultModelGroups[0]?.choices.find((choice) => choice.model === connection.defaultModel)?.label ??
-    connection.defaultModel;
+  const defaultModelOptions = modelChoices
+    .filter((entry) => entry.canUseAsChatDefault)
+    .map((entry) => ({
+      value: entry.id,
+      label: entry.displayName?.trim() || entry.id,
+    }));
+  if (
+    connection.defaultModel &&
+    !defaultModelOptions.some((option) => option.value === connection.defaultModel)
+  ) {
+    defaultModelOptions.push({
+      value: connection.defaultModel,
+      label: connection.defaultModel,
+    });
+  }
 
   return (
     <div className="providerEditor providerConnectionManager">
       {supportsApiKey && (
         <div className="providerCredentialTask">
-          <FieldRoot className="grid gap-1.5">
-            <Label className="text-xs text-foreground-secondary">{copy.modelKey}</Label>
-            <FieldDescription>{apiKeyStatusHint}</FieldDescription>
-            <PasswordInput
-              value={apiKey}
-              onChange={setApiKey}
-              placeholder={hasSecret === true ? '••••••••' : copy.pasteModelKey}
-              ariaLabel={copy.modelKeyAria(display.name)}
-              disabled={detailActionBusy}
-            />
-          </FieldRoot>
+          <PasswordInput
+            value={apiKey}
+            onChange={setApiKey}
+            placeholder={hasSecret === true ? '••••••••' : copy.pasteModelKey}
+            label={copy.modelKeyAria(display.name)}
+            description={apiKeyStatusHint}
+            isDisabled={detailActionBusy}
+          />
           <div className="providerCredentialActions">
             {defaults.signupUrl && (
               <a
@@ -237,29 +221,18 @@ function ConnectionDetailInner(props: ConnectionDetailProps) {
         </p>
       )}
       <section className="providerModelSettings" aria-label={copy.modelManagement}>
-        <FieldRoot className="providerDefaultModelField">
-          <Label className="text-xs text-foreground-secondary">{copy.connectionDefaultModel}</Label>
-          <FieldDescription>{copy.connectionDefaultModelHelp}</FieldDescription>
-          <ModelPicker
-            groups={defaultModelGroups}
-            value={selectedDefaultModelValue}
-            ariaLabel={copy.connectionDefaultModel}
-            disabled={detailActionBusy || defaultModelGroups.length === 0}
-            searchPlaceholder={copy.searchDefaultModels}
-            emptyMessage={copy.noModels}
-            triggerClassName="providerDefaultModelTrigger"
-            onValueChange={(value) => {
-              const parsed = parseModelChoiceValue(value);
-              if (parsed?.llmConnectionSlug === connection.slug) {
-                void updateDefaultModel(parsed.model);
-              }
-            }}
-          >
-            <span className="modelPickerOptionLabel">
-              {settingDefaultModel ? copy.savingDefaultModel : selectedDefaultModelLabel}
-            </span>
-          </ModelPicker>
-        </FieldRoot>
+        <Selector
+          label={copy.connectionDefaultModel}
+          description={copy.connectionDefaultModelHelp}
+          options={defaultModelOptions}
+          value={connection.defaultModel}
+          onChange={(model) => void updateDefaultModel(model)}
+          isDisabled={detailActionBusy || defaultModelOptions.length === 0}
+          disabledMessage={defaultModelOptions.length === 0 ? copy.noModels : undefined}
+          isLoading={settingDefaultModel}
+          placeholder={copy.noModels}
+          width="100%"
+        />
         <EnabledModelManager
           modelChoices={modelChoices}
           enabledModelIds={enabledModelIds}
@@ -316,19 +289,15 @@ function ConnectionEndpointField(props: {
 }) {
   const copy = getProviderSettingsCopy(useUiLocale()).detail;
   return (
-    <FieldRoot className="grid gap-1.5">
-      <Label className="text-xs text-foreground-secondary">{copy.endpoint}</Label>
-      {props.fixedOAuth && <FieldDescription>{copy.oauthFixed}</FieldDescription>}
-      <Input
-        value={props.baseUrl}
-        onChange={(event) => props.onChange(event.currentTarget.value)}
-        placeholder={props.defaultsBaseUrl}
-        readOnly={props.fixedOAuth}
-        disabled={props.disabled}
-        aria-readonly={props.fixedOAuth ? 'true' : undefined}
-        aria-label={props.fixedOAuth ? copy.endpointFixedAria : copy.endpointAria}
-      />
-    </FieldRoot>
+    <TextInput
+      label={copy.endpoint}
+      description={props.fixedOAuth ? copy.oauthFixed : undefined}
+      value={props.baseUrl}
+      onChange={(value) => props.onChange(value)}
+      placeholder={props.defaultsBaseUrl}
+      isDisabled={props.disabled || props.fixedOAuth}
+      disabledMessage={props.fixedOAuth ? copy.oauthFixed : undefined}
+    />
   );
 }
 
