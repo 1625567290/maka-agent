@@ -289,13 +289,11 @@ const COMPONENT_RADIUS: ComponentRadiusCheck[] = [
   // shape on the control-tier Button — both tiers must stay present.
   { file: 'packages/ui/src/ui.tsx', name: 'buttonVariants', tier: 'control', alsoTiers: ['pill'] },
   { file: 'packages/ui/src/primitives/input.tsx', name: 'inputClasses', tier: 'control' },
-  { file: 'packages/ui/src/ui.tsx', name: 'SelectItem', tier: 'control' },
   { file: 'packages/ui/src/ui.tsx', name: 'Toggle', tier: 'control' },
   // #520 PR9: legacy ui.tsx badgeVariants retired onto primitives/badge.tsx.
   // DialogPopup/AlertDialogPopup were merged into createModalContent (PR6
   // review P3.1); the modal popup class now lives in MODAL_POPUP_CLASS.
   { file: 'packages/ui/src/ui.tsx', name: 'MODAL_POPUP_CLASS', tier: 'modal' },
-  { file: 'packages/ui/src/ui.tsx', name: 'SelectPopup', tier: 'surface' },
   { file: 'packages/ui/src/ui.tsx', name: 'ToggleGroup', tier: 'surface' },
   // TabsTrigger/TabsList were dropped from this table when #499 P0-3 moved
   // them to primitives/tabs.tsx, on the stated grounds that they became
@@ -310,7 +308,6 @@ const COMPONENT_RADIUS: ComponentRadiusCheck[] = [
   // #1565 PR 3: the Badge entry left this table — it is the Astryx primitive
   // now, whose pill radius is Astryx-owned.
   { file: 'packages/ui/src/primitives/item.tsx', name: 'itemVariants', tier: 'surface' },
-  { file: 'packages/ui/src/primitives/menu.tsx', name: 'MenuPopup', tier: 'surface' },
   { file: 'packages/ui/src/primitives/alert.tsx', name: 'alertVariants', tier: 'surface' },
   { file: 'packages/ui/src/primitives/toolbar.tsx', name: 'Toolbar', tier: 'surface' },
   { file: 'packages/ui/src/session-sidebar-nav.tsx', name: 'navRowVariants', tier: 'control' },

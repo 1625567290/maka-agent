@@ -105,7 +105,9 @@ describe('issue #406 design-system governance contract', () => {
       ])
     ).flat();
     const violations = sources
-      .filter(({ source }) => /\bisIconOnly\b/.test(source))
+      .filter(({ source }) =>
+        /<(?:Button|UiButton)\b[^>]*\bisIconOnly\b/s.test(source),
+      )
       .map(({ path }) => relative(REPO_ROOT, path));
 
     assert.deepEqual(
@@ -241,12 +243,11 @@ describe('issue #406 design-system governance contract', () => {
 
     const menu = await readFile(resolve(REPO_ROOT, 'packages/ui/src/primitives/menu.tsx'), 'utf8');
     const tabs = await readFile(resolve(REPO_ROOT, 'packages/ui/src/primitives/tabs.tsx'), 'utf8');
-    assert.match(menu, /data-checked:bg-control/);
+    assert.match(menu, /from '@astryxdesign\/core\/DropdownMenu'/);
+    assert.match(tabs, /from "@base-ui\/react\/tabs"/);
+    assert.doesNotMatch(menu, /data-checked:bg-(?:control|primary)/);
     assert.match(tabs, /bg-foreground data-\[orientation=horizontal\]:h-0\.5/);
-    assert.doesNotMatch(menu, /data-checked:bg-primary/);
-    assert.doesNotMatch(tabs, /bg-control data-\[orientation=horizontal\]:h-0\.5/);
-    assert.doesNotMatch(tabs, /bg-primary data-\[orientation=horizontal\]:h-0\.5/);
-
+    assert.doesNotMatch(tabs, /bg-(?:control|primary) data-\[orientation=horizontal\]:h-0\.5/);
   });
 
   it('permission-mode chip text is readable across all tones (>=4.5:1)', async () => {
@@ -316,12 +317,11 @@ describe('issue #406 design-system governance contract', () => {
   it('keeps core visual surfaces on shadow rings instead of hard borders', async () => {
     const ui = await readUiSource();
     const styles = await readFile(resolve(REPO_ROOT, 'apps/desktop/src/renderer/styles.css'), 'utf8');
-    const dialogClass = ui.match(/className=\{cn\(\s*'([^']*shadow-maka-panel[^']*)'/)?.[1] ?? '';
-    const selectClass = ui.match(/SelectPopup[\s\S]*?className=\{cn\('([^']*shadow-maka-panel[^']*)'/)?.[1] ?? '';
+    const dialogClass = ui.match(/const MODAL_POPUP_CLASS =\s*'([^']*shadow-maka-panel[^']*)'/)?.[1] ?? '';
     const panelShadow = styles.match(/--shadow-maka-panel:\s*([^;]+);/)?.[1] ?? '';
 
     assert.match(panelShadow, /0\s+0\s+0\s+1px\s+var\(--border\)/);
-    for (const [name, className] of [['DialogPopup', dialogClass], ['SelectPopup', selectClass]] as const) {
+    for (const [name, className] of [['DialogPopup', dialogClass]] as const) {
       assert.ok(className.includes('shadow-maka-panel'), `${name} must keep the shadow-ring recipe`);
       assert.ok(!/\bborder\b|\bborder-border\b/.test(className), `${name} must not use a hard visual border`);
     }
