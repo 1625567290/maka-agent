@@ -594,6 +594,16 @@ function taskEventFromOutput(input: {
       error: identityMismatch.error,
     });
   }
+  if (isPreExecutionAgentFailure(input.output) && verifierGrade !== 'passed') {
+    const errorClass = isProviderInfraFailure(input.output.cell.errorClass)
+      ? input.output.cell.errorClass
+      : 'infra_error';
+    return taskInfraFailedEvent({
+      ...input,
+      errorClass,
+      error: `Harbor cell failed with ${errorClass} before completing a model step or reporting token usage`,
+    });
+  }
   if (isProviderInfraFailure(input.output.cell.errorClass) && verifierGrade === undefined) {
     return taskInfraFailedEvent({
       ...input,
@@ -620,6 +630,19 @@ function taskEventFromOutput(input: {
   return taskCompletedEvent(input);
 }
 
+function isPreExecutionAgentFailure(output: TaskRunOutput): boolean {
+  if (output.cell.status !== 'failed') return false;
+  const completedProviderStep = output.cell.steps > 0 || output.cell.tokenSummary !== undefined;
+  const executedWorkspaceTool = output.cell.toolSummary.actualToolCalls > 0;
+  if (completedProviderStep || executedWorkspaceTool) return false;
+  return (
+    output.cell.deadlineSettlement?.source === 'benchmark.deadline' ||
+    output.cell.errorClass === 'runtime_error' ||
+    output.cell.errorClass === 'aborted' ||
+    isProviderInfraFailure(output.cell.errorClass)
+  );
+}
+
 function taskCompletedEvent(input: {
   output: TaskRunOutput;
   taskId: string;
@@ -642,11 +665,14 @@ function taskCompletedEvent(input: {
       output.cell.errorClass === 'policy_denied') &&
       output.harbor.verifier !== undefined);
   const passed = verifierGraded && output.harbor.reward > 0;
+  const rawErrorClass = output.cell.errorClass ?? 'verification_failed';
   const errorClass = passed
     ? undefined
     : deadlineSettled
       ? 'budget_exhausted'
-      : (output.cell.errorClass ?? 'verification_failed');
+      : verifierGrade === 'failed' && isUnscoredCellFailure(rawErrorClass)
+        ? 'runtime_error'
+        : rawErrorClass;
   const scored =
     verifierGraded && (verifierGrade !== undefined || !isUnscoredCellFailure(errorClass));
   const agentFailure = output.cell.status === 'failed' && errorClass === 'tool_step_cap_reached';
@@ -800,12 +826,7 @@ function classifyPlumbingFailure(
       error: `Harbor cell prompt hash ${output.cell.promptHash} did not match ${expectedPromptHash}`,
     };
   }
-  if (
-    requireFinalUsage &&
-    (output.cell.status === 'completed' ||
-      output.cell.deadlineSettlement?.source === 'benchmark.deadline') &&
-    output.cell.tokenSummary === undefined
-  ) {
+  if (requireFinalUsage && output.cell.tokenSummary === undefined) {
     return {
       errorClass: 'missing_token_usage',
       error: 'Harbor cell did not report final token usage',
@@ -1136,7 +1157,7 @@ function structuredVerifierGrade(harbor: unknown): 'passed' | 'failed' | undefin
     !isRecord(verifier) ||
     !Array.isArray(verifier.attempts) ||
     verifier.attempts.length < 1 ||
-    verifier.attempts.length > 2
+    verifier.attempts.length > 3
   )
     return undefined;
   if (
