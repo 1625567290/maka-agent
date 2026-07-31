@@ -11,6 +11,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import type {
   SessionEvent,
@@ -78,6 +79,7 @@ import {
   isActiveShellRunStatus,
   isDeepResearchSession,
   isSessionInlineRun,
+  isTerminalRuntimeEvent,
   subagentSessionRuntimeSummary,
 } from '@maka/core';
 import type {
@@ -91,15 +93,21 @@ import type {
   AgentRunHeader,
   AgentRunStore,
   ArtifactRecord,
+  ContinuationClaimV1,
+  ContinuationClaimStateV1,
   RootExecutionDescriptor,
   RuntimeEvent,
   RuntimeEventStore,
+  RuntimeContinuationAuthorityStore,
   ToolBoundaryProtocol,
   SubagentWorkspaceBinding,
   SubagentWorktreeExecutor,
 } from '@maka/core';
 import { AGENT_GRAPH_OPERATOR_PROVISION_SCHEMA_VERSION } from '@maka/core';
-import { type RuntimeEventTerminalFact } from './runtime-event-read-model.js';
+import {
+  classifyRuntimeEventTerminalFact,
+  type RuntimeEventTerminalFact,
+} from './runtime-event-read-model.js';
 import {
   RuntimeReadModel,
   RuntimeReadModelError,
@@ -118,6 +126,7 @@ import {
   classifyTerminalRuntimeLedger,
   commitTerminalRunWithRuntimeFact,
   effectiveRunHeaderFromTerminalFact,
+  terminalRunHeaderMatchesFact,
   terminalRunStatusFromRuntimeEvent,
 } from './terminal-run-commit.js';
 
@@ -193,6 +202,23 @@ import {
   type RuntimeContinuationSafetyObservation,
   type SafeBoundaryContinuationPlan,
 } from './runtime-resume.js';
+
+function runtimeContinuationAuthority(
+  store: RuntimeEventStore | undefined,
+): RuntimeContinuationAuthorityStore | undefined {
+  const candidate = store as Partial<RuntimeContinuationAuthorityStore> | undefined;
+  return candidate?.continuationAuthorityCapability === 'runtime_continuation_authority_v1' &&
+    typeof candidate.readImmutableRuntimePrefix === 'function' &&
+    typeof candidate.readImmutableRuntimeEvents === 'function' &&
+    typeof candidate.claimContinuation === 'function' &&
+    typeof candidate.readContinuationClaimByBoundary === 'function' &&
+    typeof candidate.readContinuationClaimStateByBoundary === 'function' &&
+    typeof candidate.listContinuationClaimsForRecovery === 'function' &&
+    typeof candidate.commitContinuationStart === 'function' &&
+    typeof candidate.commitContinuationRepairStart === 'function'
+    ? (candidate as RuntimeContinuationAuthorityStore)
+    : undefined;
+}
 
 export interface StopSessionInput {
   source?: 'stop_button' | 'benchmark_deadline' | 'graph_supervisor';
@@ -1107,6 +1133,26 @@ export class SessionManager {
         }
       }
 
+      let continuationClaimRecovered = false;
+      const continuationAuthority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
+      if (this.deps.runStore && continuationAuthority) {
+        try {
+          continuationClaimRecovered = await this.recoverContinuationClaimsBeforeProvider(
+            session.id,
+            continuationAuthority,
+            policy,
+          );
+        } catch (error) {
+          if (policy.kind === 'strict') throw error;
+          // A configured canonical continuation authority that cannot be read
+          // is not equivalent to "no continuation claim". Quarantine this
+          // session from every legacy/generic repair path until the authority
+          // becomes readable again.
+          continue;
+        }
+        if (continuationClaimRecovered) recovered.add(session.id);
+      }
+
       if (this.deps.runStore) {
         const runRecovery = await recoverOr(
           policy,
@@ -1114,7 +1160,7 @@ export class SessionManager {
           undefined,
         );
         if (runRecovery?.hasLedger) {
-          if (runRecovery.recovered) {
+          if (runRecovery.recovered || continuationClaimRecovered) {
             await recoverOr(policy, () => this.updateStatus(session.id, 'active'), undefined);
             recovered.add(session.id);
           } else if (
@@ -1709,9 +1755,17 @@ export class SessionManager {
         if (!this.deps.runStore) throw new Error('AgentRunStore is not configured');
         return this.deps.runStore.readRun(targetSessionId, runId);
       },
-      readRuntimeEvents: async (targetSessionId, runId) => {
-        if (!this.deps.runtimeEventStore) throw new Error('RuntimeEventStore is not configured');
-        return this.deps.runtimeEventStore.readRuntimeEvents(targetSessionId, runId);
+      readImmutableRuntimePrefix: async (prefixInput) => {
+        const authority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
+        if (!authority) {
+          throw new Error('Immutable RuntimeEvent prefix reader is not configured');
+        }
+        return authority.readImmutableRuntimePrefix(prefixInput);
+      },
+      readContinuationClaimStateByBoundary: async (boundaryDigest) => {
+        const authority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
+        if (!authority) throw new Error('Continuation authority is not configured');
+        return authority.readContinuationClaimStateByBoundary(boundaryDigest);
       },
       findExistingContinuation: async (
         targetSessionId,
@@ -3524,6 +3578,7 @@ export class SessionManager {
       name: string;
       systemPrompt: string;
       permissionMode: PermissionMode;
+      toolNames: string[];
     };
     if (execution.kind === 'child_session') {
       const [parentRun, child] = await Promise.all([
@@ -3547,77 +3602,69 @@ export class SessionManager {
         name: snapshot.agentName,
         systemPrompt: snapshot.systemPrompt,
         permissionMode: child.permissionMode,
+        toolNames: [...snapshot.toolNames],
       };
     } else {
       if (!sourceRun.parentRunId || sourceRun.parentRunId !== input.parentRunId) {
         throw new Error('Child agent retry source does not belong to the active parent run');
       }
       if (!sourceRun.agentId) throw new Error('Child agent retry source is missing its agent id');
-      definition = requireResolvedAgentDefinition(sourceRun.agentId);
+      const resolved = requireResolvedAgentDefinition(sourceRun.agentId);
+      definition = {
+        ...resolved,
+        toolNames: buildToolsForAgentDefinition(this.deps.childTools ?? [], resolved).map(
+          (tool) => tool.name,
+        ),
+      };
     }
-    if (sourceRun.status !== 'failed' || sourceRun.failureClass !== 'RateLimit') {
-      throw new Error('Child agent retry source must be a provider rate-limit failure');
+    const authority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
+    const abandonedBeforeProvider =
+      sourceRun.failureClass === 'continuation_abandoned_before_provider_dispatch'
+        ? await isProvenRecoveredContinuationAbandonment(authority, sourceRun)
+        : false;
+    if (
+      sourceRun.status !== 'failed' ||
+      (sourceRun.failureClass !== 'RateLimit' && !abandonedBeforeProvider)
+    ) {
+      throw new Error(
+        'Child agent retry source must be a provider rate-limit failure or a proven pre-provider continuation abandonment',
+      );
     }
     this.assertChildRunHasNoSuccessor(runs, sourceRun.runId);
 
-    const replaySegments: RuntimeEvent[][] = [];
-    let chainRun: AgentRunHeader | undefined = rawSourceRun;
-    const visited = new Set<string>();
-    while (chainRun) {
-      if (visited.has(chainRun.runId))
-        throw new Error('Child agent retry lineage contains a cycle');
-      visited.add(chainRun.runId);
-      const events = await this.deps.runtimeEventStore.readRuntimeEvents(
-        targetSessionId,
-        chainRun.runId,
+    const hasAuthority = authority !== undefined;
+    const hasSafetyInspector = this.deps.inspectContinuationSafety !== undefined;
+    if (hasAuthority !== hasSafetyInspector) {
+      throw new Error(
+        'Child agent retry continuation authority composition is incomplete; refusing legacy fallback',
       );
-      const plan = buildResumePlanFromRuntimeEvents(events);
-      if (plan.disposition !== 'safe_replay') {
-        throw new Error(`Child agent retry source is not safely replayable: ${chainRun.runId}`);
-      }
-      replaySegments.unshift(plan.replayRuntimeEvents);
-      const previousRunId: string | undefined =
-        chainRun.retriedFromRunId ?? chainRun.resumedFromRunId;
-      if (!previousRunId) break;
-      chainRun = runs.find((run) => run.runId === previousRunId);
-      if (!chainRun) throw new Error('Child agent retry lineage source is missing');
     }
-
-    const sourceEvents = await this.deps.runtimeEventStore.readRuntimeEvents(
-      targetSessionId,
-      sourceRun.runId,
-    );
-    const sourcePlan = buildResumePlanFromRuntimeEvents(sourceEvents);
-    if (sourcePlan.disposition !== 'safe_replay') {
-      throw new Error('Child agent retry source is not safely replayable');
-    }
-    const sourceInvocationId = sourceRun.invocationId ?? sourceEvents[0]?.invocationId;
-    if (!sourceInvocationId) throw new Error('Child agent retry source has no invocation id');
-    const retryReplay = buildRuntimeEventModelReplayPlan(replaySegments.flat());
+    const admissionMode = hasAuthority
+      ? ('durable_continuation' as const)
+      : ('legacy_provider_retry' as const);
+    const continuation =
+      admissionMode === 'durable_continuation'
+        ? await this.planDurableChildProviderRetry({
+            targetSessionId,
+            sourceRun,
+            runs,
+            authority: authority!,
+            inspectSafety: this.deps.inspectContinuationSafety!,
+            availableToolNames: definition.toolNames,
+          })
+        : await this.planLegacyChildProviderRetry({
+            targetSessionId,
+            rawSourceRun,
+            sourceRun,
+            runs,
+            availableToolNames: definition.toolNames,
+          });
+    const retryReplay = buildRuntimeEventModelReplayPlan(continuation.runtimeContext);
     const retryAnchor = retryReplay.items[0];
     if (!retryAnchor || retryAnchor.kind !== 'text' || retryAnchor.role !== 'user') {
       throw new Error('Child agent retry source has no user-anchored history');
     }
-    const turnId = this.deps.newId();
-    const runId = this.deps.newId();
-    const invocationId = this.deps.newId();
-    const continuation: RuntimeContinuation = {
-      sessionId: targetSessionId,
-      invocationId,
-      runId,
-      turnId,
-      sourceInvocationId,
-      sourceRunId: sourceRun.runId,
-      sourceTurnId: sourceRun.turnId,
-      sourceRuntimeEventHighWater: sourceEvents.length,
-      sourceRuntimeContext: sourcePlan.replayRuntimeEvents,
-      runtimeContext: replaySegments.flat(),
-      safetySnapshot: {
-        workspaceIdentity: sourceRun.workspaceIdentity ?? sourceRun.cwd,
-        backgroundOperationsSettled: true,
-        availableToolNames: [],
-      },
-    };
+    const { turnId, runId } = continuation;
 
     const startedAt = this.deps.now();
     const summary = new ChildAgentSummaryAccumulator();
@@ -3671,6 +3718,7 @@ export class SessionManager {
                       systemPrompt: definition.systemPrompt,
                     },
                     continuation,
+                    admissionMode,
                     linkedSession: true,
                     onRunStarted,
                   },
@@ -3693,6 +3741,7 @@ export class SessionManager {
                   systemPrompt: definition.systemPrompt,
                 },
                 continuation,
+                admissionMode,
               },
               runtimeExecution,
             ),
@@ -3743,6 +3792,153 @@ export class SessionManager {
       durationMs: Math.max(0, completedAt - startedAt),
       eventCount: summary.eventCount,
       ...(failureClass ? { failureClass } : {}),
+    };
+  }
+
+  private async planDurableChildProviderRetry(input: {
+    targetSessionId: string;
+    sourceRun: AgentRunHeader;
+    runs: readonly AgentRunHeader[];
+    authority: RuntimeContinuationAuthorityStore;
+    inspectSafety: (sessionId: string) => Promise<RuntimeContinuationSafetyObservation>;
+    availableToolNames: readonly string[];
+  }): Promise<RuntimeContinuation> {
+    const runsById = new Map(input.runs.map((run) => [run.runId, run]));
+    const planner = new RuntimeContinuationPlanner({
+      readSourceRun: async (_sessionId, runId) => {
+        const raw = runsById.get(runId);
+        if (!raw) throw new Error(`Child agent retry lineage source ${runId} is missing`);
+        const effective =
+          runId === input.sourceRun.runId
+            ? input.sourceRun
+            : await this.effectiveRunHeaderFromRuntimeLedger(raw);
+        if (effective.continuationSource) return effective;
+        const previousRunId = effective.retriedFromRunId ?? effective.resumedFromRunId;
+        if (!previousRunId) return effective;
+        const previous = runsById.get(previousRunId);
+        if (!previous) {
+          throw new Error(`Child agent retry lineage source ${previousRunId} is missing`);
+        }
+        const prefix = await input.authority.readImmutableRuntimePrefix({
+          sessionId: input.targetSessionId,
+          runId: previousRunId,
+        });
+        return {
+          ...effective,
+          continuationSource: {
+            sourceInvocationId: prefix.identity.invocationId,
+            sourceRunId: prefix.identity.runId,
+            sourceTurnId: prefix.identity.turnId,
+            sourceRuntimeEventHighWater: prefix.position.lastEventSeq,
+          },
+        };
+      },
+      readImmutableRuntimePrefix: (prefixInput) =>
+        input.authority.readImmutableRuntimePrefix(prefixInput),
+      readContinuationClaimStateByBoundary: (boundaryDigest) =>
+        input.authority.readContinuationClaimStateByBoundary(boundaryDigest),
+      findExistingContinuation: async (_sessionId, sourceRunId, sourceRuntimeEventHighWater) =>
+        input.runs.find(
+          (run) =>
+            run.continuationSource?.sourceRunId === sourceRunId &&
+            run.continuationSource.sourceRuntimeEventHighWater === sourceRuntimeEventHighWater,
+        ),
+      newId: this.deps.newId,
+    });
+    const [targetHeader, safety] = await Promise.all([
+      this.deps.store.readHeader(input.targetSessionId),
+      input.inspectSafety(input.targetSessionId),
+    ]);
+    const retryPlan = await planner.plan({
+      sessionId: input.targetSessionId,
+      sourceRunId: input.sourceRun.runId,
+      currentCwd: targetHeader.cwd,
+      sourceWorkspaceIdentity: input.sourceRun.workspaceIdentity ?? input.sourceRun.cwd,
+      currentWorkspaceIdentity: safety.workspaceIdentity,
+      backgroundOperationsSettled: safety.backgroundOperationsSettled,
+      availableToolNames: input.availableToolNames,
+      ...(safety.workspaceCheckpoint ? { workspaceCheckpoint: safety.workspaceCheckpoint } : {}),
+    });
+    if (retryPlan.disposition !== 'continue' || !retryPlan.continuation) {
+      throw new Error(
+        `Child agent retry source is not safely replayable: ${retryPlan.rejectionReasons.join(', ')}`,
+      );
+    }
+    return retryPlan.continuation;
+  }
+
+  /**
+   * Preserves the pre-PR-B provider RateLimit retry for compositions that have
+   * neither continuation authority nor a safety inspector. It is intentionally
+   * not a durable continuation: no claim or continuation-start is written, and
+   * it cannot recover a claim-repair abandonment. The host authority lifecycle
+   * integration replaces this path with a typed SQLite composition.
+   */
+  private async planLegacyChildProviderRetry(input: {
+    targetSessionId: string;
+    rawSourceRun: AgentRunHeader;
+    sourceRun: AgentRunHeader;
+    runs: readonly AgentRunHeader[];
+    availableToolNames: readonly string[];
+  }): Promise<RuntimeContinuation> {
+    if (!this.deps.runtimeEventStore?.readImmutableRuntimeEvents) {
+      throw new Error('Legacy child provider retry requires immutable RuntimeEvent reads');
+    }
+    if (input.sourceRun.failureClass !== 'RateLimit') {
+      throw new Error('Legacy child provider retry only supports provider rate-limit failures');
+    }
+
+    const replaySegments: RuntimeEvent[][] = [];
+    let sourceEvents: RuntimeEvent[] | undefined;
+    let sourceReplay: RuntimeEvent[] | undefined;
+    let chainRun: AgentRunHeader | undefined = input.rawSourceRun;
+    const visited = new Set<string>();
+    while (chainRun) {
+      if (visited.has(chainRun.runId)) {
+        throw new Error('Child agent retry lineage contains a cycle');
+      }
+      visited.add(chainRun.runId);
+      const events = await this.deps.runtimeEventStore.readImmutableRuntimeEvents(
+        input.targetSessionId,
+        chainRun.runId,
+      );
+      const plan = buildResumePlanFromRuntimeEvents(events);
+      if (plan.disposition !== 'safe_replay') {
+        throw new Error(`Child agent retry source is not safely replayable: ${chainRun.runId}`);
+      }
+      replaySegments.unshift(plan.replayRuntimeEvents);
+      if (chainRun.runId === input.sourceRun.runId) {
+        sourceEvents = events;
+        sourceReplay = plan.replayRuntimeEvents;
+      }
+      const previousRunId: string | undefined =
+        chainRun.retriedFromRunId ?? chainRun.resumedFromRunId;
+      if (!previousRunId) break;
+      chainRun = input.runs.find((run) => run.runId === previousRunId);
+      if (!chainRun) throw new Error('Child agent retry lineage source is missing');
+    }
+    if (!sourceEvents || !sourceReplay) {
+      throw new Error('Child agent retry source ledger is missing');
+    }
+    const sourceInvocationId = input.sourceRun.invocationId ?? sourceEvents[0]?.invocationId;
+    if (!sourceInvocationId) throw new Error('Child agent retry source has no invocation id');
+
+    return {
+      sessionId: input.targetSessionId,
+      invocationId: this.deps.newId(),
+      runId: this.deps.newId(),
+      turnId: this.deps.newId(),
+      sourceInvocationId,
+      sourceRunId: input.sourceRun.runId,
+      sourceTurnId: input.sourceRun.turnId,
+      sourceRuntimeEventHighWater: sourceEvents.length,
+      sourceRuntimeContext: sourceReplay,
+      runtimeContext: replaySegments.flat(),
+      safetySnapshot: {
+        workspaceIdentity: input.sourceRun.workspaceIdentity ?? input.sourceRun.cwd,
+        backgroundOperationsSettled: true,
+        availableToolNames: [...input.availableToolNames],
+      },
     };
   }
 
@@ -4043,6 +4239,24 @@ export class SessionManager {
       );
     }
 
+    const continuationAuthority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
+    if (continuationAuthority) {
+      const claimState = (
+        await continuationAuthority.listContinuationClaimsForRecovery(input.sessionId)
+      ).find(
+        (candidate) =>
+          candidate.claim.target.runId === input.runId ||
+          candidate.claim.target.turnId === input.turnId,
+      );
+      if (claimState) {
+        assertClaimOwnsHostedLinkedChildAdmission(input, claimState.claim);
+        // The continuation claim is the durable owner of this target identity.
+        // SessionManager's claim-repair saga must materialize its exact header;
+        // the generic hosted-admission repair must not steal the same Run ID.
+        return;
+      }
+    }
+
     let workspaceIdentity: string | undefined;
     if (
       input.execution.kind === 'linked_child_resume' ||
@@ -4290,6 +4504,7 @@ export class SessionManager {
     copied: StoredMessage[],
     input: ReviseBeforeTurnInput,
   ): Promise<SessionSummary> {
+    this.assertConversationRuntimeLedgerCloneSupported(sourceView, copied);
     const [header, boundary] = await Promise.all([
       this.deps.store.readHeader(sessionId),
       this.deps.store.readExecutionBoundary(sessionId),
@@ -4365,6 +4580,7 @@ export class SessionManager {
     copied: StoredMessage[],
     input: BranchFromTurnInput,
   ): Promise<SessionSummary> {
+    this.assertConversationRuntimeLedgerCloneSupported(sourceView, copied);
     const [header, boundary] = await Promise.all([
       this.deps.store.readHeader(sessionId),
       this.deps.store.readExecutionBoundary(sessionId),
@@ -4782,6 +4998,180 @@ export class SessionManager {
     throw error;
   }
 
+  /**
+   * PR B3 will provide typed identity rewriting for authority-bearing facts.
+   * Until then, fail before creating the target session: shallow-copying any
+   * of these facts would produce a readable-looking conversation whose durable
+   * operation/continuation identities still point at the source session.
+   */
+  private assertConversationRuntimeLedgerCloneSupported(
+    sourceView: RuntimeReadModelSessionView,
+    copiedMessages: readonly StoredMessage[],
+  ): void {
+    const copiedTurnIds = new Set<string>();
+    for (const message of copiedMessages) {
+      if ('turnId' in message && typeof message.turnId === 'string') {
+        copiedTurnIds.add(message.turnId);
+      }
+    }
+    if (copiedTurnIds.size === 0) return;
+
+    const selectedRuns = new Set(
+      sourceView.runs.filter((run) => copiedTurnIds.has(run.turnId)).map((run) => run.runId),
+    );
+    const unsupportedRun = sourceView.runs.find(
+      (run) => selectedRuns.has(run.runId) && run.continuationSource !== undefined,
+    );
+    const unsupportedEvent = sourceView.events.find(
+      (event) =>
+        selectedRuns.has(event.runId) &&
+        copiedTurnIds.has(event.turnId) &&
+        (event.actions?.continuationStart !== undefined ||
+          event.actions?.toolDispatch !== undefined ||
+          event.actions?.toolRecovery !== undefined ||
+          event.refs?.operationId !== undefined),
+    );
+    if (!unsupportedRun && !unsupportedEvent) return;
+
+    const error = new Error(
+      'Conversation copy contains durable runtime authority facts that require typed identity rewriting',
+    ) as Error & { code: string };
+    error.code = 'branch_runtime_fact_rewrite_unsupported';
+    throw error;
+  }
+
+  /**
+   * Closes only the two provably pre-provider crash windows owned by B2:
+   * claim-only and target-Run-created-without-start. A repaired claim never
+   * dispatches a provider. It first materializes the exact target header
+   * committed in the claim, commits a deterministic continuation-start as
+   * event 1, then records an auditable failed terminal fact.
+   *
+   * A start written by the normal admission path is provider T1. Without an
+   * exclusive cross-process owner proof we cannot know that its provider is
+   * dead, so that state remains `continuation_started_indeterminate` and is
+   * deliberately left non-terminal.
+   */
+  private async recoverContinuationClaimsBeforeProvider(
+    sessionId: string,
+    authority: RuntimeContinuationAuthorityStore,
+    _policy: RecoveryPolicy,
+  ): Promise<boolean> {
+    if (!this.deps.runStore) return false;
+    const states = await authority.listContinuationClaimsForRecovery(sessionId);
+    let recovered = false;
+    for (const initialState of states) {
+      const { claim } = initialState;
+      let run: AgentRunHeader;
+      try {
+        run = await this.deps.runStore.readRun(sessionId, claim.target.runId);
+      } catch (error) {
+        if (!isMissingRunError(error)) throw error;
+        try {
+          await this.deps.runStore.createRun(claim.targetRunHeader, { durable: true });
+          run = await this.deps.runStore.readRun(sessionId, claim.target.runId);
+        } catch (createError) {
+          try {
+            run = await this.deps.runStore.readRun(sessionId, claim.target.runId);
+          } catch {
+            throw createError;
+          }
+        }
+        recovered = true;
+      }
+      let state =
+        (await authority.readContinuationClaimStateByBoundary(claim.boundaryDigest)) ??
+        initialState;
+      if (
+        state.startEventId
+          ? !claimTargetRunHeaderIsCompatible(run, claim.targetRunHeader)
+          : !isDeepStrictEqual(run, claim.targetRunHeader)
+      ) {
+        throw new Error(
+          `Continuation claim target Run header conflicts with claim ${claim.claimId}`,
+        );
+      }
+
+      let targetEvents = await readImmutableRuntimeEventsOrEmpty(
+        authority,
+        claim.target.sessionId,
+        claim.target.runId,
+      );
+      if (!state.startEventId) {
+        if (targetEvents.length > 0) {
+          throw new Error(
+            `Continuation claim ${claim.claimId} has target events without continuation-start`,
+          );
+        }
+        const repairStart = buildContinuationRepairStartEvent(claim);
+        await authority.commitContinuationRepairStart({ claim, event: repairStart });
+        state =
+          (await authority.readContinuationClaimStateByBoundary(claim.boundaryDigest)) ??
+          (() => {
+            throw new Error(`Continuation claim ${claim.claimId} disappeared during repair`);
+          })();
+        targetEvents = await readImmutableRuntimeEventsOrEmpty(
+          authority,
+          claim.target.sessionId,
+          claim.target.runId,
+        );
+        recovered = true;
+      }
+
+      const start = targetEvents[0];
+      if (!start || start.id !== state.startEventId) {
+        throw new Error(`Continuation claim ${claim.claimId} has an invalid start boundary`);
+      }
+      const repairedBeforeProvider = state.startKind === 'claim_repair';
+      if (!repairedBeforeProvider) continue;
+      const failureClass = 'continuation_abandoned_before_provider_dispatch';
+      const expectedTerminal = buildRecoveredTerminalRuntimeEvent({
+        id: continuationRepairEventId('terminal', claim.claimId),
+        run,
+        status: 'failed',
+        ts: Math.max(start.ts + 1, claim.claimedAt + 1),
+        recoveryReason: failureClass,
+        invocationId: claim.target.invocationId,
+        failureClass,
+        message: failureClass,
+      });
+      const terminal = targetEvents.find(isTerminalRuntimeEvent);
+      if (terminal && !isDeepStrictEqual(terminal, expectedTerminal)) {
+        throw new Error(`Continuation claim ${claim.claimId} has a conflicting repair terminal`);
+      }
+      const existingRunEvents = await this.deps.runStore.readEvents(
+        claim.target.sessionId,
+        claim.target.runId,
+      );
+      const projectionComplete =
+        terminal !== undefined &&
+        run.status === 'failed' &&
+        run.failureClass === failureClass &&
+        existingRunEvents.some((event) => event.type === 'run_failed');
+      if (projectionComplete) continue;
+      await commitTerminalRunWithRuntimeFact({
+        runStore: this.deps.runStore,
+        runtimeEventStore: authority,
+        newId: () => continuationRepairEventId('run-terminal', claim.claimId),
+        sessionId: claim.target.sessionId,
+        runId: claim.target.runId,
+        turnId: claim.target.turnId,
+        status: 'failed',
+        ts: expectedTerminal.ts,
+        terminalEvent: expectedTerminal,
+        failureClass,
+        runEventData: {
+          recovered: true,
+          recoveryReason: failureClass,
+          continuationClaimId: claim.claimId,
+        },
+        existingEvents: existingRunEvents,
+      });
+      recovered = true;
+    }
+    return recovered;
+  }
+
   private async recoverAgentRunsFromLedger(
     sessionId: string,
     policy: RecoveryPolicy = { kind: 'best_effort' },
@@ -4793,6 +5183,21 @@ export class SessionManager {
         ? await policy.stores.agentRunStore.listSessionRunsForRecovery(sessionId)
         : await this.deps.runStore.listSessionRuns(sessionId);
     if (runs.length === 0) return { hasLedger: false, recovered: false };
+    const continuationAuthority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
+    const claimOwnedUnsettledRunIds = new Set<string>();
+    if (continuationAuthority) {
+      for (const state of await continuationAuthority.listContinuationClaimsForRecovery(
+        sessionId,
+      )) {
+        const events = await continuationAuthority.readImmutableRuntimeEvents(
+          state.claim.target.sessionId,
+          state.claim.target.runId,
+        );
+        if (!events.some(isTerminalRuntimeEvent)) {
+          claimOwnedUnsettledRunIds.add(state.claim.target.runId);
+        }
+      }
+    }
 
     // Read once per recovered session, and only when a failure actually needs
     // attributing, so healthy sessions pay nothing for the query.
@@ -4835,6 +5240,15 @@ export class SessionManager {
         )
       ) {
         throw new Error(`AgentRun event ledger is unreadable for run ${run.runId}`);
+      }
+      if (
+        claimOwnedUnsettledRunIds.has(run.runId) &&
+        !inspected.runtimeEvents.some(isTerminalRuntimeEvent)
+      ) {
+        // Every unresolved claim target belongs to the claim saga. This
+        // includes claim-only, deterministic repair-start, and live provider
+        // T1 states; generic app-restart repair must never write into them.
+        continue;
       }
       const terminalLedger = classifyTerminalRuntimeLedger(run, inspected.runtimeEvents);
       if (terminalLedger.kind === 'ambiguous') {
@@ -5014,6 +5428,199 @@ async function recoverOr<T>(
     if (policy.kind === 'strict') throw error;
     return fallback;
   }
+}
+
+function continuationRepairEventId(
+  kind: 'start' | 'terminal' | 'run-terminal',
+  claimId: string,
+): string {
+  return `continuation-repair-${kind}-${createHash('sha256')
+    .update(`maka.continuation-repair.${kind}.v1\0${claimId}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+function buildContinuationRepairStartEvent(claim: ContinuationClaimV1): RuntimeEvent {
+  const source = claim.boundary.segments.at(-1)!;
+  return {
+    id: continuationRepairEventId('start', claim.claimId),
+    ...claim.target,
+    ts: claim.claimedAt,
+    partial: false,
+    role: 'system',
+    author: 'system',
+    actions: {
+      continuationStart: {
+        protocol: 'continuation_start_v2',
+        provenance: 'claim_repair',
+        claimId: claim.claimId,
+        boundaryDigest: claim.boundaryDigest,
+        immediateSource: {
+          sessionId: source.identity.sessionId,
+          invocationId: source.identity.invocationId,
+          runId: source.identity.runId,
+          turnId: source.identity.turnId,
+          highWater: source.position.lastEventSeq,
+          prefixDigest: source.prefixDigest,
+        },
+        replayManifestDigest: claim.boundary.manifestDigest,
+        providerProjectionVersion: claim.providerProjectionVersion,
+        providerReplayDigest: claim.providerReplayDigest,
+      },
+    },
+  };
+}
+
+function assertClaimOwnsHostedLinkedChildAdmission(
+  input: {
+    sessionId: string;
+    turnId: string;
+    runId: string;
+    execution: Exclude<RootExecutionDescriptor, { kind: 'external_message' }>;
+  },
+  claim: ContinuationClaimV1,
+): void {
+  if (
+    input.execution.kind !== 'linked_child_resume' &&
+    input.execution.kind !== 'linked_child_provider_retry'
+  ) {
+    throw new Error('Only linked child retry or resume admission can use a continuation claim');
+  }
+  if (
+    claim.target.sessionId !== input.sessionId ||
+    claim.target.runId !== input.runId ||
+    claim.target.turnId !== input.turnId
+  ) {
+    throw new Error('Linked child admission conflicts with its continuation claim target');
+  }
+  const header = claim.targetRunHeader;
+  const source = claim.boundary.segments.at(-1)!;
+  const continuationSource = header.continuationSource;
+  const continuationSourceV2 =
+    continuationSource !== undefined &&
+    'protocol' in continuationSource &&
+    continuationSource.protocol === 'continuation_source_v2'
+      ? continuationSource
+      : undefined;
+  if (
+    header.sessionId !== claim.target.sessionId ||
+    header.invocationId !== claim.target.invocationId ||
+    header.runId !== claim.target.runId ||
+    header.turnId !== claim.target.turnId ||
+    header.status !== 'created' ||
+    header.agentId !== input.execution.agentId ||
+    header.agentName !== input.execution.agentName ||
+    source.identity.sessionId !== input.sessionId ||
+    source.identity.runId !== input.execution.sourceRunId ||
+    !continuationSourceV2 ||
+    continuationSourceV2.claimId !== claim.claimId ||
+    continuationSourceV2.boundaryDigest !== claim.boundaryDigest ||
+    continuationSourceV2.sourceRunId !== input.execution.sourceRunId
+  ) {
+    throw new Error('Linked child admission continuation claim identity is inconsistent');
+  }
+  if (
+    input.execution.kind === 'linked_child_resume'
+      ? header.resumedFromRunId !== input.execution.sourceRunId ||
+        header.retriedFromRunId !== undefined
+      : header.retriedFromRunId !== input.execution.sourceRunId ||
+        header.resumedFromRunId !== undefined
+  ) {
+    throw new Error('Linked child admission continuation lineage is inconsistent');
+  }
+}
+
+async function isProvenRecoveredContinuationAbandonment(
+  authority: RuntimeContinuationAuthorityStore | undefined,
+  run: AgentRunHeader,
+): Promise<boolean> {
+  const continuationSource = run.continuationSource;
+  const continuationSourceV2 =
+    continuationSource !== undefined &&
+    'protocol' in continuationSource &&
+    continuationSource.protocol === 'continuation_source_v2'
+      ? continuationSource
+      : undefined;
+  if (
+    !authority ||
+    !continuationSourceV2 ||
+    run.failureClass !== 'continuation_abandoned_before_provider_dispatch'
+  ) {
+    return false;
+  }
+  let state: ContinuationClaimStateV1 | undefined;
+  let events: RuntimeEvent[];
+  try {
+    state = await authority.readContinuationClaimStateByBoundary(
+      continuationSourceV2.boundaryDigest,
+    );
+    events = await authority.readImmutableRuntimeEvents(run.sessionId, run.runId);
+  } catch {
+    return false;
+  }
+  if (!state) return false;
+  const { claim } = state;
+  const expectedStart = buildContinuationRepairStartEvent(claim);
+  const expectedTerminal = buildRecoveredTerminalRuntimeEvent({
+    id: continuationRepairEventId('terminal', claim.claimId),
+    run: claim.targetRunHeader,
+    status: 'failed',
+    ts: Math.max(expectedStart.ts + 1, claim.claimedAt + 1),
+    recoveryReason: 'continuation_abandoned_before_provider_dispatch',
+    invocationId: claim.target.invocationId,
+    failureClass: 'continuation_abandoned_before_provider_dispatch',
+    message: 'continuation_abandoned_before_provider_dispatch',
+  });
+  const terminalFact = classifyRuntimeEventTerminalFact(run, events).fact;
+  return (
+    claim.claimId === continuationSourceV2.claimId &&
+    claim.target.sessionId === run.sessionId &&
+    claim.target.invocationId === run.invocationId &&
+    claim.target.runId === run.runId &&
+    claim.target.turnId === run.turnId &&
+    claimTargetRunHeaderIsCompatible(run, claim.targetRunHeader) &&
+    state.startEventId === expectedStart.id &&
+    events.length === 2 &&
+    isDeepStrictEqual(events[0], expectedStart) &&
+    isDeepStrictEqual(events[1], expectedTerminal) &&
+    terminalFact?.terminalEvent.id === expectedTerminal.id &&
+    terminalRunHeaderMatchesFact(run, terminalFact)
+  );
+}
+
+async function readImmutableRuntimeEventsOrEmpty(
+  authority: RuntimeContinuationAuthorityStore,
+  sessionId: string,
+  runId: string,
+): Promise<RuntimeEvent[]> {
+  return authority.readImmutableRuntimeEvents(sessionId, runId);
+}
+
+function claimTargetRunHeaderIsCompatible(
+  actual: AgentRunHeader,
+  expected: AgentRunHeader,
+): boolean {
+  const immutable = (header: AgentRunHeader) => {
+    const {
+      status: _status,
+      updatedAt: _updatedAt,
+      completedAt: _completedAt,
+      failureClass: _failureClass,
+      failureMessage: _failureMessage,
+      abortSource: _abortSource,
+      traceWriteError: _traceWriteError,
+      ...rest
+    } = header;
+    return rest;
+  };
+  return isDeepStrictEqual(immutable(actual), immutable(expected));
+}
+
+function isMissingRunError(error: unknown): boolean {
+  return (
+    isNotFoundError(error) ||
+    (error instanceof Error && /unknown run|run does not exist|missing run/i.test(error.message))
+  );
 }
 
 // ============================================================================

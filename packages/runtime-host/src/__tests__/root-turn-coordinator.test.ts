@@ -415,6 +415,17 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
       (message) => 'turnId' in message && message.turnId === retried.turnId,
     );
     assert.deepEqual(retryMessages, []);
+    const legacyRetryRun = await stores.agentRunStore.readRun(child.childSessionId, retried.runId!);
+    assert.equal(legacyRetryRun.continuationSource, undefined);
+    assert.equal(
+      (
+        await stores.runtimeEventStore.readImmutableRuntimeEvents(
+          child.childSessionId,
+          retried.runId!,
+        )
+      ).some((event) => event.actions?.continuationStart !== undefined),
+      false,
+    );
     assert.deepEqual(coordinator.readRootState(child.childSessionId), { kind: 'idle' });
 
     const callbackAbortController = new AbortController();

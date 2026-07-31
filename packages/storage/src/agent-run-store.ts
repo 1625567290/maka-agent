@@ -258,6 +258,7 @@ class SqliteAgentRunStore implements DurableAgentRunStore {
     patch: Partial<AgentRunHeader>,
     _options: { durable?: boolean } = {},
   ): Promise<AgentRunHeader> {
+    assertMutableRunHeaderPatch(patch);
     assertSafeId(sessionId, 'Invalid session id');
     assertSafeId(runId, 'Invalid run id');
     await this.#ready;
@@ -708,10 +709,11 @@ class FileAgentRunStore implements DurableAgentRunStore {
     patch: Partial<AgentRunHeader>,
     options: { durable?: boolean } = {},
   ): Promise<AgentRunHeader> {
+    assertMutableRunHeaderPatch(patch);
     let next: AgentRunHeader | undefined;
     await this.withQueue(sessionId, runId, async () => {
       const current = await this.readRunUnlocked(sessionId, runId);
-      next = { ...current, ...patch, sessionId, runId };
+      next = decodeAgentRunHeader({ ...current, ...patch, sessionId, runId }, { sessionId, runId });
       await writeAtomic(this.runPath(sessionId, runId), JSON.stringify(next, sanitizeJson) + '\n', {
         ...options,
         durabilityRoot: this.durabilityRoot,
@@ -1669,6 +1671,25 @@ function insertOrValidateRootTurnAdmission(db: DatabaseSync, admission: RootTurn
   }
 }
 
+const MUTABLE_AGENT_RUN_HEADER_FIELDS = new Set<keyof AgentRunHeader>([
+  'status',
+  'updatedAt',
+  'completedAt',
+  'failureClass',
+  'failureMessage',
+  'abortSource',
+  'traceWriteError',
+]);
+
+function assertMutableRunHeaderPatch(patch: Partial<AgentRunHeader>): void {
+  const immutable = Object.keys(patch).filter(
+    (key) => !MUTABLE_AGENT_RUN_HEADER_FIELDS.has(key as keyof AgentRunHeader),
+  );
+  if (immutable.length > 0) {
+    throw new Error(`AgentRun admission identity is immutable: ${immutable.sort().join(', ')}`);
+  }
+}
+
 function shouldPreserveCheckpointProjectionDuringAppend(
   current: AgentRunEvent | null | undefined,
   candidate: AgentRunEvent,
@@ -1714,6 +1735,9 @@ function historyCompactProjectionIsSourceBound(event: AgentRunEvent): boolean {
 }
 
 function assertNoReservedToolLedgerFact(event: RuntimeEvent): void {
+  if (event.actions?.continuationStart !== undefined) {
+    throw new Error('Continuation start facts require SQLite continuation authority');
+  }
   const validation = validateGenericToolLedgerAppend(event);
   if (validation.ok) return;
   if (validation.code === 'reserved_recovery_fact') {

@@ -84,6 +84,36 @@ describe('SQLite core execution cutover', () => {
     });
   });
 
+  test('rejects SQLite updates to immutable AgentRun admission identity', async () => {
+    await withRoot(async (root) => {
+      const store = createSqliteAgentRunStore(root);
+      try {
+        const original = {
+          ...runHeader(),
+          continuationSource: {
+            sourceInvocationId: 'source-invocation',
+            sourceRunId: 'source-run',
+            sourceTurnId: 'source-turn',
+            sourceRuntimeEventHighWater: 1,
+          },
+        } satisfies AgentRunHeader;
+        await store.createRun(original);
+
+        await assert.rejects(
+          store.updateRun(original.sessionId, original.runId, { modelId: 'different-model' }),
+          /admission identity is immutable: modelId/,
+        );
+        await assert.rejects(
+          store.updateRun(original.sessionId, original.runId, { continuationSource: undefined }),
+          /admission identity is immutable: continuationSource/,
+        );
+        assert.deepEqual(await store.readRun(original.sessionId, original.runId), original);
+      } finally {
+        store.close?.();
+      }
+    });
+  });
+
   test('rolls back copied AgentRun rows and resumes a started cutover', async () => {
     await withRoot(async (root) => {
       const legacy = createAgentRunStore(root);

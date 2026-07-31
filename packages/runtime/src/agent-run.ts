@@ -7,6 +7,7 @@ import type {
   ToolBoundaryProtocol,
 } from '@maka/core';
 import { DurableStoreWriteError, isSessionInlineRun, isTerminalRuntimeEvent } from '@maka/core';
+import { isDeepStrictEqual } from 'node:util';
 import { redactSecrets } from '@maka/core/redaction';
 import type {
   SessionBlockedReason,
@@ -49,6 +50,10 @@ import { AiSdkFlow } from './ai-sdk-flow.js';
 import type { InvocationContext } from './invocation-context.js';
 import { buildInitialUserRuntimeEvent } from './runtime-runner.js';
 import type { RuntimeContinuation } from './runtime-resume.js';
+import {
+  createRuntimeContinuationStartAdmissionProof,
+  type RuntimeContinuationStartAdmissionProof,
+} from './runtime-continuation-admission.js';
 import type {
   ProviderRequestAttemptRecord,
   ProviderRequestCaptureLedgerRecord,
@@ -116,6 +121,10 @@ export interface AgentRunInput {
   now: () => number;
   workspaceIdentity?: string;
   continuationFailpoint?: (point: RuntimeContinuationFailpoint) => Promise<void>;
+  /** Exact target header already committed inside the durable continuation claim. */
+  claimedRunHeader?: AgentRunHeader;
+  /** Commits the claimed continuation provider-call T1 after Run creation. */
+  commitContinuationStart?: (startedAt: number) => Promise<{ startEventId: string; created: true }>;
   hooks: AgentRunHooks;
   recordSessionMessages?: boolean;
   invocationId?: string;
@@ -131,10 +140,23 @@ export interface AgentRunSessionStore {
 }
 
 export type RuntimeContinuationFailpoint =
+  | 'after_continuation_claim_committed'
   | 'after_run_created'
   | 'after_continuation_start_committed'
   | 'after_terminal_event_committed'
   | 'after_terminal_header_committed';
+
+export class ContinuationStartCommitError extends Error {
+  readonly name = 'ContinuationStartCommitError';
+
+  constructor(readonly storeCause: unknown) {
+    super(
+      `Continuation start was not durably committed: ${
+        storeCause instanceof Error ? storeCause.message : String(storeCause)
+      }`,
+    );
+  }
+}
 
 export interface AgentRunBeginResult {
   backend: AgentBackend;
@@ -151,6 +173,7 @@ export interface AgentRunOperationBeginResult {
 export interface AgentRunContinuationBeginResult {
   backend: AgentBackend;
   startedAt: number;
+  continuationStartAdmission: RuntimeContinuationStartAdmissionProof;
 }
 
 export class AgentRun {
@@ -614,6 +637,16 @@ export class AgentRun {
     await this.input.continuationFailpoint?.('after_run_created');
     const startedAt = this.input.now();
     this.lastTs = startedAt;
+    if (!this.input.commitContinuationStart) {
+      throw new Error('Runtime continuation requires a durable continuation-start authority');
+    }
+    let committedStart: { startEventId: string; created: true };
+    try {
+      committedStart = await this.input.commitContinuationStart(startedAt);
+    } catch (error) {
+      throw new ContinuationStartCommitError(error);
+    }
+    await this.input.continuationFailpoint?.('after_continuation_start_committed');
     if (this.recordsSessionMessages()) {
       await this.input.hooks.appendTurnState(this.sessionId, this.turnId, 'running', this.lineage, {
         ts: startedAt,
@@ -628,7 +661,24 @@ export class AgentRun {
     await this.markRunStarted(startedAt);
     await this.input.hooks.updateStatus(this.sessionId, 'running', undefined, startedAt);
 
-    return { backend: this.active.backend, startedAt };
+    return {
+      backend: this.active.backend,
+      startedAt,
+      continuationStartAdmission: createRuntimeContinuationStartAdmissionProof({
+        startEventId: committedStart.startEventId,
+        claimId: continuation.claimId ?? '',
+        boundaryDigest: continuation.boundary?.manifestDigest ?? 'sha256:',
+        providerProjectionVersion: continuation.providerProjectionVersion ?? 1,
+        providerReplayDigest: continuation.providerReplayDigest ?? 'sha256:',
+        ...(this.toolBoundaryProtocol ? { toolBoundaryProtocol: this.toolBoundaryProtocol } : {}),
+        target: {
+          sessionId: continuation.sessionId,
+          invocationId: continuation.invocationId,
+          runId: continuation.runId,
+          turnId: continuation.turnId,
+        },
+      }),
+    };
   }
 
   private buildInitialRuntimeEvent(id: string, ts: number): RuntimeEvent {
@@ -928,8 +978,11 @@ export class AgentRun {
       if (continuation) throw new Error('Runtime continuation requires a durable run store');
       return;
     }
-    const createdAt = this.input.now();
-    const header: AgentRunHeader = {
+    const createdAt =
+      continuation && this.input.claimedRunHeader
+        ? this.input.claimedRunHeader.createdAt
+        : this.input.now();
+    const computedHeader: AgentRunHeader = {
       runId: this.runId,
       invocationId: this.invocationId,
       sessionId: this.sessionId,
@@ -950,12 +1003,25 @@ export class AgentRun {
       ...this.lineage,
       ...(continuation
         ? {
-            continuationSource: {
-              sourceInvocationId: continuation.sourceInvocationId,
-              sourceRunId: continuation.sourceRunId,
-              sourceTurnId: continuation.sourceTurnId,
-              sourceRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
-            },
+            continuationSource:
+              continuation.claimId && continuation.boundary
+                ? {
+                    protocol: 'continuation_source_v2' as const,
+                    claimId: continuation.claimId,
+                    boundaryDigest: continuation.boundary.manifestDigest,
+                    sourceInvocationId: continuation.sourceInvocationId,
+                    sourceRunId: continuation.sourceRunId,
+                    sourceTurnId: continuation.sourceTurnId,
+                    sourceRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
+                    sourcePrefixDigest: continuation.boundary.segments.at(-1)!.prefixDigest,
+                    replayManifestDigest: continuation.boundary.manifestDigest,
+                  }
+                : {
+                    sourceInvocationId: continuation.sourceInvocationId,
+                    sourceRunId: continuation.sourceRunId,
+                    sourceTurnId: continuation.sourceTurnId,
+                    sourceRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
+                  },
           }
         : {}),
       ...(this.input.userInput.agentId ? { agentId: this.input.userInput.agentId } : {}),
@@ -970,6 +1036,15 @@ export class AgentRun {
           }
         : {}),
     };
+    const header =
+      continuation && this.input.claimedRunHeader ? this.input.claimedRunHeader : computedHeader;
+    if (
+      continuation &&
+      this.input.claimedRunHeader &&
+      !isDeepStrictEqual(this.input.claimedRunHeader, computedHeader)
+    ) {
+      throw new Error('Claimed continuation target Run header no longer matches execution');
+    }
     try {
       const durable = this.requiresDurablePersistence();
       await this.input.runStore.createRun(header, { durable });

@@ -69,6 +69,30 @@ describe('AgentRunStore', () => {
     });
   });
 
+  it('rejects updates to immutable admission and continuation identity', async () => {
+    await withStore(async (store) => {
+      const original = makeHeader({
+        continuationSource: {
+          sourceInvocationId: 'source-invocation',
+          sourceRunId: 'source-run',
+          sourceTurnId: 'source-turn',
+          sourceRuntimeEventHighWater: 1,
+        },
+      });
+      await store.createRun(original);
+
+      await assert.rejects(
+        store.updateRun('session-1', 'run-1', { modelId: 'different-model' }),
+        /admission identity is immutable: modelId/,
+      );
+      await assert.rejects(
+        store.updateRun('session-1', 'run-1', { continuationSource: undefined }),
+        /admission identity is immutable: continuationSource/,
+      );
+      assert.deepEqual(await store.readRun('session-1', 'run-1'), original);
+    });
+  });
+
   it('rejects malformed run headers instead of returning partial records', async () => {
     await withStore(async (store, root) => {
       await store.createRun(makeHeader());
@@ -694,6 +718,50 @@ describe('AgentRunStore', () => {
           /atomic tool|atomic recovery/,
         );
       }
+      assert.deepEqual(
+        await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1'),
+        [],
+      );
+    });
+  });
+
+  it('keeps continuation-start authority facts out of the JSONL generic writer', async () => {
+    await withStores(async (runStore, runtimeEventStore) => {
+      await runStore.createRun(makeHeader());
+      const continuationStart = makeRuntimeEvent({
+        id: 'continuation-start-reserved',
+        role: 'system',
+        author: 'system',
+        content: undefined,
+        actions: {
+          continuationStart: {
+            protocol: 'continuation_start_v2',
+            provenance: 'runtime_admission',
+            claimId: 'claim-1',
+            boundaryDigest:
+              'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            immediateSource: {
+              sessionId: 'session-1',
+              invocationId: 'source-invocation',
+              runId: 'source-run',
+              turnId: 'source-turn',
+              highWater: 1,
+              prefixDigest:
+                'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            },
+            replayManifestDigest:
+              'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            providerProjectionVersion: 1,
+            providerReplayDigest:
+              'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+          },
+        },
+      });
+
+      await assert.rejects(
+        runtimeEventStore.appendRuntimeEvent('session-1', 'run-1', continuationStart),
+        /continuation authority/i,
+      );
       assert.deepEqual(
         await runtimeEventStore.readImmutableRuntimeEvents('session-1', 'run-1'),
         [],

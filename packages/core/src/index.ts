@@ -136,6 +136,7 @@ export type {
   RuntimeEventPermissionClosureAccepted,
   RuntimeEventUserQuestionAnswerAccepted,
   RuntimeEventProtocolMarker,
+  RuntimeEventContinuationStartV2,
   RuntimeEventToolDispatch,
   RuntimeEventActions,
   RuntimeEventRefs,
@@ -192,10 +193,16 @@ export {
 export type { RuntimeEventStore } from './runtime-event-store.js';
 export { DurableStoreWriteError } from './runtime-event-store.js';
 export type {
+  ContinuationClaimResult,
+  ContinuationClaimStateV1,
+  RuntimeContinuationAuthorityStore,
   RuntimeRecoveryBundleCommit,
   RuntimeRecoveryBundleStore,
 } from './runtime-event-store.js';
-export { TOOL_RECOVERY_BUNDLE_CAPABILITY_V1 } from './runtime-event-store.js';
+export {
+  RUNTIME_CONTINUATION_AUTHORITY_V1,
+  TOOL_RECOVERY_BUNDLE_CAPABILITY_V1,
+} from './runtime-event-store.js';
 export type {
   ToolLedgerIssue,
   ToolLedgerIssueCode,
@@ -248,6 +255,26 @@ export {
   encodeCanonicalRuntimeEvent,
   type CanonicalRuntimeEventEncoding,
 } from './canonical-runtime-event.js';
+export type {
+  ContinuationClaimV1,
+  ImmutableRuntimePrefixV1,
+  RuntimeBoundaryCursorV1,
+  RuntimePrefixIdentityV1,
+  RuntimePrefixPositionV1,
+  RuntimePrefixRowV1,
+  RuntimePrefixSegmentV1,
+  RuntimeBoundaryDigest,
+} from './runtime-boundary.js';
+export {
+  buildImmutableRuntimePrefix,
+  createRuntimeBoundaryCursor,
+  decodeContinuationClaim,
+  decodeRuntimeBoundaryCursor,
+  decodeRuntimePrefixSegment,
+  digestRuntimeBoundaryManifest,
+  digestRuntimePrefix,
+  runtimePrefixSegment,
+} from './runtime-boundary.js';
 
 // session.ts
 export type {

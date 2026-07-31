@@ -1,7 +1,10 @@
 import type {
   AgentRunHeader,
   AgentRunStore,
+  ContinuationClaimV1,
+  ImmutableRuntimePrefixV1,
   RuntimeEvent,
+  RuntimeContinuationAuthorityStore,
   RuntimeEventStore,
   ToolBoundaryProtocol,
 } from '@maka/core';
@@ -32,6 +35,7 @@ import {
 import type { UserQuestionResponse } from '@maka/core/user-question';
 import {
   AgentRun,
+  ContinuationStartCommitError,
   type AgentRunActiveSession,
   type AgentRunBeginResult,
   type AgentRunDurability,
@@ -46,7 +50,12 @@ import type {
   InvocationResult,
   InvocationSource,
 } from './invocation-context.js';
-import { RuntimeRunner } from './runtime-runner.js';
+import {
+  issueRuntimeContinuationAdmissionReceipt,
+  RuntimeRunner,
+  runAdmittedRuntimeContinuation,
+  runLegacyProviderRetry,
+} from './runtime-runner.js';
 import type {
   BackendRegistry,
   CompactSessionInput,
@@ -74,6 +83,8 @@ import {
   type RuntimeContinuation,
   type RuntimeContinuationSafetyObservation,
 } from './runtime-resume.js';
+import { buildContinuationReplayPlan } from './continuation-replay.js';
+import { PROVIDER_REPLAY_PROJECTION_VERSION } from './model-history.js';
 import {
   matchingTerminalRuntimeEvents,
   terminalRunStatusFromRuntimeEvent,
@@ -181,6 +192,11 @@ export interface ChildAgentRetryInput {
   parentRunId: string;
   spec: ChildAgentTurnInput['spec'];
   continuation: RuntimeContinuation;
+  /**
+   * Chosen by SessionManager before any claim, Run creation, or provider T1.
+   * There is no fallback between these modes after execution begins.
+   */
+  admissionMode: 'durable_continuation' | 'legacy_provider_retry';
   /** Retry an ordinary session-inline AgentRun inside a linked child Session. */
   linkedSession?: boolean;
   onRunStarted?: () => void | Promise<void>;
@@ -686,7 +702,8 @@ export class RuntimeKernel implements RuntimeKernelLike {
     }
   }
 
-  async *resumeContinuation(continuation: RuntimeContinuation): AsyncIterable<SessionEvent> {
+  async *resumeContinuation(continuationInput: RuntimeContinuation): AsyncIterable<SessionEvent> {
+    const continuation = snapshotRuntimeContinuation(continuationInput);
     const claimKey = [
       continuation.sessionId,
       continuation.sourceRunId,
@@ -718,6 +735,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
     if (!this.deps.runStore || !this.deps.runtimeEventStore) {
       throw new Error('Runtime continuation requires AgentRunStore and RuntimeEventStore');
     }
+    const continuationAuthority = requireRuntimeContinuationAuthority(this.deps.runtimeEventStore);
     if (
       this.hasActiveRuns(continuation.sessionId) ||
       (this.executionClaims.get(continuation.sessionId)?.size ?? 0) > 1
@@ -730,16 +748,39 @@ export class RuntimeKernel implements RuntimeKernelLike {
       continuation.sessionId,
       continuation.sourceRunId,
     );
-    const sourceEvents = await this.deps.runtimeEventStore.readRuntimeEvents(
-      continuation.sessionId,
-      continuation.sourceRunId,
-    );
+    const sourceEvents = await revalidateContinuationBoundary(continuationAuthority, continuation);
     assertContinuationSourceUnchanged(continuation, sourceRun, sourceEvents);
     if (!this.deps.inspectContinuationSafety) {
       throw new Error('Runtime continuation requires an authoritative safety inspector');
     }
     const observation = await this.deps.inspectContinuationSafety(continuation.sessionId);
     assertContinuationSafetyUnchanged(continuation, observation);
+
+    const userInput: UserMessageInput = {
+      turnId: continuation.turnId,
+      text: '',
+      parentRunId: continuation.sourceRunId,
+      parentTurnId: continuation.sourceTurnId,
+    };
+    const effectiveOrchestration = effectiveOrchestrationForRun(sourceRun, header);
+    const claimedAt = this.deps.now();
+    const targetRunHeader = continuationTargetRunHeaderForExecution({
+      continuation,
+      sessionHeader: header,
+      userInput,
+      workspaceIdentity: continuation.safetySnapshot.workspaceIdentity,
+      effectiveOrchestration,
+      claimedAt,
+    });
+    const claim = continuationClaimForExecution(continuation, claimedAt, targetRunHeader);
+    const claimResult = await continuationAuthority.claimContinuation({ claim });
+    if (claimResult.kind !== 'acquired') {
+      throw new RuntimeContinuationRevalidationError(
+        'continuation_claim_conflict',
+        `Runtime continuation boundary is already claimed by ${claimResult.claim.claimId}`,
+      );
+    }
+    await this.deps.continuationFailpoint?.('after_continuation_claim_committed');
 
     const sessionRuns = await this.deps.runStore.listSessionRuns(continuation.sessionId);
     const existingClaim = sessionRuns.find(
@@ -762,12 +803,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
       );
     }
 
-    const userInput: UserMessageInput = {
-      turnId: continuation.turnId,
-      text: '',
-      parentRunId: continuation.sourceRunId,
-      parentTurnId: continuation.sourceTurnId,
-    };
+    const continuationToolBoundaryProtocol = runtimeToolBoundaryProtocol(this.deps, header);
     const run = new AgentRun({
       sessionId: continuation.sessionId,
       header,
@@ -777,15 +813,63 @@ export class RuntimeKernel implements RuntimeKernelLike {
       store: this.deps.store,
       runStore: this.deps.runStore,
       runtimeEventStore: this.deps.runtimeEventStore,
-      ...(runtimeToolBoundaryProtocol(this.deps, header)
-        ? { toolBoundaryProtocol: runtimeToolBoundaryProtocol(this.deps, header) }
+      ...(continuationToolBoundaryProtocol
+        ? { toolBoundaryProtocol: continuationToolBoundaryProtocol }
         : {}),
       repairRunRuntimeLedger: this.deps.repairRunRuntimeLedger,
       newId: this.deps.newId,
       now: this.deps.now,
       workspaceIdentity: continuation.safetySnapshot.workspaceIdentity,
-      effectiveOrchestration: effectiveOrchestrationForRun(sourceRun, header),
+      effectiveOrchestration,
+      claimedRunHeader: claim.targetRunHeader,
       continuationFailpoint: this.deps.continuationFailpoint,
+      commitContinuationStart: async (startedAt) => {
+        const source = claim.boundary.segments.at(-1)!;
+        const eventId = this.deps.newId();
+        const result = await continuationAuthority.commitContinuationStart({
+          claim,
+          event: {
+            id: eventId,
+            ...claim.target,
+            ts: startedAt,
+            partial: false,
+            role: 'system',
+            author: 'system',
+            actions: {
+              ...(continuationToolBoundaryProtocol
+                ? {
+                    runtimeProtocol: {
+                      toolBoundary: continuationToolBoundaryProtocol,
+                    },
+                  }
+                : {}),
+              continuationStart: {
+                protocol: 'continuation_start_v2',
+                provenance: 'runtime_admission',
+                claimId: claim.claimId,
+                boundaryDigest: claim.boundaryDigest,
+                immediateSource: {
+                  sessionId: source.identity.sessionId,
+                  invocationId: source.identity.invocationId,
+                  runId: source.identity.runId,
+                  turnId: source.identity.turnId,
+                  highWater: source.position.lastEventSeq,
+                  prefixDigest: source.prefixDigest,
+                },
+                replayManifestDigest: claim.boundary.manifestDigest,
+                providerProjectionVersion: claim.providerProjectionVersion,
+                providerReplayDigest: claim.providerReplayDigest,
+              },
+            },
+          },
+        });
+        if (!result.created) {
+          throw new Error(
+            'Continuation-start already existed; refusing to reissue provider admission',
+          );
+        }
+        return { startEventId: eventId, created: true };
+      },
       hooks: {
         reserveRun: async (targetSessionId, nextHeader, activeRun) => {
           const active = await this.reserveParentRun(
@@ -807,7 +891,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
     });
 
     this.attachExecutionClaim(execution, run);
-    yield* this.runAgentContinuation(continuation, run, execution);
+    yield* this.runAgentContinuation(continuation, run, execution, 'durable_continuation');
   }
 
   async *compactSession(
@@ -1067,8 +1151,8 @@ export class RuntimeKernel implements RuntimeKernelLike {
     input: ChildAgentRetryInput,
     execution: PendingExecutionClaim,
   ): AsyncIterable<SessionEvent> {
+    const continuation = snapshotRuntimeContinuation(input.continuation);
     await this.enterExecutionClaim(execution);
-    const { continuation } = input;
     if (continuation.sessionId !== sessionId) {
       throw new Error('Child retry continuation belongs to a different session');
     }
@@ -1102,15 +1186,6 @@ export class RuntimeKernel implements RuntimeKernelLike {
     if (linkedSnapshot && childTools.length !== linkedSnapshot.toolNames.length) {
       throw new Error('Linked child retry durable runtime tool snapshot is unavailable');
     }
-    const expertIdentity = linkedSnapshot ? undefined : parseExpertAgentId(definition.id);
-    const agentTeam: AgentTeamExecutionContext | undefined = expertIdentity
-      ? {
-          role: 'member',
-          teamId: expertIdentity.teamId,
-          agentId: definition.id,
-          parentRunId: input.parentRunId,
-        }
-      : undefined;
     const childHeader: SessionHeader = linkedSnapshot
       ? parentHeader
       : {
@@ -1126,7 +1201,134 @@ export class RuntimeKernel implements RuntimeKernelLike {
       agentId: definition.id,
       agentName: definition.name,
     };
+    const effectiveOrchestration = resolveEffectiveOrchestration('default', undefined);
+    if (!this.deps.runStore || !this.deps.runtimeEventStore) {
+      throw new Error('Child retry continuation requires AgentRunStore and RuntimeEventStore');
+    }
+    const sourceRun = await this.deps.runStore.readRun(sessionId, continuation.sourceRunId);
+    let durableAdmission:
+      | {
+          claimedRunHeader: AgentRunHeader;
+          commitContinuationStart: (
+            startedAt: number,
+          ) => Promise<{ startEventId: string; created: true }>;
+        }
+      | undefined;
+    if (input.admissionMode === 'durable_continuation') {
+      const continuationAuthority = requireRuntimeContinuationAuthority(
+        this.deps.runtimeEventStore,
+      );
+      const sourceEvents = await revalidateContinuationBoundary(
+        continuationAuthority,
+        continuation,
+      );
+      assertContinuationSourceUnchanged(continuation, sourceRun, sourceEvents);
+      if (!this.deps.inspectContinuationSafety) {
+        throw new Error('Child retry continuation requires an authoritative safety inspector');
+      }
+      const safetyObservation = await this.deps.inspectContinuationSafety(sessionId);
+      assertContinuationSafetyUnchanged(continuation, {
+        ...safetyObservation,
+        availableToolNames: childTools.map((tool) => tool.name),
+      });
+
+      const claimedAt = this.deps.now();
+      const targetRunHeader = continuationTargetRunHeaderForExecution({
+        continuation,
+        sessionHeader: childHeader,
+        userInput,
+        workspaceIdentity: continuation.safetySnapshot.workspaceIdentity,
+        effectiveOrchestration,
+        claimedAt,
+      });
+      const claim = continuationClaimForExecution(continuation, claimedAt, targetRunHeader);
+      const claimResult = await continuationAuthority.claimContinuation({
+        claim,
+      });
+      if (claimResult.kind !== 'acquired') {
+        throw new RuntimeContinuationRevalidationError(
+          'continuation_claim_conflict',
+          `Child retry continuation boundary is already claimed by ${claimResult.claim.claimId}`,
+        );
+      }
+      await this.deps.continuationFailpoint?.('after_continuation_claim_committed');
+      const continuationToolBoundaryProtocol = runtimeToolBoundaryProtocol(this.deps, childHeader);
+      durableAdmission = {
+        claimedRunHeader: claim.targetRunHeader,
+        commitContinuationStart: async (startedAt) => {
+          const source = claim.boundary.segments.at(-1)!;
+          const eventId = this.deps.newId();
+          const result = await continuationAuthority.commitContinuationStart({
+            claim,
+            event: {
+              id: eventId,
+              ...claim.target,
+              ts: startedAt,
+              partial: false,
+              role: 'system',
+              author: 'system',
+              actions: {
+                ...(continuationToolBoundaryProtocol
+                  ? {
+                      runtimeProtocol: {
+                        toolBoundary: continuationToolBoundaryProtocol,
+                      },
+                    }
+                  : {}),
+                continuationStart: {
+                  protocol: 'continuation_start_v2',
+                  provenance: 'runtime_admission',
+                  claimId: claim.claimId,
+                  boundaryDigest: claim.boundaryDigest,
+                  immediateSource: {
+                    sessionId: source.identity.sessionId,
+                    invocationId: source.identity.invocationId,
+                    runId: source.identity.runId,
+                    turnId: source.identity.turnId,
+                    highWater: source.position.lastEventSeq,
+                    prefixDigest: source.prefixDigest,
+                  },
+                  replayManifestDigest: claim.boundary.manifestDigest,
+                  providerProjectionVersion: claim.providerProjectionVersion,
+                  providerReplayDigest: claim.providerReplayDigest,
+                },
+              },
+            },
+          });
+          if (!result.created) {
+            throw new Error(
+              'Continuation-start already existed; refusing to reissue provider admission',
+            );
+          }
+          return { startEventId: eventId, created: true };
+        },
+      };
+    } else {
+      const readImmutable = this.deps.runtimeEventStore.readImmutableRuntimeEvents;
+      if (!readImmutable) {
+        throw new Error('Legacy child provider retry requires immutable RuntimeEvent reads');
+      }
+      if (sourceRun.status !== 'failed' || sourceRun.failureClass !== 'RateLimit') {
+        throw new Error('Legacy child provider retry requires a provider rate-limit failure');
+      }
+      const sourceEvents = await readImmutable.call(
+        this.deps.runtimeEventStore,
+        sessionId,
+        continuation.sourceRunId,
+      );
+      assertContinuationSourceUnchanged(continuation, sourceRun, sourceEvents);
+    }
+    const expertIdentity = linkedSnapshot ? undefined : parseExpertAgentId(definition.id);
+    const agentTeam: AgentTeamExecutionContext | undefined = expertIdentity
+      ? {
+          role: 'member',
+          teamId: expertIdentity.teamId,
+          agentId: definition.id,
+          parentRunId: input.parentRunId,
+        }
+      : undefined;
     const activeKey = childActiveKey(sessionId, continuation.turnId);
+    const continuationToolBoundaryProtocol = runtimeToolBoundaryProtocol(this.deps, childHeader);
     const run = new AgentRun({
       sessionId,
       header: childHeader,
@@ -1136,14 +1338,15 @@ export class RuntimeKernel implements RuntimeKernelLike {
       store: this.deps.store,
       runStore: this.deps.runStore,
       runtimeEventStore: this.deps.runtimeEventStore,
-      ...(runtimeToolBoundaryProtocol(this.deps, childHeader)
-        ? { toolBoundaryProtocol: runtimeToolBoundaryProtocol(this.deps, childHeader) }
+      ...(continuationToolBoundaryProtocol
+        ? { toolBoundaryProtocol: continuationToolBoundaryProtocol }
         : {}),
       repairRunRuntimeLedger: this.deps.repairRunRuntimeLedger,
       newId: this.deps.newId,
       now: this.deps.now,
       workspaceIdentity: continuation.safetySnapshot.workspaceIdentity,
-      effectiveOrchestration: resolveEffectiveOrchestration('default', undefined),
+      effectiveOrchestration,
+      ...(durableAdmission ?? {}),
       recordSessionMessages: false,
       hooks: {
         reserveRun: async (targetSessionId, nextHeader, activeRun) => {
@@ -1182,13 +1385,13 @@ export class RuntimeKernel implements RuntimeKernelLike {
     });
 
     this.attachExecutionClaim(execution, run);
-    // A provider retry replays the source ledger without recording a second
-    // user prompt and without turning the child into a session continuation.
+    // Both paths replay without a second user prompt. Only the durable mode
+    // consumes the source boundary through claim + continuation-start T1.
     yield* this.runAgentContinuation(
       continuation,
       run,
       execution,
-      false,
+      input.admissionMode,
       input.linkedSession === true,
       input.onRunStarted,
     );
@@ -1440,7 +1643,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
     continuation: RuntimeContinuation,
     run: AgentRun,
     execution: PendingExecutionClaim,
-    persistContinuationSource = true,
+    admissionMode: ChildAgentRetryInput['admissionMode'],
     bindHostedRoot = false,
     onRunStarted?: () => void | Promise<void>,
   ): AsyncIterable<SessionEvent> {
@@ -1449,7 +1652,9 @@ export class RuntimeKernel implements RuntimeKernelLike {
       this.inheritExecutionAbort(execution);
     let flowDone = false;
     const owners = this.createRunOwnerScope(run, execution);
-    let begin: Awaited<ReturnType<AgentRun['beginContinuation']>>;
+    let begin:
+      | Awaited<ReturnType<AgentRun['beginContinuation']>>
+      | Awaited<ReturnType<AgentRun['beginOperation']>>;
     try {
       if (bindHostedRoot) {
         owners.bindMessage(this.deps.messageAuthority, {
@@ -1459,9 +1664,10 @@ export class RuntimeKernel implements RuntimeKernelLike {
         });
       }
       begin = await this.runBackendActivation(async () => {
-        const started = persistContinuationSource
-          ? await run.beginContinuation(continuation)
-          : await run.beginOperation();
+        const started =
+          admissionMode === 'durable_continuation'
+            ? await run.beginContinuation(continuation)
+            : await run.beginOperation();
         await owners.bindInteraction(this.deps.interactionAuthority, {
           sessionId: continuation.sessionId,
           turnId: run.turnId,
@@ -1472,6 +1678,13 @@ export class RuntimeKernel implements RuntimeKernelLike {
       await onRunStarted?.();
     } catch (error) {
       releaseExecutionAbort();
+      if (
+        admissionMode === 'durable_continuation' &&
+        error instanceof ContinuationStartCommitError
+      ) {
+        await owners.abandonUnstartedContinuation(error);
+        return;
+      }
       await this.finalizeFailedRunStart(owners, run, execution, error);
       return;
     }
@@ -1516,44 +1729,56 @@ export class RuntimeKernel implements RuntimeKernelLike {
       providers: { newId: this.deps.newId, now: this.deps.now },
       stopOnTerminal: false,
       ...(run.toolBoundaryProtocol ? { toolBoundaryProtocol: run.toolBoundaryProtocol } : {}),
-      commitContinuationStart: async (event) => {
-        await run.recordRuntimeEvents([event], { requireTerminalWrite: true });
-        if (persistContinuationSource) {
-          await this.deps.continuationFailpoint?.('after_continuation_start_committed');
-        }
-      },
     });
     if (run.isStopped()) abortController.abort();
     let runnerFailure: unknown;
-    const runnerResult = runner
-      .resume(continuation, {
-        source: this.deps.runtimeSource ?? 'desktop',
-        orchestration: run.effectiveOrchestration,
-        abortSignal: abortController.signal,
-      })
-      .then(
-        async (result) => {
-          if (!flowDone) {
-            try {
-              flowDone = true;
-              await owners.finalize();
-              owners.releaseMessage();
-              sessionEvents.close();
-            } catch (error) {
-              runnerFailure = error;
-              sessionEvents.fail(error);
-              throw error;
-            }
+    const runnerResult = (
+      admissionMode === 'durable_continuation'
+        ? runAdmittedRuntimeContinuation(
+            runner,
+            issueRuntimeContinuationAdmissionReceipt(
+              runner,
+              continuation,
+              'continuationStartAdmission' in begin
+                ? begin.continuationStartAdmission
+                : (() => {
+                    throw new Error('Durable continuation is missing its start admission');
+                  })(),
+              { orchestration: run.effectiveOrchestration },
+            ),
+            {
+              source: this.deps.runtimeSource ?? 'desktop',
+              abortSignal: abortController.signal,
+            },
+          )
+        : runLegacyProviderRetry(runner, continuation, {
+            source: this.deps.runtimeSource ?? 'desktop',
+            orchestration: run.effectiveOrchestration,
+            abortSignal: abortController.signal,
+          })
+    ).then(
+      async (result) => {
+        if (!flowDone) {
+          try {
+            flowDone = true;
+            await owners.finalize();
+            owners.releaseMessage();
+            sessionEvents.close();
+          } catch (error) {
+            runnerFailure = error;
+            sessionEvents.fail(error);
+            throw error;
           }
-          await this.deps.runtimeInvocationObserver?.(result);
-          return result;
-        },
-        (error) => {
-          runnerFailure = error;
-          sessionEvents.fail(error);
-          throw error;
-        },
-      );
+        }
+        await this.deps.runtimeInvocationObserver?.(result);
+        return result;
+      },
+      (error) => {
+        runnerFailure = error;
+        sessionEvents.fail(error);
+        throw error;
+      },
+    );
 
     try {
       for await (const event of sessionEvents) {
@@ -3102,6 +3327,174 @@ export class RuntimeKernel implements RuntimeKernelLike {
   }
 }
 
+function requireRuntimeContinuationAuthority(
+  store: RuntimeEventStore,
+): RuntimeContinuationAuthorityStore {
+  const candidate = store as Partial<RuntimeContinuationAuthorityStore>;
+  if (
+    candidate.continuationAuthorityCapability !== 'runtime_continuation_authority_v1' ||
+    typeof candidate.readImmutableRuntimeEvents !== 'function' ||
+    typeof candidate.readImmutableRuntimePrefix !== 'function' ||
+    typeof candidate.claimContinuation !== 'function' ||
+    typeof candidate.readContinuationClaimStateByBoundary !== 'function' ||
+    typeof candidate.listContinuationClaimsForRecovery !== 'function' ||
+    typeof candidate.commitContinuationStart !== 'function' ||
+    typeof candidate.commitContinuationRepairStart !== 'function'
+  ) {
+    throw new Error('Runtime continuation requires SQLite continuation authority');
+  }
+  return candidate as RuntimeContinuationAuthorityStore;
+}
+
+async function revalidateContinuationBoundary(
+  store: RuntimeContinuationAuthorityStore,
+  continuation: RuntimeContinuation,
+): Promise<RuntimeEvent[]> {
+  if (
+    !continuation.boundary ||
+    !continuation.providerReplayDigest ||
+    continuation.providerProjectionVersion !== PROVIDER_REPLAY_PROJECTION_VERSION
+  ) {
+    throw new RuntimeContinuationRevalidationError(
+      'source_identity_changed',
+      'Runtime continuation is missing its versioned immutable boundary',
+    );
+  }
+  const prefixes: ImmutableRuntimePrefixV1[] = [];
+  const immediateSourceIndex = continuation.boundary.segments.length - 1;
+  for (const [index, segment] of continuation.boundary.segments.entries()) {
+    const prefix = await store.readImmutableRuntimePrefix({
+      sessionId: segment.identity.sessionId,
+      runId: segment.identity.runId,
+      // Ancestor segments are immutable lineage pins. The immediate source is
+      // different: execution must observe its latest durable head so H+1
+      // cannot be hidden by rereading only the already-planned prefix.
+      ...(index === immediateSourceIndex ? {} : { upToEventSeq: segment.position.lastEventSeq }),
+    });
+    if (
+      !isDeepStrictEqual(prefix.identity, segment.identity) ||
+      !isDeepStrictEqual(prefix.position, segment.position) ||
+      prefix.prefixDigest !== segment.prefixDigest
+    ) {
+      throw new RuntimeContinuationRevalidationError(
+        'source_identity_changed',
+        `Runtime continuation boundary changed for ${segment.identity.runId}`,
+      );
+    }
+    prefixes.push(prefix);
+  }
+  const replay = buildContinuationReplayPlan({
+    prefixes: prefixes as [ImmutableRuntimePrefixV1, ...ImmutableRuntimePrefixV1[]],
+    providerProjectionVersion: continuation.providerProjectionVersion,
+  });
+  if (
+    replay.kind !== 'replayable' ||
+    replay.plan.boundary.manifestDigest !== continuation.boundary.manifestDigest ||
+    replay.plan.providerReplayDigest !== continuation.providerReplayDigest ||
+    !isDeepStrictEqual(replay.plan.runtimeContext, continuation.runtimeContext)
+  ) {
+    throw new RuntimeContinuationRevalidationError(
+      'source_replay_changed',
+      'Runtime continuation replay changed after planning',
+    );
+  }
+  return [...prefixes.at(-1)!.events];
+}
+
+function continuationClaimForExecution(
+  continuation: RuntimeContinuation,
+  claimedAt: number,
+  targetRunHeader: AgentRunHeader,
+): ContinuationClaimV1 {
+  if (
+    !continuation.claimId ||
+    !continuation.boundary ||
+    !continuation.providerReplayDigest ||
+    continuation.providerProjectionVersion !== PROVIDER_REPLAY_PROJECTION_VERSION
+  ) {
+    throw new RuntimeContinuationRevalidationError(
+      'source_identity_changed',
+      'Runtime continuation is missing its durable claim identity',
+    );
+  }
+  return {
+    protocol: 'continuation_claim_v1',
+    claimId: continuation.claimId,
+    boundaryDigest: continuation.boundary.manifestDigest,
+    boundary: continuation.boundary,
+    providerProjectionVersion: continuation.providerProjectionVersion,
+    providerReplayDigest: continuation.providerReplayDigest,
+    target: {
+      sessionId: continuation.sessionId,
+      invocationId: continuation.invocationId,
+      runId: continuation.runId,
+      turnId: continuation.turnId,
+    },
+    targetRunHeader,
+    claimedAt,
+  };
+}
+
+function continuationTargetRunHeaderForExecution(input: {
+  continuation: RuntimeContinuation;
+  sessionHeader: SessionHeader;
+  userInput: UserMessageInput;
+  workspaceIdentity: string;
+  effectiveOrchestration: EffectiveOrchestration;
+  claimedAt: number;
+}): AgentRunHeader {
+  const { continuation, sessionHeader, userInput, effectiveOrchestration, claimedAt } = input;
+  if (!continuation.claimId || !continuation.boundary) {
+    throw new RuntimeContinuationRevalidationError(
+      'source_identity_changed',
+      'Runtime continuation is missing its durable target-header identity',
+    );
+  }
+  const source = continuation.boundary.segments.at(-1)!;
+  return {
+    runId: continuation.runId,
+    invocationId: continuation.invocationId,
+    sessionId: continuation.sessionId,
+    turnId: continuation.turnId,
+    status: 'created',
+    backendKind: sessionHeader.backend,
+    llmConnectionSlug: sessionHeader.llmConnectionSlug,
+    modelId: sessionHeader.model,
+    cwd: sessionHeader.cwd,
+    workspaceIdentity: input.workspaceIdentity,
+    permissionMode: sessionHeader.permissionMode,
+    collaborationMode: sessionHeader.collaborationMode ?? 'agent',
+    orchestrationMode: effectiveOrchestration.mode,
+    orchestrationSource: effectiveOrchestration.source,
+    agentSwarmAuthorization: effectiveOrchestration.agentSwarmAuthorization,
+    createdAt: claimedAt,
+    updatedAt: claimedAt,
+    ...(userInput.parentRunId ? { parentRunId: userInput.parentRunId } : {}),
+    ...(userInput.resumedFromRunId ? { resumedFromRunId: userInput.resumedFromRunId } : {}),
+    ...(userInput.retriedFromRunId ? { retriedFromRunId: userInput.retriedFromRunId } : {}),
+    ...(userInput.parentTurnId ? { parentTurnId: userInput.parentTurnId } : {}),
+    ...(userInput.retriedFromTurnId ? { retriedFromTurnId: userInput.retriedFromTurnId } : {}),
+    ...(userInput.regeneratedFromTurnId
+      ? { regeneratedFromTurnId: userInput.regeneratedFromTurnId }
+      : {}),
+    ...(userInput.branchOfTurnId ? { branchOfTurnId: userInput.branchOfTurnId } : {}),
+    ...(userInput.parentSessionId ? { parentSessionId: userInput.parentSessionId } : {}),
+    ...(userInput.agentId ? { agentId: userInput.agentId } : {}),
+    ...(userInput.agentName ? { agentName: userInput.agentName } : {}),
+    continuationSource: {
+      protocol: 'continuation_source_v2',
+      claimId: continuation.claimId,
+      boundaryDigest: continuation.boundary.manifestDigest,
+      sourceInvocationId: source.identity.invocationId,
+      sourceRunId: source.identity.runId,
+      sourceTurnId: source.identity.turnId,
+      sourceRuntimeEventHighWater: source.position.lastEventSeq,
+      sourcePrefixDigest: source.prefixDigest,
+      replayManifestDigest: continuation.boundary.manifestDigest,
+    },
+  };
+}
+
 function assertContinuationSourceUnchanged(
   continuation: RuntimeContinuation,
   sourceRun: AgentRunHeader,
@@ -3145,6 +3538,11 @@ function assertContinuationSourceUnchanged(
       'Runtime continuation source ledger identity changed after planning',
     );
   }
+  if (continuation.boundary) {
+    // Composite immutable-prefix and provider replay equality were already
+    // revalidated by revalidateContinuationBoundary().
+    return;
+  }
   const replayPlan = buildResumePlanFromRuntimeEvents(sourceEvents, {
     expectedRuntimeEventHighWater: continuation.sourceRuntimeEventHighWater,
   });
@@ -3177,14 +3575,14 @@ function assertContinuationSafetyUnchanged(
       'Runtime continuation background operation started after planning',
     );
   }
-  const availableToolNames = new Set(observation.availableToolNames);
-  const missingToolNames = snapshot.availableToolNames.filter(
-    (name) => !availableToolNames.has(name),
-  );
-  if (missingToolNames.length > 0) {
+  const plannedToolNames = [...new Set(snapshot.availableToolNames)].sort();
+  const currentToolNames = [...new Set(observation.availableToolNames)].sort();
+  if (!isDeepStrictEqual(plannedToolNames, currentToolNames)) {
     throw new RuntimeContinuationRevalidationError(
       'tool_catalog_changed',
-      `Runtime continuation tool catalog changed after planning: ${missingToolNames.join(', ')}`,
+      `Runtime continuation tool catalog changed after planning: planned [${plannedToolNames.join(
+        ', ',
+      )}], current [${currentToolNames.join(', ')}]`,
     );
   }
   if (snapshot.workspaceCheckpoint) {
@@ -3200,6 +3598,18 @@ function assertContinuationSafetyUnchanged(
       );
     }
   }
+}
+
+function snapshotRuntimeContinuation(continuation: RuntimeContinuation): RuntimeContinuation {
+  return deepFreezeContinuationValue(structuredClone(continuation));
+}
+
+function deepFreezeContinuationValue<T>(value: T): T {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value as Record<string, unknown>)) {
+    deepFreezeContinuationValue(nested);
+  }
+  return Object.freeze(value);
 }
 
 interface RuntimeRunOwnerScopeCallbacks {
@@ -3269,6 +3679,13 @@ class RuntimeRunOwnerScope {
     await this.run.recordFailure(failure);
     await this.callbacks.finalizeExecution(() => this.run.finalize());
     throw failure;
+  }
+
+  async abandonUnstartedContinuation(error: unknown): Promise<never> {
+    this.settleReservedExecution({ ok: false, error });
+    this.releaseMessage();
+    await this.callbacks.finalizeExecution(async () => undefined);
+    throw error;
   }
 
   finalize(): Promise<void> {

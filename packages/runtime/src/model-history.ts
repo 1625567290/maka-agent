@@ -47,6 +47,8 @@ import type { AttachmentRef, QuoteRef } from '@maka/core/events';
 import type { ModelMessage, UserContent, UserModelMessage } from './model-protocol.js';
 import { projectBashToolResultForModel } from './bash-model-output.js';
 
+export const PROVIDER_REPLAY_PROJECTION_VERSION = 1;
+
 // ============================================================================
 // Output type
 // ============================================================================

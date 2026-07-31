@@ -954,14 +954,27 @@ describe('projectRuntimeEventsToStoredMessages', () => {
           role: 'system',
           author: 'system',
           actions: {
-            stateDelta: { continuationStart: true },
-            runtimeProtocol: { toolBoundary: 't1_after_preflight_v1' },
-          },
-          refs: {
-            sourceInvocationId: 'source-invocation',
-            sourceRunId: 'source-run',
-            sourceTurnId: 'source-turn',
-            sourceRuntimeEventHighWater: 2,
+            continuationStart: {
+              protocol: 'continuation_start_v2',
+              provenance: 'runtime_admission',
+              claimId: 'claim-1',
+              boundaryDigest:
+                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              immediateSource: {
+                sessionId: 'session-1',
+                invocationId: 'source-invocation',
+                runId: 'source-run',
+                turnId: 'source-turn',
+                highWater: 2,
+                prefixDigest:
+                  'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+              },
+              replayManifestDigest:
+                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+              providerProjectionVersion: 1,
+              providerReplayDigest:
+                'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+            },
           },
         }),
       ],
@@ -1580,6 +1593,27 @@ const ACTION_COVERAGE_SAMPLES: ActionCoverageSamples = {
   // entry covers the field, not its contents. A new key inside a state delta is
   // out of reach of any contract keyed on the action surface.
   stateDelta: { action: { continuationStart: true } },
+  continuationStart: {
+    action: {
+      protocol: 'continuation_start_v2',
+      provenance: 'runtime_admission',
+      claimId: 'coverage-claim',
+      boundaryDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      immediateSource: {
+        sessionId: 'coverage-session',
+        invocationId: 'coverage-invocation',
+        runId: 'coverage-run',
+        turnId: 'coverage-turn',
+        highWater: 1,
+        prefixDigest: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      },
+      replayManifestDigest:
+        'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+      providerProjectionVersion: 1,
+      providerReplayDigest:
+        'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+    },
+  },
   artifactDelta: { action: { 'artifact-1': 42 } },
   permissionRequest: {
     action: {
