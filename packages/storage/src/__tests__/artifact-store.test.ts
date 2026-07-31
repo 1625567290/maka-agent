@@ -185,6 +185,64 @@ describe('FileArtifactStore', () => {
     });
   });
 
+  test('copies an exact turn-scoped Artifact snapshot and purges only the target Session', async () => {
+    await withWorkspace(async (root) => {
+      const authority = createArtifactStoreWriteAuthority(root);
+      await authority.recover();
+      const { store } = authority;
+      const retained = await store.create({
+        ...artifactInput('retained-artifact', 'retained', 10),
+        turnId: 'turn-retained',
+        mimeType: 'text/plain',
+      });
+      const deleted = await store.create({
+        ...artifactInput('deleted-artifact', 'deleted', 11),
+        turnId: 'turn-retained',
+      });
+      await store.delete(deleted.id);
+      await store.create({
+        ...artifactInput('later-artifact', 'later', 20),
+        turnId: 'turn-later',
+      });
+
+      const copied = await store.copyConversationArtifacts({
+        sourceSessionId: 'session-1',
+        targetSessionId: 'session-copy',
+        turnIds: ['turn-retained'],
+      });
+      const copiedId = copied.artifactIds.get(retained.id);
+      const copiedDeletedId = copied.artifactIds.get(deleted.id);
+      assert.ok(copiedId);
+      assert.ok(copiedDeletedId);
+      assert.notEqual(copiedId, retained.id);
+      const target = await store.list('session-copy');
+      assert.equal(target.length, 1);
+      assert.equal(target[0]?.id, copiedId);
+      assert.equal(target[0]?.turnId, retained.turnId);
+      assert.equal(copied.relativePaths.get(retained.relativePath), target[0]?.relativePath);
+      assert.deepEqual(await store.readText(copiedId!), {
+        ok: true,
+        text: 'retained',
+      });
+      const targetWithTombstones = await store.list('session-copy', { includeDeleted: true });
+      assert.equal(targetWithTombstones.find((record) => record.id === copiedId)?.status, 'live');
+      const copiedDeleted = targetWithTombstones.find((record) => record.id === copiedDeletedId);
+      assert.equal(copiedDeleted?.status, 'deleted');
+      assert.equal(copied.relativePaths.get(deleted.relativePath), copiedDeleted?.relativePath);
+      assert.deepEqual(await store.readText(copiedDeletedId!, { includeDeleted: true }), {
+        ok: true,
+        text: 'deleted',
+      });
+
+      await store.purgeSessionArtifacts('session-copy');
+      assert.deepEqual(await store.list('session-copy'), []);
+      assert.deepEqual((await store.list('session-1')).map((record) => record.id).sort(), [
+        'later-artifact',
+        'retained-artifact',
+      ]);
+    });
+  });
+
   test('user delete evaluates current-generation policy before tombstone state', async () => {
     await withWorkspace(async (root) => {
       const authority = createArtifactStoreWriteAuthority(root);

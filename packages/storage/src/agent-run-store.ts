@@ -40,6 +40,7 @@ import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_COUNT,
   messageContentsEqual,
+  scanToolLedger,
   validateGenericToolLedgerAppend,
   validateToolLedgerTransition,
   type AgentRunEvent,
@@ -138,7 +139,16 @@ export interface DurableAgentRunStore extends AgentRunStore, RootTurnAdmissionSt
   close?(): void;
 }
 
+export interface ConversationCopyRuntimeEventBatch {
+  readonly runId: string;
+  readonly events: readonly RuntimeEvent[];
+}
+
 export interface DurableRuntimeEventStore extends RuntimeEventStore {
+  importConversationCopyRuntimeEvents(
+    sessionId: string,
+    batches: readonly ConversationCopyRuntimeEventBatch[],
+  ): Promise<void>;
   readImmutableRuntimeEvents(sessionId: string, runId: string): Promise<RuntimeEvent[]>;
   readImmutableSteeringMessageProof(
     sessionId: string,
@@ -1771,6 +1781,59 @@ class FileRuntimeEventStore implements DurableRuntimeEventStore {
     await this.appendRuntimeEventForRun(sessionId, runId, canonicalEvent, options);
   }
 
+  async importConversationCopyRuntimeEvents(
+    sessionId: string,
+    batches: readonly ConversationCopyRuntimeEventBatch[],
+  ): Promise<void> {
+    assertSafeId(sessionId, 'Invalid session id');
+    const canonicalBatches = batches.map(({ runId, events }) => {
+      assertSafeId(runId, 'Invalid run id');
+      return {
+        runId,
+        events: events.map(canonicalizeRuntimeEventForStorage),
+      };
+    });
+    const canonicalEvents = canonicalBatches.flatMap(({ events }) => events);
+    if (canonicalEvents.some((event) => event.partial)) {
+      throw new Error('Conversation copy cannot import partial RuntimeEvents');
+    }
+    const scan = scanToolLedger(canonicalEvents);
+    if (scan.hasCorruption) {
+      throw new Error(
+        `Conversation copy RuntimeEvent ledger is corrupt: ${scan.issues[0]?.code ?? 'unknown'}`,
+      );
+    }
+
+    for (const { runId, events } of canonicalBatches) {
+      await this.withQueue(sessionId, runId, async () => {
+        const header = await this.readRunHeader(sessionId, runId);
+        for (const event of events) decodeRuntimeEvent(event, header);
+        const path = this.runtimeEventsPath(sessionId, runId);
+        const existing = await readRuntimeEventJsonl(path, header);
+        if (existing.length > 0) {
+          if (!isDeepStrictEqual(existing, events)) {
+            throw new Error(`Conversation copy RuntimeEvent identity conflict for run ${runId}`);
+          }
+        } else if (events.length > 0) {
+          await appendJsonl(
+            path,
+            `${events.map((event) => encodeCanonicalRuntimeEvent(event).json).join('\n')}\n`,
+            { durable: true, durabilityRoot: this.durabilityRoot },
+          );
+        }
+        for (const event of events) {
+          await this.settleImmutableRuntimeEventPostEffects({
+            sessionId,
+            runId,
+            event,
+            path,
+            ensureDurability: false,
+          });
+        }
+      });
+    }
+  }
+
   private async appendRuntimeEventForRun(
     sessionId: string,
     runId: string,
@@ -2955,6 +3018,14 @@ function isExclusiveWriteTemp(name: string, targetName: string): boolean {
 function hasExactKeys(record: Record<string, unknown>, expected: readonly string[]): boolean {
   const keys = Object.keys(record);
   return keys.length === expected.length && expected.every((key) => Object.hasOwn(record, key));
+}
+
+async function syncDirectoryIfPresent(path: string): Promise<void> {
+  try {
+    await syncDirectory(path);
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
+  }
 }
 
 function isMissingFile(error: unknown): boolean {

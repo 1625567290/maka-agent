@@ -20,6 +20,10 @@ import {
   type RootTurnSourceMessageReceipt,
 } from './agent-run-store.js';
 import {
+  createConversationOperationalStateStore,
+  type ConversationOperationalStateStore,
+} from './conversation-operational-state.js';
+import {
   createSqliteMessageReceiptStore,
   type MessageReceiptStore,
 } from './message-receipt-store.js';
@@ -99,6 +103,7 @@ export type ExecutionMessageReceiptWriter = MessageReceiptStore;
 interface ExecutionStoresWriterBase<K extends StorageRootKind> {
   readonly kind: K;
   readonly [executionStoresWriterBrand]: K;
+  purgeConversationOperationalState(sessionId: string): Promise<void>;
   readonly sessionStore: Readonly<ExecutionSessionWriter>;
   readonly agentRunStore: Readonly<ExecutionAgentRunWriter>;
   readonly runtimeEventStore: Readonly<ExecutionRuntimeEventWriter>;
@@ -249,10 +254,23 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
     throw error;
   });
   const runtimeEventStore = runtimePersistence.runtimeEventStore;
+  let conversationOperationalStateStore: ConversationOperationalStateStore;
+  try {
+    conversationOperationalStateStore = createConversationOperationalStateStore(
+      lease.canonicalPath,
+    );
+  } catch (error) {
+    await closeExecutionStorePersistence(sessionStore, runtimePersistence, {
+      agentRunStore,
+      interactionStore,
+    }).catch(() => {});
+    throw error;
+  }
   const messageReceiptStore = createSqliteMessageReceiptStore(lease.canonicalPath);
   await Promise.all([agentRunStore.ready?.(), messageReceiptStore.ready()]).catch(async (error) => {
     await closeExecutionStorePersistence(sessionStore, runtimePersistence, {
       agentRunStore,
+      conversationOperationalStateStore,
       messageReceiptStore,
       interactionStore,
     }).catch(() => {});
@@ -265,12 +283,16 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
     ...extension,
     kind,
     [executionStoresWriterBrand]: kind,
+    purgeConversationOperationalState: (sessionId) =>
+      run(() => conversationOperationalStateStore.purge(sessionId)),
     sessionStore: {
       create: (input, initialBoundary) => run(() => sessionStore.create(input, initialBoundary)),
       probeStableSessionCreate: (sessionId, requestFingerprint) =>
         run(() => sessionStore.probeStableSessionCreate(sessionId, requestFingerprint)),
       createStableSession: (request, initialBoundary) =>
         run(() => sessionStore.createStableSession(request, initialBoundary)),
+      discardStableConversationCopy: (sessionId, requestFingerprint) =>
+        run(() => sessionStore.discardStableConversationCopy(sessionId, requestFingerprint)),
       createSubagent: (input, initialBoundary) =>
         run(() => sessionStore.createSubagent(input, initialBoundary)),
       createAgentGraphOperator: (input, request, expectedRevision, initialBoundary) =>
@@ -329,6 +351,7 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
       close: () =>
         closeExecutionStorePersistence(sessionStore, runtimePersistence, {
           agentRunStore,
+          conversationOperationalStateStore,
           messageReceiptStore,
           interactionStore,
         }),
@@ -366,6 +389,8 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
       toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol,
       appendRuntimeEvent: (sessionId, runId, event, options) =>
         run(() => runtimeEventStore.appendRuntimeEvent(sessionId, runId, event, options)),
+      importConversationCopyRuntimeEvents: (sessionId, batches) =>
+        run(() => runtimeEventStore.importConversationCopyRuntimeEvents(sessionId, batches)),
       ensureTerminalRuntimeEventDurable: (sessionId, runId, event) =>
         run(() => runtimeEventStore.ensureTerminalRuntimeEventDurable(sessionId, runId, event)),
       readRuntimeEvents: (sessionId, runId) =>
@@ -502,6 +527,7 @@ async function closeExecutionStorePersistence(
   runtimePersistence: { close(): void },
   extras: {
     agentRunStore?: Pick<DurableAgentRunStore, 'close'>;
+    conversationOperationalStateStore?: Pick<ConversationOperationalStateStore, 'close'>;
     messageReceiptStore?: { close(): void };
     interactionStore?:
       | InteractiveInteractionStoreReaderFacade
@@ -521,6 +547,11 @@ async function closeExecutionStorePersistence(
   }
   try {
     extras.agentRunStore?.close?.();
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    extras.conversationOperationalStateStore?.close();
   } catch (error) {
     errors.push(error);
   }

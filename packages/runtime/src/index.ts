@@ -45,6 +45,19 @@ export type {
   AgentOutputResult,
   StopSessionInput,
 } from './session-manager.js';
+export {
+  archivedToolResultContainsConversationOwnedReferences,
+  cloneConversationRuntimeLedger,
+  createConversationCopySlice,
+  prepareConversationRuntimeLedgerCopy,
+} from './conversation-copy.js';
+export type {
+  CloneConversationRuntimeLedgerInput,
+  CloneConversationRuntimeLedgerResult,
+  ConversationCopyArtifactReferenceMap,
+  ConversationCopySlice,
+  ConversationRuntimeLedgerCopyPlan,
+} from './conversation-copy.js';
 export type { SubagentExecutionRef } from './subagent-execution.js';
 export {
   AGENT_GRAPH_RECORD_FACETS,
