@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup as renderReactToStaticMarkup } from 'react-dom/server';
 import type { StoredMessage, ToolResultContent } from '@maka/core';
-import { ToolActivity, ToolTrow } from '../tool-activity.js';
+import { ToolActivity, ToolErrorDetails, ToolTrow } from '../tool-activity.js';
 import { ToolResultPreview } from '../tool-activity/tool-result-preview.js';
 import {
   createToolDisclosureState,
@@ -30,6 +30,17 @@ function renderTool(item: ToolActivityItem): string {
 }
 
 describe('tool activity presentation', () => {
+  it('does not mount collapsed raw error diagnostics', () => {
+    const markup = renderToStaticMarkup(createElement(
+      ToolErrorDetails,
+      null,
+      createElement('pre', null, 'large private diagnostic payload'),
+    ));
+
+    assert.match(markup, /aria-expanded="false"/);
+    assert.doesNotMatch(markup, /large private diagnostic payload/);
+  });
+
   it('prefers a declared semantic kind over the legacy tool-name fallback', () => {
     const item: ToolActivityItem = {
       toolUseId: 'tool-kind',
@@ -68,9 +79,26 @@ describe('tool activity presentation', () => {
       ],
     });
 
-    assert.doesNotMatch(markup, /Get-ChildItem/);
-    assert.doesNotMatch(markup, /实时输出/);
-    assert.match(markup, /检查当前项目结构/);
+    const trigger = markup.match(/(<button[^>]*aria-expanded="false"[\s\S]*?<\/button>)/)?.[1] ?? '';
+    assert.match(trigger, /检查当前项目结构/);
+    assert.doesNotMatch(trigger, /Get-ChildItem|实时输出/);
+    assert.match(markup, /class="[^"]*astryx-collapsible-content[^"]*"/);
+    assert.doesNotMatch(markup, /Get-ChildItem|packages|data-slot="tool-output"/);
+  });
+
+  it('delegates the tool disclosure button, chevron, and content linkage to Astryx', () => {
+    const markup = renderTool({
+      toolUseId: 'tool-astryx',
+      toolName: 'Read',
+      status: 'completed',
+      args: { path: '/tmp/example.ts' },
+    });
+
+    assert.match(markup, /class="[^"]*astryx-collapsible[^"]*"/);
+    assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*aria-controls="[^"]+"/);
+    assert.match(markup, /class="[^"]*astryx-collapsible-content[^"]*"/);
+    const trigger = markup.match(/(<button[^>]*aria-expanded="false"[\s\S]*?<\/button>)/)?.[1] ?? '';
+    assert.doesNotMatch(trigger, /lucide-chevron-right/);
   });
 
   it('preserves a manual expansion across ordinary status changes', () => {
@@ -166,10 +194,9 @@ describe('tool activity presentation', () => {
       },
     });
 
-    // Collapsed: the diagnostic body is not mounted…
-    assert.doesNotMatch(markup, /Error: boom/);
-    // …but the failure stays visible on the summary line.
-    assert.match(markup, /1 个失败/);
+    const trigger = markup.match(/(<button[^>]*aria-expanded="false"[\s\S]*?<\/button>)/)?.[1] ?? '';
+    assert.doesNotMatch(trigger, /Error: boom/);
+    assert.match(trigger, /1 个失败/);
   });
 
   it('presents a command sandbox denial as blocked instead of failed', () => {
