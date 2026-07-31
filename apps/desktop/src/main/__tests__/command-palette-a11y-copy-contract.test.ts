@@ -134,9 +134,11 @@ describe('Command palette accessibility and visible copy', () => {
       /<DialogContent[\s\S]*?showClose=\{false\}/,
       'the palette must disable DialogContent\'s absolute close button',
     );
+    // The close action uses the dedicated Astryx IconButton; label becomes
+    // its accessible name and the icon rides the `icon` prop.
     assert.match(
       src,
-      /<div className="maka-palette-header">[\s\S]*?<InputGroup[\s\S]*?<\/InputGroup>[\s\S]*?<Button[\s\S]*?aria-label=\{copy\.closeLabel\}[\s\S]*?onClick=\{props\.onClose\}[\s\S]*?<X aria-hidden="true" \/>[\s\S]*?<\/Button>[\s\S]*?<\/div>/,
+      /<div className="maka-palette-header">[\s\S]*?<InputGroup[\s\S]*?<\/InputGroup>[\s\S]*?<IconButton[\s\S]*?icon=\{<X aria-hidden="true" \/>\}[\s\S]*?label=\{copy\.closeLabel\}[\s\S]*?onClick=\{props\.onClose\}[\s\S]*?\/>[\s\S]*?<\/div>/,
       'the close button must be a sibling immediately to the right of the input group',
     );
     assert.match(headerStyle, /grid-template-columns:\s*minmax\(0, 1fr\) var\(--h-control-md\);/);

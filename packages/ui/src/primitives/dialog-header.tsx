@@ -19,7 +19,7 @@
 
 import type { ReactNode } from 'react';
 import { X } from '../icons.js';
-import { Button } from '../ui.js';
+import { IconButton } from '@astryxdesign/core';
 import { useUiLocale } from '../locale-context.js';
 import { getShellControlsCopy } from '../shell-controls-copy.js';
 
@@ -71,16 +71,14 @@ export function DialogHeader({ icon, title, titleId, subtitle, onClose, closeLab
           </p>
         )}
       </div>
-      <Button
-        type="button"
-        variant="quiet"
-        size="icon-sm"
-        aria-label={closeLabel ?? copy.shared.close}
+      <IconButton
+        variant="ghost"
+        size="sm"
+        label={closeLabel ?? copy.shared.close}
+        icon={<X aria-hidden="true" />}
         onClick={onClose}
         data-slot="dialog-header-close"
-      >
-        <X aria-hidden="true" />
-      </Button>
+      />
     </header>
   );
 }

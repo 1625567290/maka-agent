@@ -132,7 +132,10 @@ describe('Settings form accessibility labels', () => {
 
     assert.match(settings, /SettingsSelect,/);
     assert.match(settingsSelect, /SelectItem,[\s\S]*SelectPopup,[\s\S]*SelectPortal,[\s\S]*SelectPositioner,[\s\S]*SelectRoot,[\s\S]*SelectTrigger,[\s\S]*SelectValue,/);
-    assert.match(passwordInput, /import \{[^}]*\bButton\b[^}]*\bInput\b[^}]*\buseMountedRef\b[^}]*\buseToast\b[^}]*\buseUiLocale\b[^}]*\} from '@maka\/ui';/);
+    assert.match(
+      passwordInput,
+      /import \{[^}]*\bIconButton\b[^}]*\bInput\b[^}]*\buseMountedRef\b[^}]*\buseToast\b[^}]*\buseUiLocale\b[^}]*\} from '@maka\/ui';/,
+    );
     // ProvidersPanel sources its UI from the shared @maka/ui primitives;
     // tolerant of single- vs multi-line import formatting.
     const providersPanelUiImports = providersPanel.match(/import \{[^}]*\} from '@maka\/ui';/g)?.join('\n') ?? '';
@@ -220,8 +223,10 @@ describe('Settings form accessibility labels', () => {
     assert.match(passwordInput, /if \(mountedRef\.current\) showCopiedFeedback\(\)/);
     assert.match(passwordInput, /if \(mountedRef\.current\) toast\.error\(copy\.copyFailed, copy\.clipboardUnavailable\)/);
     assert.match(passwordInput, /copyGuard\.finish\(\);[\s\S]*if \(mountedRef\.current\) setCopying\(false\)/);
-    assert.match(passwordInput, /disabled=\{copying\}/);
-    assert.match(passwordInput, /aria-label=\{copying \? copy\.copying : justCopied \? copy\.copied : copy\.copy\}/);
+    // #1565 PR 3: Astryx Button — `isDisabled` replaces `disabled`, and the
+    // icon-only button's `label` prop is rendered as its aria-label.
+    assert.match(passwordInput, /isDisabled=\{copying\}/);
+    assert.match(passwordInput, /label=\{copying \? copy\.copying : justCopied \? copy\.copied : copy\.copy\}/);
     assert.match(passwordInput, /toast\.error\(copy\.copyFailed, copy\.clipboardUnavailable\)/);
     assert.doesNotMatch(
       passwordInput,

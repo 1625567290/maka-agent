@@ -35,14 +35,17 @@ import {
 import { PlanReminderFormDialog } from './plan-reminder-form-dialog.js';
 import { PlanReminderSelect } from './plan-reminder-select.js';
 import {
-  Button as UiButton,
   Switch,
   TabsList,
   TabsPanel,
   TabsRoot,
   TabsTrigger,
 } from './ui.js';
-import { Badge } from './primitives/badge.js';
+import {
+  Badge,
+  Button as UiButton,
+  IconButton,
+} from '@astryxdesign/core';
 import { Chip, type ChipProps } from './primitives/chip.js';
 import { PageHeader } from './primitives/page-header.js';
 import { Input } from './primitives/input.js';
@@ -264,17 +267,23 @@ export function PlanReminderPanel(props: {
           contentClassName="maka-plan-heading"
           actions={
             <div className="maka-plan-top-actions" aria-label={copy.page.actionsAriaLabel}>
-              <UiButton type="button" onClick={openCreateReminderDialog}>
-                <Plus size={15} aria-hidden="true" />
-                {copy.page.create}
-              </UiButton>
+              <UiButton
+                variant="primary"
+                onClick={openCreateReminderDialog}
+                icon={<Plus size={15} aria-hidden="true" />}
+                label={copy.page.create}
+              />
               <Menu>
                 <MenuTrigger
-                  render={<UiButton variant="quiet" size="icon" />}
+                  render={
+                    <IconButton
+                      variant="ghost"
+                      label={copy.page.pageSettings}
+                      icon={<MoreHorizontal size={16} aria-hidden="true" />}
+                    />
+                  }
                   aria-label={copy.page.pageSettings}
-                >
-                  <MoreHorizontal size={16} aria-hidden="true" />
-                </MenuTrigger>
+                />
                 <MenuPopup className="maka-plan-page-menu" align="end">
                   <MenuItem
                     onClick={() => void refreshFromPanel()}
@@ -376,7 +385,7 @@ export function PlanReminderPanel(props: {
             {normalizedListQuery && (
               <div className="maka-plan-search-summary" role="status" aria-live="polite">
                 <span>{copy.page.searchMatches(searchMatchedReminders.length)}</span>
-                <UiButton type="button" variant="ghost" size="sm" onClick={() => setListQuery('')}>{copy.page.clearSearch}</UiButton>
+                <UiButton variant="ghost" size="sm" onClick={() => setListQuery('')} label={copy.page.clearSearch} />
               </div>
             )}
             {props.reminders.length === 0 ? (
@@ -409,9 +418,10 @@ export function PlanReminderPanel(props: {
                         <div className="maka-plan-card-title-row">
                           <h3 className="maka-plan-card-title">{reminder.title}</h3>
                           {reminder.status !== 'scheduled' && (
-                            <Badge variant={reminder.status === 'paused' ? 'warning' : 'secondary'}>
-                              {planReminderStatusLabel(reminder.status, locale)}
-                            </Badge>
+                            <Badge
+                              variant={reminder.status === 'paused' ? 'warning' : 'neutral'}
+                              label={planReminderStatusLabel(reminder.status, locale)}
+                            />
                           )}
                         </div>
                         <p className="maka-plan-card-note">
@@ -457,12 +467,18 @@ export function PlanReminderPanel(props: {
                         )}
                         <Menu>
                           <MenuTrigger
-                            render={<UiButton variant="quiet" size="icon-sm" />}
+                            render={
+                              <IconButton
+                                variant="ghost"
+                                size="sm"
+                                isDisabled={reminderActionPending}
+                                label={`${copy.page.reminderActions}: ${reminder.title}`}
+                                icon={<MoreHorizontal size={16} aria-hidden="true" />}
+                              />
+                            }
                             disabled={reminderActionPending}
                             aria-label={`${copy.page.reminderActions}: ${reminder.title}`}
-                          >
-                            <MoreHorizontal size={16} aria-hidden="true" />
-                          </MenuTrigger>
+                          />
                           <MenuPopup className="maka-plan-card-menu" align="end">
                             <MenuItem
                               onClick={() => editReminder(reminder)}

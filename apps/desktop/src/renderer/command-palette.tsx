@@ -14,7 +14,6 @@ import {
   X,
 } from '@maka/ui/icons';
 import {
-  Button,
   DialogContent,
   DialogRoot,
   Empty,
@@ -22,6 +21,7 @@ import {
   EmptyHeader,
   EmptyMedia,
   EmptyTitle,
+  IconButton,
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
@@ -230,15 +230,13 @@ export function CommandPalette(props: {
                 }
               />
             </InputGroup>
-            <Button
-              type="button"
-              variant="quiet"
-              size="icon-sm"
-              aria-label={copy.closeLabel}
+            <IconButton
+              variant="ghost"
+              size="sm"
+              icon={<X aria-hidden="true" />}
+              label={copy.closeLabel}
               onClick={props.onClose}
-            >
-              <X aria-hidden="true" />
-            </Button>
+            />
           </div>
           <Autocomplete.List className="maka-palette-list" id="maka-palette-list" aria-label={copy.resultsLabel}>
             {grouped.length === 0 ? (
