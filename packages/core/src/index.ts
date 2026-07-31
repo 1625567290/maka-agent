@@ -1446,8 +1446,6 @@ export type {
   NetworkProxySettings,
   NetworkSettings,
   NotificationSettings,
-  OpenGatewaySettings,
-  OpenGatewayRuntimeStatus,
   PrivacySettings,
   ProxyProtocol,
   SettingsSection,
