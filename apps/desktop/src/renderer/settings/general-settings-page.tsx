@@ -26,7 +26,7 @@ import {
   useToast,
   useUiLocale,
 } from '@maka/ui';
-import { ProviderLogo } from './ProvidersPanel';
+import { ProviderBrandMark } from './provider-brand-marks';
 import { buildCatalogChatModelChoices } from '../model-catalog-choices';
 import { PasswordInput } from './password-input';
 import { SettingsRows } from './settings-rows';
@@ -144,11 +144,6 @@ function GeneralDefaultsCard(props: {
     const value = modelChoiceValue(connection.slug, connection.defaultModel);
     return modelChoices.some((choice) => modelChoiceValue(choice.connectionSlug, choice.model) === value) ? value : '';
   }, [modelChoices, props.connections, props.defaultSlug]);
-  const selectedLabel = useMemo(() => {
-    if (!selectedValue) return copy.notSet;
-    return modelChoices.find((choice) => modelChoiceValue(choice.connectionSlug, choice.model) === selectedValue)?.label ?? copy.notSet;
-  }, [copy.notSet, modelChoices, selectedValue]);
-
   async function persistDefault(nextValue: string) {
     const releaseSave = persistGuard.begin('default-model');
     if (!releaseSave) return;
@@ -220,23 +215,19 @@ function GeneralDefaultsCard(props: {
           <strong>{copy.defaultModel}</strong>
           <small>{copy.defaultModelHelp}</small>
         </div>
-        {/* Shared searchable picker with the composer's model switcher
-            (ModelPicker in @maka/ui) so the grouped list, provider marks,
-            and search behavior can't drift between the two surfaces. */}
+        {/* Maka supplies catalog groups and provider marks; Astryx Selector
+            owns search, options, keyboard, focus, and the popup. */}
         <ModelPicker
           groups={modelGroups}
           value={selectedValue}
-          pinnedItem={{ value: '', label: copy.notSet }}
-          renderProviderMark={(type) => <ProviderLogo type={type} compact />}
+          leadingOption={{ value: '', label: copy.notSet }}
+          renderProviderMark={(type) => <ProviderBrandMark type={type} />}
           ariaLabel={copy.defaultModel}
           disabled={saving}
+          loading={saving}
           triggerClassName="settingsModelPickerTrigger"
-          onValueChange={(value) => {
-            void persistDefault(value);
-          }}
-        >
-          <span className="modelPickerOptionLabel">{selectedLabel}</span>
-        </ModelPicker>
+          onValueChange={persistDefault}
+        />
       </div>
       <div className="settingsRow" data-control-width="select">
         <div>
