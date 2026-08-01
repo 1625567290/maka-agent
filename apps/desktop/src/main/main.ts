@@ -1111,6 +1111,7 @@ function registerIpc(): void {
       voiceIpcService.consumeNativeAudioOperation(input),
   });
   registerSubscriptionIpc({
+    ipcMain,
     connectionStore,
     claudeSubscription,
     openAiCodex,
@@ -1130,6 +1131,7 @@ function registerIpc(): void {
   registerWebSearchIpc({ settingsStore, getWorkspacePrivacyContext });
   registerBrowserIpc({ mainWindowController });
   registerConnectionsIpc({
+    ipcMain,
     connectionStore,
     credentialStore,
     syncOAuthModelConnections,
