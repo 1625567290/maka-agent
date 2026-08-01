@@ -23,12 +23,15 @@ import {
   Badge,
   type BadgeProps,
   Button as UiButton,
+  Collapsible,
+  CollapsibleGroup,
   EmptyState,
   IconButton,
   SegmentedControl,
   SegmentedControlItem,
   Selector,
   type SelectorOptionData,
+  Skeleton,
 } from '@astryxdesign/core';
 import { Alert, AlertAction, AlertDescription } from './primitives/alert.js';
 import { StatTile } from './primitives/stat-tile.js';
@@ -108,7 +111,7 @@ export function DailyReviewPanel(props: {
     };
   }, []);
 
-  function chooseDailyReviewArchive(archiveId: string) {
+  function chooseDailyReviewArchive(archiveId: string | null) {
     archiveLoadRequestRef.current += 1;
     setSelectedArchiveId(archiveId);
     setSelectedArchive(null);
@@ -460,9 +463,9 @@ export function DailyReviewPanel(props: {
           />
         ) : !visibleSummary ? (
           <div className="maka-daily-review-loading" aria-busy="true">
-            <div className="maka-skeleton maka-skeleton-line" style={{ width: '60%' }} />
-            <div className="maka-skeleton maka-skeleton-line" style={{ width: '90%' }} />
-            <div className="maka-skeleton maka-skeleton-line" style={{ width: '75%' }} />
+            <Skeleton width="60%" height={12} radius="rounded" index={0} />
+            <Skeleton width="90%" height={12} radius="rounded" index={1} />
+            <Skeleton width="75%" height={12} radius="rounded" index={2} />
           </div>
         ) : (
           <>
@@ -573,9 +576,16 @@ export function DailyReviewPanel(props: {
               className="maka-daily-review-summary-empty"
             />
           ) : (
-            <ul className="maka-daily-review-report-list" aria-label={copy.reports.historyAriaLabel}>
+            <CollapsibleGroup
+              type="single"
+              value={selectedArchiveId ?? ''}
+              onChange={(value) => chooseDailyReviewArchive(typeof value === 'string' && value ? value : null)}
+              hasDividers
+              density="balanced"
+              role="list"
+              aria-label={copy.reports.historyAriaLabel}
+            >
               {archives.map((archive) => {
-                const selected = selectedArchiveId === archive.id;
                 // Status color is exception-only (#651): 已生成 / 无数据 / 已跳过
                 // are EXPECTED outcomes and stay as muted prose meta. Only a
                 // failed / no_model run raises a colored Badge that needs eyes.
@@ -586,14 +596,12 @@ export function DailyReviewPanel(props: {
                   archive.modelKey ? formatDailyReviewModelLabel(archive.modelKey) : copy.archive.defaultModel,
                 ].join(' · ');
                 return (
-                  <li key={archive.id}>
-                    <article className="maka-daily-review-report" data-selected={selected ? '' : undefined}>
-                      <button
-                        type="button"
-                        className="maka-daily-review-report-head"
-                        onClick={() => chooseDailyReviewArchive(archive.id)}
-                        aria-expanded={selected}
-                      >
+                  <Collapsible
+                    key={archive.id}
+                    value={archive.id}
+                    role="listitem"
+                    trigger={(
+                      <span className="maka-daily-review-report-trigger">
                         <span className="maka-daily-review-report-heading">
                           <span className="maka-daily-review-report-title">
                             {formatDailyReviewArchiveTitle(archive, locale)}
@@ -608,15 +616,14 @@ export function DailyReviewPanel(props: {
                             label={copy.archive.status[archive.status]}
                           />
                         )}
-                      </button>
-                      {selected && (
-                        <DailyReviewArchiveBody archive={selectedArchive} loading={archiveLoading} />
-                      )}
-                    </article>
-                  </li>
+                      </span>
+                    )}
+                  >
+                    <DailyReviewArchiveBody archive={selectedArchive} loading={archiveLoading} />
+                  </Collapsible>
                 );
               })}
-            </ul>
+            </CollapsibleGroup>
           )}
         </section>
       )}
@@ -630,9 +637,9 @@ function DailyReviewArchiveBody(props: { archive: DailyReviewArchive | null; loa
   if (props.loading) {
     return (
       <div className="maka-daily-review-report-body" aria-busy="true">
-        <div className="maka-skeleton maka-skeleton-line" style={{ width: '58%' }} />
-        <div className="maka-skeleton maka-skeleton-line" style={{ width: '92%' }} />
-        <div className="maka-skeleton maka-skeleton-line" style={{ width: '74%' }} />
+        <Skeleton width="58%" height={12} radius="rounded" index={0} />
+        <Skeleton width="92%" height={12} radius="rounded" index={1} />
+        <Skeleton width="74%" height={12} radius="rounded" index={2} />
       </div>
     );
   }

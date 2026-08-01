@@ -9,6 +9,7 @@ const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8');
 test('settings and module view navigation uses Astryx TabList directly', () => {
   for (const rel of [
     'packages/ui/src/skills-panel.tsx',
+    'packages/ui/src/module-hub-selector.tsx',
     'packages/ui/src/plan-reminder-panel.tsx',
     'apps/desktop/src/renderer/mcp-page.tsx',
     'apps/desktop/src/renderer/settings/usage-settings-page.tsx',
@@ -24,14 +25,16 @@ test('settings and module view navigation uses Astryx TabList directly', () => {
       `${rel} must not consume the old tabs API`,
     );
   }
+  assert.doesNotMatch(read('packages/ui/src/module-hub-selector.tsx'), /SegmentedControl|DropdownMenu/);
   for (const rel of [
     'apps/desktop/src/renderer/styles/module-pages/skills.css',
     'apps/desktop/src/renderer/styles/module-pages/mcp.css',
+    'apps/desktop/src/renderer/styles/module-pages/plan-reminders.css',
     'apps/desktop/src/renderer/styles/settings/bot.css',
   ]) {
     assert.doesNotMatch(
       read(rel),
-      /\.(?:maka-skill-tab|maka-mcp-tab|settingsUsageTab)(?:s)?(?:\s|,|\{)/,
+      /\.(?:maka-skill-tabs?|maka-mcp-tabs?|maka-plan-tab|maka-plan-tabs-list|settingsUsageTabs?)(?:\s|,|\{)/,
       `${rel} must leave Astryx Tab geometry intact`,
     );
   }
