@@ -10,15 +10,19 @@ const PRODUCT_VIEWPORTS = Object.freeze({
   floor: Object.freeze({ width: 480, height: 900 }),
 });
 
+// A surface listed here cannot be switched off by deleting its manifest entry:
+// the validator fails instead. Without that, a guard is only as durable as the
+// line that opts into it.
 const REQUIRED_PRODUCT_SURFACES = Object.freeze([
   'settings',
   'skills',
   'mcp',
   'planReminders',
   'dailyReview',
+  'sessionContext',
 ]);
 
-const PRODUCT_CHECKS = new Set(['plan-reminder-row']);
+const PRODUCT_CHECKS = new Set(['plan-reminder-row', 'session-context-layer']);
 
 function fail(message) {
   throw new Error(`Product Storybook manifest: ${message}`);
@@ -234,6 +238,61 @@ async function smokeStory(page, baseUrl, job, options = {}) {
         ) {
           failures.push('dark color scheme was not applied to the production root');
         }
+        // The context layer is built from the production derive helpers, which
+        // return undefined unless the story's session list really establishes
+        // the lineage. Without this the surface would still pass while showing
+        // no banner and no revision counter at all — the story would be a lie
+        // that renders. The layer must also survive the narrow viewports, which
+        // is the reason it is smoked at three of them.
+        if (checks.includes('session-context-layer')) {
+          const layer = document.querySelector('.maka-session-context');
+          if (!layer) {
+            failures.push('session context layer is missing');
+          } else {
+            const isVisible = (element) => {
+              if (!element) return false;
+              const rect = element.getBoundingClientRect();
+              const style = getComputedStyle(element);
+              return (
+                rect.width > 0 &&
+                rect.height > 0 &&
+                style.display !== 'none' &&
+                style.visibility !== 'hidden'
+              );
+            };
+            // OverflowList keeps a hidden measurement copy of every item, so
+            // ask whether ANY copy is visible — querySelector alone would read
+            // the measurement clone and report a rendered item as missing.
+            const anyVisible = (selector) => [...layer.querySelectorAll(selector)].some(isVisible);
+
+            if (!anyVisible('.maka-session-context__breadcrumbs')) {
+              failures.push('branch breadcrumbs are missing — deriveBranchBanner returned nothing');
+            }
+            // Goal, memory and the revision counter share that OverflowList, so
+            // a narrow viewport is allowed to move them into the MoreMenu — but
+            // not to drop them. Absent from both places means the state the
+            // manifest names is not on screen at all.
+            const inOverflowMenu = anyVisible(
+              '[data-slot="more-menu"], .astryx-more-menu, button[aria-haspopup="menu"]',
+            );
+            for (const [selector, label] of [
+              ['.maka-session-context__revision', 'revision navigation'],
+              ['.maka-session-context__goal', 'goal indicator'],
+            ]) {
+              if (!anyVisible(selector) && !inOverflowMenu) {
+                failures.push(`${label} is neither visible nor collapsed into the overflow menu`);
+              }
+            }
+            if (!anyVisible('.maka-session-context__cluster')) {
+              failures.push('session context cluster rendered no items');
+            }
+            if (layer.scrollWidth > layer.clientWidth + 1) {
+              failures.push(
+                `session context layer overflows horizontally (${layer.scrollWidth} > ${layer.clientWidth})`,
+              );
+            }
+          }
+        }
         if (checks.includes('plan-reminder-row')) {
           if (document.documentElement.scrollWidth > document.documentElement.clientWidth) {
             failures.push('document has horizontal overflow');
@@ -289,6 +348,18 @@ async function smokeStory(page, baseUrl, job, options = {}) {
               }
             }
           }
+          // The margin loop above runs zero times if countdowns stop rendering,
+          // which would make the spacing contract pass by vacancy. Rows with a
+          // scheduled next run are exactly the ones that must show one.
+          const scheduledRows = rows.filter((row) => row.querySelector('.maka-plan-card-schedule'));
+          if (
+            scheduledRows.length > 0 &&
+            !rows.some((row) => row.querySelector('.maka-plan-card-countdown'))
+          ) {
+            failures.push(
+              'no plan reminder row rendered a countdown, so its spacing went unchecked',
+            );
+          }
           if (document.documentElement.clientWidth >= 1100 && rows[0]) {
             const columns = getComputedStyle(rows[0])
               .gridTemplateColumns.split(' ')
@@ -331,11 +402,11 @@ async function smokeStory(page, baseUrl, job, options = {}) {
 /**
  * Every story the manifest does NOT name, rendered once at wide/light.
  *
- * The manifest is a curated list — 12 surfaces across viewports and colour
+ * The manifest is a curated list — a dozen surfaces across viewports and colour
  * schemes, because those checks are expensive and only worth paying for where
- * layout actually varies. But that left the other ~130 stories verified by
- * nothing: `build-storybook` bundles a story without mounting it, so a render
- * that throws, a play function that rejects, or a console error ships green.
+ * layout actually varies. But that left every other story verified by nothing:
+ * `build-storybook` bundles a story without mounting it, so a render that
+ * throws, a play function that rejects, or a console error ships green.
  *
  * This pass is deliberately shallow. It answers one question — does the story
  * still mount and finish its play function without errors — and leaves
