@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from 'react';
+import { Badge, Button, Card, IconButton, SideNav, SideNavItem, SideNavSection } from '@astryxdesign/core';
 import { ArrowLeft } from '@maka/ui/icons';
-import { Button as BaseButton } from '@base-ui/react/button';
 import type {
   AppSettings,
   LlmConnection,
@@ -29,13 +29,28 @@ import { PermissionCenterPage } from './permission-center-page';
 import { SettingsSkeleton } from './settings-skeleton';
 import { SETTINGS_NAV, groupedNav, navLabel, readLastSettingsSection } from './settings-nav';
 import { getSettingsNavigationCopy } from '../locales/settings-navigation-copy.js';
-import { SettingsRows, SettingRow } from './settings-rows';
+import { SettingRow } from './settings-rows';
 import { settingsActionErrorMessage } from './settings-error-copy';
 import { UsageSettingsPage } from './usage-settings-page';
 import { VoiceModelsSettingsPage } from './voice-settings-page';
 import { WebSearchSettingsPage } from './web-search-settings-page';
 import type { UiLocaleUpdateGate } from './ui-locale-update-gate';
 import { getSettingsSharedCopy } from '../locales/settings-shared-copy.js';
+
+const NARROW_SETTINGS_QUERY = '(max-width: 760px)';
+
+function subscribeToNarrowSettings(onChange: () => void) {
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return () => {};
+  const query = window.matchMedia(NARROW_SETTINGS_QUERY);
+  query.addEventListener('change', onChange);
+  return () => query.removeEventListener('change', onChange);
+}
+
+function getNarrowSettingsSnapshot() {
+  return typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia(NARROW_SETTINGS_QUERY).matches;
+}
 
 export function SettingsSurface(props: {
   connections: LlmConnection[];
@@ -60,6 +75,11 @@ export function SettingsSurface(props: {
   const locale = useUiLocale();
   const copy = getSettingsSharedCopy(locale);
   const localizedNav = groupedNav(locale);
+  const isNarrowSettings = useSyncExternalStore(
+    subscribeToNarrowSettings,
+    getNarrowSettingsSnapshot,
+    () => false,
+  );
   const [section, setSection] = useState<SettingsSection>(() => props.requestedSection ?? readLastSettingsSection());
   const [providerCatalogRequested, setProviderCatalogRequested] = useState(props.openProviderCatalog === true);
   // One-shot landing intent, mirroring providerCatalogRequested above: the
@@ -228,51 +248,54 @@ export function SettingsSurface(props: {
 
   return (
     <main className="settingsSurface agents-layout-body" data-modal="true" aria-label={copy.contentLabel}>
-      <aside className="settingsSidebar agents-sidebar" data-maka-contract="settings-sidebar" data-settings-nav-column aria-label={copy.sidebarLabel}>
-        <div className="settingsSidebarInner">
-          {/* PR-SETTINGS-NO-PANE-BORDER-0 (WAWQAQ msg `8effe691`):
-              reference sidebar has just `← 返回应用` then straight
-              into the nav — no big "设置" brand label. Match it. */}
-          <BaseButton
-            className="settingsBackButton"
-            type="button"
-            aria-label={copy.backToApp}
-            onClick={props.onClose}
-          >
-            <ArrowLeft size={16} aria-hidden="true" />
-            <span>{copy.backToApp}</span>
-          </BaseButton>
-          <nav aria-label={copy.navigationLabel}>
-            {localizedNav.map(({ group, label, items }) => (
-              <div key={group} className="settingsNavGroup" role="group" aria-label={label}>
-                <div className="settingsNavGroupLabel">{label}</div>
-                {items.map((item) => (
-                  <BaseButton
-                    key={item.id}
-                    className="settingsNavItem"
-                    data-active={section === item.id}
-                    aria-current={section === item.id ? 'page' : undefined}
-                    type="button"
-                    ref={section === item.id ? props.initialFocusRef : undefined}
-                    disabled={!item.enabled}
-                    onClick={() => setSection(item.id)}
-                  >
-                    <span className="settingsNavGlyph" aria-hidden="true">
-                      <item.Icon size={16} />
-                    </span>
-                    <strong>{item.label}</strong>
-                    {item.badge && (
-                      <span className="settingsNavBadge" data-badge={item.badge}>
-                        {item.badge}
-                      </span>
-                    )}
-                  </BaseButton>
-                ))}
-              </div>
+      <SideNav
+        className="settingsSidebar agents-sidebar"
+        collapsible={{ isCollapsed: isNarrowSettings, hasButton: false }}
+        data-maka-contract="settings-sidebar"
+        data-settings-nav-column
+        aria-label={copy.navigationLabel}
+        topContent={(
+          isNarrowSettings
+            ? <IconButton
+                variant="ghost"
+                label={copy.backToApp}
+                tooltip={copy.backToApp}
+                icon={<ArrowLeft size={16} aria-hidden="true" />}
+                onClick={props.onClose}
+              />
+            : <Button
+                className="settingsBackButton"
+                variant="ghost"
+                width="100%"
+                label={copy.backToApp}
+                icon={<ArrowLeft size={16} aria-hidden="true" />}
+                onClick={props.onClose}
+              />
+        )}
+      >
+        {localizedNav.map(({ group, label, items }) => (
+          <SideNavSection key={group} title={label}>
+            {items.map((item) => (
+              <SideNavItem
+                key={item.id}
+                label={item.label}
+                icon={<item.Icon size={16} aria-hidden="true" />}
+                isSelected={section === item.id}
+                isDisabled={!item.enabled}
+                ref={section === item.id
+                  ? (element) => {
+                      props.initialFocusRef.current = element instanceof HTMLButtonElement
+                        ? element
+                        : null;
+                    }
+                  : undefined}
+                endContent={item.badge ? <Badge variant="neutral" label={item.badge} /> : undefined}
+                onClick={() => setSection(item.id)}
+              />
             ))}
-          </nav>
-        </div>
-      </aside>
+          </SideNavSection>
+        ))}
+      </SideNav>
 
       <section className="settingsMainPane agents-content-area" data-agents-view="settings">
         <header className="settingsPageHeader">
@@ -439,9 +462,9 @@ function SettingsPage(props: {
       );
     default:
       return (
-        <SettingsRows>
+        <Card padding={0} className="settingsRows">
           <SettingRow title={navLabel(props.section, locale)} detail={copy.unavailablePage} value={copy.ready} />
-        </SettingsRows>
+        </Card>
       );
   }
 }

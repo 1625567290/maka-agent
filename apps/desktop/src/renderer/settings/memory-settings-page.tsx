@@ -1,7 +1,7 @@
 import type { AppSettings, UpdateAppSettingsResult } from '@maka/core';
-import { Alert, AlertDescription, Button, Chip, FormLayout, TextInput, RelativeTime, Switch, TextArea, useUiLocale } from '@maka/ui';
+import { Card, Item } from '@astryxdesign/core';
+import { Alert, AlertDescription, Badge, Button, FormLayout, TextInput, RelativeTime, Switch, TextArea, useUiLocale } from '@maka/ui';
 import { getMemorySettingsCopy } from '../locales/settings-memory-copy';
-import { SettingsRows } from './settings-rows';
 import { MemoryEntryList } from './memory-entry-list';
 import { MemoryPromptPreviewSection, WorkspaceInstructionsSection } from './memory-settings-sections';
 import { useMemoryDocumentController } from './use-memory-settings-controller';
@@ -13,6 +13,7 @@ import {
   memoryStatusLabel,
   memoryStatusTone,
 } from './memory-settings-labels';
+import { statusBadgeVariant } from './settings-status-badge';
 
 export function MemorySettingsPage(props: {
   settings: AppSettings;
@@ -82,58 +83,51 @@ export function MemorySettingsPage(props: {
 
   return (
     <div className="settingsStructuredPage">
-      <SettingsRows>
-        <div className="settingsFormRow" data-control="cluster">
-          <div>
-            <strong>{copy.text.localFile}</strong>
-            <small>{copy.text.localFileHelp}</small>
-          </div>
-          {/* #1363 review: one control cluster, not two loose siblings — on a
-              narrow card the row stacks and the chip + switch stay on one
-              line together instead of holding the row horizontal and
-              crushing the label. */}
-          <span className="settingsFormRowControlCluster">
-            <Chip variant={memoryStatusTone(effective.status)}>
-              {memoryStatusLabel(effective.status, copy)}
-            </Chip>
-            <Switch
-              label={copy.text.enableLocalFile}
-              isLabelHidden
-              value={effective.enabled}
-              isDisabled={memoryControlsDisabled}
-              onChange={(enabled) => void setEnabled(enabled)}
-            />
-          </span>
-        </div>
+      <Card padding={0} className="settingsRows">
+        <Item
+          label={copy.text.localFile}
+          description={copy.text.localFileHelp}
+          endContent={(
+            <span className="settingsFormRowControlCluster">
+              <Badge
+                variant={statusBadgeVariant(memoryStatusTone(effective.status))}
+                label={memoryStatusLabel(effective.status, copy)}
+              />
+              <Switch
+                label={copy.text.enableLocalFile}
+                isLabelHidden
+                value={effective.enabled}
+                isDisabled={memoryControlsDisabled}
+                onChange={(enabled) => void setEnabled(enabled)}
+              />
+            </span>
+          )}
+        />
 
-        <div className="settingsFormRow" data-control="switch">
-          <div>
-            <strong>{copy.text.agentReadable}</strong>
-            <small>{copy.text.agentReadableHelp}</small>
-          </div>
-          <Switch
+        <Item
+          label={copy.text.agentReadable}
+          description={copy.text.agentReadableHelp}
+          endContent={<Switch
             label={copy.text.enableAgentRead}
             isLabelHidden
             value={effective.agentReadEnabled}
             isDisabled={memoryControlsDisabled || !effective.enabled}
             onChange={(enabled) => void setAgentReadEnabled(enabled)}
-          />
-        </div>
+          />}
+        />
 
-        <div className="settingsFormRow" data-control="switch">
-          <div>
-            <strong>{copy.text.instructions}</strong>
-            <small>{copy.text.instructionsHelp}</small>
-          </div>
-          <Switch
+        <Item
+          label={copy.text.instructions}
+          description={copy.text.instructionsHelp}
+          endContent={<Switch
             label={copy.text.enableInstructions}
             isLabelHidden
             value={props.settings.workspaceInstructions.enabled}
             isDisabled={memoryControlsDisabled}
             onChange={(enabled) => void workspaceInstructions.setEnabled(enabled)}
-          />
-        </div>
-      </SettingsRows>
+          />}
+        />
+      </Card>
 
       <WorkspaceInstructionsSection
         copy={copy}

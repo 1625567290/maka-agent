@@ -34,16 +34,13 @@ import {
 } from './plan-reminder-helpers.js';
 import { PlanReminderFormDialog } from './plan-reminder-form-dialog.js';
 import {
-  TabsList,
-  TabsPanel,
-  TabsRoot,
-  TabsTrigger,
-} from './ui.js';
-import {
   Badge,
   Button as UiButton,
+  EmptyState,
   Selector,
   Switch,
+  Tab,
+  TabList,
 } from '@astryxdesign/core';
 import {
   DropdownMenu,
@@ -51,10 +48,9 @@ import {
   DropdownMenuItem,
 } from '@astryxdesign/core/DropdownMenu';
 import { Divider } from '@astryxdesign/core/Divider';
-import { Chip, type ChipProps } from './primitives/chip.js';
+import type { BadgeProps } from '@astryxdesign/core/Badge';
 import { PageHeader } from './primitives/page-header.js';
 import { TextInput } from '@astryxdesign/core';
-import { EmptyState } from './empty-state.js';
 import type { ModuleHubHeader } from './module-hub-selector.js';
 import type {
   PlanReminderDraftInput,
@@ -63,15 +59,15 @@ import type {
 import { getPlanReminderCopy } from './plan-reminder-copy.js';
 import { useUiLocale } from './locale-context.js';
 
-// Run-history status Chip tone. triggered = it fired (info, informational,
+// Run-history status Badge tone. triggered = it fired (info, informational,
 // not a health signal), blocked = intentionally skipped (warning), failed =
 // delivery error (destructive). Exception-only: no success green for a plain
 // "it ran" record.
-function planRunStatusChipTone(
+function planRunStatusBadgeVariant(
   status: NonNullable<PlanReminder['lastRun']>['status'],
-): ChipProps['variant'] {
+): BadgeProps['variant'] {
   if (status === 'blocked') return 'warning';
-  if (status === 'failed') return 'destructive';
+  if (status === 'failed') return 'error';
   return 'info';
 }
 
@@ -338,22 +334,20 @@ export function PlanReminderPanel(props: {
           }
         />
 
-        <TabsRoot
-          className="maka-plan-tabs"
-          value={planView}
-          onValueChange={(value) => {
-            if (value === 'tasks' || value === 'runs') setPlanView(value);
-          }}
-        >
+        <div className="maka-plan-tabs">
           <div className="maka-plan-tabs-bar">
-            <TabsList variant="underline" className="maka-plan-tabs-list" aria-label={copy.page.viewsAriaLabel}>
-              <TabsTrigger className="maka-plan-tab" value="tasks">
-                {copy.page.tasks}
-              </TabsTrigger>
-              <TabsTrigger className="maka-plan-tab" value="runs">
-                {copy.page.runs}
-              </TabsTrigger>
-            </TabsList>
+            <TabList
+              value={planView}
+              onChange={(value) => {
+                if (value === 'tasks' || value === 'runs') setPlanView(value);
+              }}
+              hasDivider
+              className="maka-plan-tabs-list"
+              aria-label={copy.page.viewsAriaLabel}
+            >
+              <Tab className="maka-plan-tab" value="tasks" label={copy.page.tasks} />
+              <Tab className="maka-plan-tab" value="runs" label={copy.page.runs} />
+            </TabList>
             {planView === 'tasks' ? (
               showListControls ? (
                 <div className="maka-plan-toolbar" aria-label={copy.page.filtersAriaLabel}>
@@ -414,27 +408,28 @@ export function PlanReminderPanel(props: {
             )}
           </div>
 
-          <TabsPanel className="maka-plan-tab-panel" value="tasks">
-            {normalizedListQuery && (
+          {planView === 'tasks' ? (
+            <div className="maka-plan-tab-panel">
+              {normalizedListQuery && (
               <div className="maka-plan-search-summary" role="status" aria-live="polite">
                 <span>{copy.page.searchMatches(searchMatchedReminders.length)}</span>
                 <UiButton variant="ghost" size="sm" onClick={() => setListQuery('')} label={copy.page.clearSearch} />
               </div>
-            )}
+              )}
             {props.reminders.length === 0 ? (
               <EmptyState
-                Icon={Clock}
+                icon={<Clock />}
                 title={copy.page.emptyTitle}
-                body={copy.page.emptyBody}
-                extraClassName="maka-plan-empty"
+                description={copy.page.emptyBody}
+                className="maka-plan-empty"
               />
             ) : sortedReminders.length === 0 ? (
               <EmptyState
-                Icon={Clock}
+                icon={<Clock />}
                 title={normalizedListQuery ? copy.page.noSearchTitle : copy.page.noFilterTitle}
-                body={normalizedListQuery ? copy.page.noSearchBody : copy.page.noFilterBody}
-                secondaryCta={{ label: copy.page.clearSearch, onClick: () => setListQuery(''), disabled: !normalizedListQuery }}
-                extraClassName="maka-plan-empty"
+                description={normalizedListQuery ? copy.page.noSearchBody : copy.page.noFilterBody}
+                actions={<UiButton variant="ghost" label={copy.page.clearSearch} onClick={() => setListQuery('')} isDisabled={!normalizedListQuery} />}
+                className="maka-plan-empty"
               />
             ) : (
               <div className="maka-plan-list" aria-label={copy.page.listAriaLabel}>
@@ -482,9 +477,10 @@ export function PlanReminderPanel(props: {
                         </div>
                         {reminder.lastRun && (
                           <div className="maka-plan-card-run">
-                            <Chip size="sm" variant={planRunStatusChipTone(reminder.lastRun.status)}>
-                              {runStatusLabel(reminder.lastRun.status, locale)}
-                            </Chip>
+                            <Badge
+                              variant={planRunStatusBadgeVariant(reminder.lastRun.status)}
+                              label={runStatusLabel(reminder.lastRun.status, locale)}
+                            />
                             <span>{reminder.lastRun.message}</span>
                           </div>
                         )}
@@ -579,28 +575,28 @@ export function PlanReminderPanel(props: {
                 })}
               </div>
             )}
-          </TabsPanel>
+            </div>
+          ) : null}
 
-          <TabsPanel className="maka-plan-tab-panel" value="runs">
-            {visibleRunEntries.length === 0 ? (
+          {planView === 'runs' ? (
+            <div className="maka-plan-tab-panel">
+              {visibleRunEntries.length === 0 ? (
               <EmptyState
-                Icon={Clock}
+                icon={<Clock />}
                 title={copy.page.noRunsTitle}
-                body={copy.page.noRunsBody}
-                extraClassName="maka-plan-empty maka-plan-runs-empty"
+                description={copy.page.noRunsBody}
+                className="maka-plan-empty maka-plan-runs-empty"
               />
             ) : (
               <div className="maka-plan-run-list" aria-label={copy.page.runsAriaLabel}>
                 {visibleRunEntries.map(({ reminder, run }) => (
                   <article key={`${reminder.id}:${run.id}`} className="maka-plan-run-row">
-                    <Chip
-                      size="sm"
-                      variant={planRunStatusChipTone(run.status)}
+                    <Badge
+                      variant={planRunStatusBadgeVariant(run.status)}
                       className="maka-plan-run-status"
                       data-status={run.status}
-                    >
-                      {runStatusLabel(run.status, locale)}
-                    </Chip>
+                      label={runStatusLabel(run.status, locale)}
+                    />
                     <div className="maka-plan-run-main">
                       <strong>{reminder.title}</strong>
                       <span>{run.message}</span>
@@ -609,9 +605,10 @@ export function PlanReminderPanel(props: {
                   </article>
                 ))}
               </div>
-            )}
-          </TabsPanel>
-        </TabsRoot>
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <PlanReminderFormDialog

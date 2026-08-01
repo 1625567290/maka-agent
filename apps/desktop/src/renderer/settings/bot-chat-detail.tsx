@@ -10,17 +10,17 @@ import {
 } from '@maka/core';
 import type { BotStatus } from '@maka/runtime';
 import { MAX_ALLOWED_USER_IDS, parseAllowedUserIdsFromText } from '@maka/core/settings';
+import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core';
 import {
   Alert,
   AlertDescription,
   AlertTitle,
   BOT_BRAND,
   Button,
-  Chip,
+  Badge,
   FormLayout,
   TextInput,
   RelativeTime,
-  Segmented,
   Selector,
   Switch,
   TextArea,
@@ -40,6 +40,7 @@ import {
   type BotPendingActionName,
 } from './bot-chat-shared';
 import { getBotSettingsCopy, type BotSettingsCopy } from '../locales/settings-bot-copy';
+import { statusBadgeVariant } from './settings-status-badge';
 
 function canEnableBotChannel(readiness: BotReadinessState): boolean {
   return readiness === 'credentials_valid' || readiness === 'operational' || readiness === 'degraded';
@@ -179,7 +180,7 @@ export function BotChatChannelDetail(props: {
           <div className="settingsBotDetailHeaderBody">
             <h3>
               {providerPresentation.label}
-              <Chip dot size="sm" variant={readinessCopy.tone}>{readinessCopy.label}</Chip>
+              <Badge variant={statusBadgeVariant(readinessCopy.tone)} label={readinessCopy.label} />
             </h3>
             <p>{providerPresentation.help}</p>
             {enableSwitchHint && (
@@ -274,16 +275,15 @@ export function BotChatChannelDetail(props: {
         </div>
 
         {quickOnboarding && !qrOnlyOnboarding && (
-          <Segmented<'quick' | 'manual'>
+          <SegmentedControl
             className="settingsBotSetupModes"
             value={setupMode}
-            ariaLabel={detailCopy.setupAria(providerPresentation.label)}
-            options={[
-              ['quick', detailCopy.quickRecommended],
-              ['manual', detailCopy.manual],
-            ]}
-            onChange={setSetupMode}
-          />
+            label={detailCopy.setupAria(providerPresentation.label)}
+            onChange={(value) => setSetupMode(value as 'quick' | 'manual')}
+          >
+            <SegmentedControlItem value="quick" label={detailCopy.quickRecommended} />
+            <SegmentedControlItem value="manual" label={detailCopy.manual} />
+          </SegmentedControl>
         )}
 
         {quickOnboarding && provider !== 'wechat' && setupMode === 'quick' && (
@@ -305,16 +305,15 @@ export function BotChatChannelDetail(props: {
               </p>
             </div>
             {provider === 'feishu' ? (
-              <Segmented<BotOnboardingBrand>
+              <SegmentedControl
                 className="settingsBotBrandChoice"
                 value={feishuBrand}
-                ariaLabel={detailCopy.feishuRegionAria}
-                options={[
-                  ['feishu', detailCopy.feishu],
-                  ['lark', 'Lark'],
-                ]}
-                onChange={setFeishuBrand}
-              />
+                label={detailCopy.feishuRegionAria}
+                onChange={(value) => setFeishuBrand(value as BotOnboardingBrand)}
+              >
+                <SegmentedControlItem value="feishu" label={detailCopy.feishu} />
+                <SegmentedControlItem value="lark" label="Lark" />
+              </SegmentedControl>
             ) : null}
             <Button variant="primary" onClick={() => setScanLoginPhase('mounting')} label={provider === 'wecom' ? detailCopy.beginQuickBind : detailCopy.scanWith(provider === 'feishu' && feishuBrand === 'lark' ? 'Lark' : providerPresentation.label)} />
           </section>

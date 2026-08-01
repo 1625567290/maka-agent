@@ -1,5 +1,16 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import {
+  EmptyState,
+  SegmentedControl,
+  SegmentedControlItem,
+  Tab,
+  TabList,
+  Table,
+  type TableColumn,
+  pixel,
+  proportional,
+} from '@astryxdesign/core';
+import {
   uiLocaleToIntlLocale,
   type AppSettings,
   type UpdateAppSettingsResult,
@@ -11,18 +22,10 @@ import {
   AlertAction,
   AlertDescription,
   Button,
-  DataTable,
-  type DataTableColumn,
-  EmptyState,
   IconButton,
   TextInput,
-  Segmented,
   Selector,
   Switch,
-  TabsList,
-  TabsPanel,
-  TabsRoot,
-  TabsTrigger,
   useToast,
   useUiLocale,
 } from '@maka/ui';
@@ -115,17 +118,15 @@ export function UsageSettingsPage(props: {
   return (
     <div className="settingsUsagePage">
       <div className="settingsUsageToolbar" role="group" aria-label={copy.toolbarAria}>
-        <Segmented
+        <SegmentedControl
           value={usageDraft.range}
-          ariaLabel={copy.rangeAria}
-          options={[
-            ['24h', copy.ranges[0]],
-            ['7d', copy.ranges[1]],
-            ['30d', copy.ranges[2]],
-            ['all', copy.ranges[3]],
-          ]}
+          label={copy.rangeAria}
           onChange={(value) => void setRange(value as UsageRange)}
-        />
+        >
+          {(['24h', '7d', '30d', 'all'] as const).map((value, index) => (
+            <SegmentedControlItem key={value} value={value} label={copy.ranges[index]} />
+          ))}
+        </SegmentedControl>
         {/* Detail audit: 刷新 was a primary --action chip glued to the
             segmented — two control styles fighting in one row for a
             low-frequency utility. Same quiet icon form as the automations
@@ -152,22 +153,25 @@ export function UsageSettingsPage(props: {
         <MetricCard title={copy.cacheTokens} value={String(stats?.summary.cacheTokens ?? 0)} detail={copy.cacheDetail(stats?.summary.cacheMiss ?? 0, stats?.summary.cacheRead ?? 0, stats?.summary.cacheCreation ?? 0)} />
       </div>
 
-      <TabsRoot
-        value={usageDraft.activeTab}
-        onValueChange={(activeTab) => void updateUsage({ activeTab: activeTab as UsageActiveTab })}
-      >
+      <div>
         <div className="settingsUsageTabsBar">
-          <TabsList variant="underline" className="settingsUsageTabs" aria-label={copy.viewAria}>
-            <TabsTrigger className="settingsUsageTab" value="requests">{copy.tabs[0]} <span>{tabCounts.requests}</span></TabsTrigger>
-            <TabsTrigger className="settingsUsageTab" value="providers">{copy.tabs[1]} <span>{tabCounts.providers}</span></TabsTrigger>
-            <TabsTrigger className="settingsUsageTab" value="models">{copy.tabs[2]} <span>{tabCounts.models}</span></TabsTrigger>
-            <TabsTrigger className="settingsUsageTab" value="tools">{copy.tabs[3]} <span>{tabCounts.tools}</span></TabsTrigger>
-            <TabsTrigger className="settingsUsageTab" value="pricing">{copy.tabs[4]} <span>{tabCounts.pricing}</span></TabsTrigger>
-          </TabsList>
+          <TabList
+            value={usageDraft.activeTab}
+            onChange={(activeTab) => void updateUsage({ activeTab: activeTab as UsageActiveTab })}
+            hasDivider
+            aria-label={copy.viewAria}
+          >
+            <Tab value="requests" label={copy.tabs[0]} endContent={<span>{tabCounts.requests}</span>} />
+            <Tab value="providers" label={copy.tabs[1]} endContent={<span>{tabCounts.providers}</span>} />
+            <Tab value="models" label={copy.tabs[2]} endContent={<span>{tabCounts.models}</span>} />
+            <Tab value="tools" label={copy.tabs[3]} endContent={<span>{tabCounts.tools}</span>} />
+            <Tab value="pricing" label={copy.tabs[4]} endContent={<span>{tabCounts.pricing}</span>} />
+          </TabList>
         </div>
 
-        <TabsPanel className="settingsUsageTabPanel" value="requests">
-          <UsageRequestsPanel
+        {usageDraft.activeTab === 'requests' ? (
+          <div className="settingsUsageTabPanel">
+            <UsageRequestsPanel
             stats={stats}
             logs={showRequestDetails ? filteredLogs : []}
             showDetails={usageDraft.showDetails}
@@ -184,25 +188,34 @@ export function UsageSettingsPage(props: {
             onStatusChange={(status) => void updateUsage({ status })}
             onToggleDetails={(showDetails) => void updateUsage({ showDetails })}
             onClearFilters={clearRequestFilters}
-          />
-        </TabsPanel>
+            />
+          </div>
+        ) : null}
 
-        <TabsPanel className="settingsUsageTabPanel" value="providers">
-          <UsageProvidersPanel stats={stats} copy={copy} />
-        </TabsPanel>
+        {usageDraft.activeTab === 'providers' ? (
+          <div className="settingsUsageTabPanel">
+            <UsageProvidersPanel stats={stats} copy={copy} />
+          </div>
+        ) : null}
 
-        <TabsPanel className="settingsUsageTabPanel" value="models">
-          <UsageModelsPanel stats={stats} copy={copy} />
-        </TabsPanel>
+        {usageDraft.activeTab === 'models' ? (
+          <div className="settingsUsageTabPanel">
+            <UsageModelsPanel stats={stats} copy={copy} />
+          </div>
+        ) : null}
 
-        <TabsPanel className="settingsUsageTabPanel" value="tools">
-          <UsageToolsPanel stats={stats} copy={copy} />
-        </TabsPanel>
+        {usageDraft.activeTab === 'tools' ? (
+          <div className="settingsUsageTabPanel">
+            <UsageToolsPanel stats={stats} copy={copy} />
+          </div>
+        ) : null}
 
-        <TabsPanel className="settingsUsageTabPanel" value="pricing">
-          <UsagePricingPanel stats={stats} copy={copy} />
-        </TabsPanel>
-      </TabsRoot>
+        {usageDraft.activeTab === 'pricing' ? (
+          <div className="settingsUsageTabPanel">
+            <UsagePricingPanel stats={stats} copy={copy} />
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -412,16 +425,15 @@ function usageRequestStatusLabel(status: UsageStats['logs'][number]['status'], c
   }
 }
 
-// ── Shared table wrapper ────────────────────────────────────────────────────
-// The hairline/column-rhythm/tabular-nums recipe now lives in the shared
-// `DataTable` primitive (@maka/ui) — the #1252 table grew health + permission
-// consumers, so it was promoted. This thin wrapper keeps the usage-local
-// concern the primitive deliberately omits: routing an empty tab to the shared
-// EmptyState (icon + copy) instead of a bare header row. All five tabs funnel
-// through it, so every tab inherits the same table and the same empty surface.
+// ── Usage table mapping ─────────────────────────────────────────────────────
+// Astryx Table owns table geometry, scrolling, dividers, density, and cell
+// semantics. This page only maps its product rows and empty-state copy into
+// that public API.
 
-interface UsageColumn extends DataTableColumn {
+interface UsageColumn {
   header: string;
+  numeric?: boolean;
+  grow?: boolean;
 }
 
 interface UsageEmpty {
@@ -440,19 +452,42 @@ function UsageStatsTable(props: {
   if (props.rows.length === 0) {
     return (
       <EmptyState
-        Icon={props.empty.Icon}
+        icon={<props.empty.Icon />}
         title={props.empty.title}
-        body={props.empty.body ?? ''}
-        extraClassName="settingsUsageEmpty"
+        description={props.empty.body ?? ''}
+        className="settingsUsageEmpty"
       />
     );
   }
+  type UsageTableRow = Record<string, unknown> & {
+    id: number;
+    cells: Array<ReactNode>;
+  };
+
+  const data: UsageTableRow[] = props.rows.map((cells, id) => ({ id, cells }));
+  const columns: Array<TableColumn<UsageTableRow>> = props.columns.map((column, index) => ({
+    key: `cell-${index}`,
+    header: column.header,
+    align: column.numeric ? 'end' : 'start',
+    width: column.grow ? proportional(1) : pixel(column.numeric ? 88 : 120),
+    renderCell: (row) => (
+      <span className={column.numeric ? 'settingsUsageNumericCell' : undefined}>
+        {row.cells[index]}
+      </span>
+    ),
+  }));
+
   return (
-    <DataTable
-      ariaLabel={props.ariaLabel}
-      columns={props.columns}
-      rows={props.rows}
-      className="settingsUsageTable"
-    />
+    <div className="settingsUsageTable">
+      <Table
+        aria-label={props.ariaLabel}
+        data={data}
+        columns={columns}
+        idKey="id"
+        density="compact"
+        dividers="rows"
+        textOverflow="truncate"
+      />
+    </div>
   );
 }
