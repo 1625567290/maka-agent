@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup as renderReactToStaticMarkup } from 'react-dom/server';
 import type { StoredMessage, ToolResultContent } from '@maka/core';
-import { ToolActivity, ToolErrorDetails, ToolTrow } from '../tool-activity.js';
+import { ToolActivity, ToolTrow } from '../tool-activity.js';
 import { ToolResultPreview } from '../tool-activity/tool-result-preview.js';
 import {
   createToolDisclosureState,
@@ -30,17 +30,6 @@ function renderTool(item: ToolActivityItem): string {
 }
 
 describe('tool activity presentation', () => {
-  it('does not mount collapsed raw error diagnostics', () => {
-    const markup = renderToStaticMarkup(createElement(
-      ToolErrorDetails,
-      null,
-      createElement('pre', null, 'large private diagnostic payload'),
-    ));
-
-    assert.match(markup, /aria-expanded="false"/);
-    assert.doesNotMatch(markup, /large private diagnostic payload/);
-  });
-
   it('prefers a declared semantic kind over the legacy tool-name fallback', () => {
     const item: ToolActivityItem = {
       toolUseId: 'tool-kind',
@@ -197,7 +186,17 @@ describe('tool activity presentation', () => {
     assert.match(markup, /role="button"[^>]*aria-expanded="false"/);
     assert.match(markup, /Bash/);
     assert.match(markup, /Error: boom/);
-    assert.doesNotMatch(markup, /Error: Error:|data-slot="tool-output"/);
+    assert.doesNotMatch(markup, /Error: Error:|data-slot="tool-output"|工具调用失败|data-slot="alert"|astryx-codeblock/);
+  });
+
+  it('renders ordinary failure text as a neutral CodeBlock well', () => {
+    const markup = renderToStaticMarkup(createElement(ToolResultPreview, {
+      content: { kind: 'text', text: 'Validation failed: field invalid TAIL_OK' },
+      toolName: 'read',
+    }));
+    assert.match(markup, /astryx-codeblock/);
+    assert.match(markup, /Validation failed: field invalid TAIL_OK/);
+    assert.doesNotMatch(markup, /工具调用失败|data-slot="alert"|失败·退出码/);
   });
 
   it('presents a command sandbox denial as blocked instead of failed', () => {
@@ -265,7 +264,7 @@ describe('tool activity presentation', () => {
     assert.doesNotMatch(markup, /工具调用失败/);
   });
 
-  it('keeps an ordinary filesystem permission error in the generic failure state', () => {
+  it('keeps an ordinary filesystem permission error as Astryx error detail, not a sandbox block', () => {
     const markup = renderToStaticMarkup(createElement(ToolActivity, {
       items: [{
         toolUseId: 'tool-filesystem-denied',
@@ -282,7 +281,9 @@ describe('tool activity presentation', () => {
       open: true,
     }));
 
-    assert.match(markup, /工具调用失败/);
+    assert.match(markup, /astryx-codeblock/);
+    assert.match(markup, /Filesystem access was denied/);
+    assert.doesNotMatch(markup, /工具调用失败/);
     assert.doesNotMatch(markup, /可能被沙箱阻止/);
   });
 
@@ -331,19 +332,13 @@ describe('tool activity presentation', () => {
       open: true,
     }));
 
-    // Command without shell prompt; no cwd / success-style exit badge bar.
     assert.match(markup, /npm run -w @maka\/ui test/);
     assert.doesNotMatch(markup, /\$\s*npm run -w @maka\/ui test/);
     assert.doesNotMatch(markup, /\/tmp\/maka/);
     assert.doesNotMatch(markup, /实时输出/);
-    // Failure note, not a permanent exit-code chrome row for successes.
-    assert.match(markup, /失败 · 退出码 1|失败.*退出码 1/);
+    assert.doesNotMatch(markup, /失败 · 退出码|退出码 1/);
     assert.match(markup, /Error: boom/);
-    // Unified panel surface (Codex-like well).
-    assert.match(markup, /bg-\[var\(--foreground-3\)\]|data-slot="tool-output"/);
-    // Tool output body uses base 13px, not caption 11px.
-    assert.match(markup, /font-size-base/);
-    // No always-on copy control on the output well (error banner may still copy).
+    assert.match(markup, /astryx-codeblock|data-slot="tool-output"/);
     assert.doesNotMatch(markup, /复制研读提示/);
   });
 
@@ -368,7 +363,7 @@ describe('tool activity presentation', () => {
 
     assert.match(markup, /npm test/);
     assert.match(markup, /终端输出不可用/);
-    assert.match(markup, /失败 · 退出码 1|失败.*退出码 1/);
+    assert.doesNotMatch(markup, /失败 · 退出码|退出码 1/);
   });
 
   it('keeps live tool output in the same quiet panel language when open', () => {
@@ -391,7 +386,7 @@ describe('tool activity presentation', () => {
     assert.doesNotMatch(markup, /实时输出/);
     assert.match(markup, /packages/);
     assert.match(markup, /已截断|输出已截断/);
-    assert.match(markup, /bg-\[var\(--foreground-3\)\]|data-slot="tool-output"/);
+    assert.match(markup, /astryx-codeblock|data-slot="tool-output"/);
     assert.match(markup, /max-h-64/);
   });
 

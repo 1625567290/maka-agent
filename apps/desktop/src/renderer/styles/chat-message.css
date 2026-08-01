@@ -50,6 +50,88 @@
   gap: var(--space-1);
 }
 
+/* Chat activity disclosure: one trigger dialect for reasoning / tool rows /
+   product trow. !important beats StyleX `.x*:not(#\#)` atoms (see sidebar.css). */
+.maka-turn .astryx-chat-tool-calls [role="button"],
+.maka-turn .astryx-chat-reasoning [role="button"],
+.maka-turn [data-trow] .astryx-collapsible-trigger {
+  /* Hand reserved for links (native-cursor convention). */
+  cursor: default !important;
+}
+
+.maka-turn .astryx-chat-tool-calls [role="button"] > span:nth-child(2) {
+  font-family: var(--font-family-body) !important;
+}
+
+.maka-turn .astryx-chat-reasoning [role="button"] > span:last-child,
+.maka-turn .astryx-chat-tool-calls [role="button"] > span:last-child {
+  width: 14px !important;
+  height: 14px !important;
+  margin-inline-start: auto;
+}
+
+.maka-turn .astryx-chat-reasoning [role="button"] > span:last-child svg,
+.maka-turn .astryx-chat-tool-calls [role="button"] > span:last-child svg,
+.maka-turn .astryx-chat-tool-calls [role="button"] > span:last-child > * {
+  width: 0.75rem !important;
+  height: 0.75rem !important;
+}
+
+@media (hover: hover) {
+  .maka-turn .astryx-chat-tool-calls [role="button"]:hover,
+  .maka-turn .astryx-chat-reasoning [role="button"]:hover,
+  .maka-turn [data-trow] .astryx-collapsible-trigger:hover {
+    background-color: var(--color-overlay-hover);
+    border-radius: var(--radius-element);
+  }
+}
+
+/* Product trow (permission / sandbox / interrupted): Collapsible defaults large. */
+.maka-turn [data-trow] .astryx-collapsible-trigger {
+  min-height: 24px;
+  gap: var(--spacing-1-5, 6px);
+  padding-block: 2px;
+  border-radius: var(--radius-element);
+  font-family: var(--font-family-body) !important;
+  font-size: var(--text-supporting-size) !important;
+  font-weight: var(--font-weight-medium, 500) !important;
+  color: var(--color-text-secondary) !important;
+}
+
+.maka-turn [data-trow] .astryx-collapsible-trigger > span:last-child {
+  width: 14px !important;
+  height: 14px !important;
+}
+
+.maka-turn [data-trow] .astryx-collapsible-trigger > span:last-child svg,
+.maka-turn [data-trow] .astryx-collapsible-trigger > span:last-child > * {
+  width: 0.75rem !important;
+  height: 0.75rem !important;
+}
+
+/* Row detail open: same 0fr→1fr medium motion as group/reasoning. */
+@keyframes maka-chat-tool-detail-open {
+  from { grid-template-rows: 0fr; }
+  to { grid-template-rows: 1fr; }
+}
+
+.maka-chat-tool-detail {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: maka-chat-tool-detail-open var(--duration-medium, 300ms) var(--ease-standard, cubic-bezier(0.24, 1, 0.4, 1)) both;
+}
+
+.maka-chat-tool-detail-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .maka-chat-tool-detail {
+    animation: none;
+  }
+}
+
 /* --- Assistant bubble shell ----------------------------------------------- */
 /* User message: a tinted, width-capped Astryx bubble anchored to the right. */
 /* Assistant: no bubble — just text on background, like an editor. The
