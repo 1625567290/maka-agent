@@ -68,18 +68,11 @@ export interface ConversationCopy {
     continuing: string;
     interruptHint: string;
     addContext: string;
-    importText: string;
-    attachFile: string;
     selectModel: string;
     dropToImport: string;
     addingAttachment: string;
     addFileOrDirectory: string;
-    /** Standalone upload button in the composer toolbar (PR-COMPOSER-TOOLBAR-SPLIT). */
-    uploadTitle: string;
-    /** Standalone Plan/Swarm/Graph button in the toolbar (PR-COMPOSER-TOOLBAR-SPLIT). */
-    modesLabel: string;
-    modesTitle: string;
-    /** Standalone Skills picker button + its panel (PR-COMPOSER-TOOLBAR-SPLIT). */
+    /** Skills panel opened from ＋ (title, search, bulk actions). */
     skillPicker: {
       label: string;
       title: string;
@@ -339,9 +332,8 @@ const CONVERSATION_COPY = {
       placeholder: '描述任务，@ 引用文件，/ 选择技能…', textareaAriaLabel: '消息输入框', pastedQuoteLabel: '粘贴的文本', selectedSkillsAriaLabel: '已选择的 Skill', removeSkillAriaLabel: (name) => `移除 Skill：${name}`, awaitingPermission: '等待你确认权限…',
       sending: '正在发送…', importing: '正在导入…', sendLabel: '发送', stopLabel: '停止', stopping: '停止中…',
       streaming: 'Maka 正在回答…', processing: 'Maka 正在处理…', continuing: 'Maka 继续中…',
-      interruptHint: '或点停止中断', addContext: '添加上下文', importText: '导入文本文件', attachFile: '附加文件',
+      interruptHint: '或点停止中断', addContext: '添加上下文',
       selectModel: '选择模型', dropToImport: '松开以导入文件内容', addingAttachment: '正在添加附件', addFileOrDirectory: '添加文件或目录',
-      uploadTitle: '上传文件或目录', modesLabel: '模式', modesTitle: '协作模式',
       skillPicker: {
         label: '技能', title: '选择技能', panelAriaLabel: '技能选择', searchPlaceholder: '搜索技能…',
         autoHint: '不选择时，Maka 自动匹配相关技能', selectAll: '全选', clearAll: '清除全部',
@@ -364,7 +356,9 @@ const CONVERSATION_COPY = {
     },
     model: {
       thinkingLevel: '思考级别', thinkingUnsupported: '当前模型不支持思考级别切换', changeThinkingLevel: '切换当前模型的思考级别', defaultLevel: '默认',
-      level: { off: '关', minimal: '最小', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' },
+      // Short single-token labels — trigger + popout size to content.
+      // Canonical ladder: 默认 / 关 / 低 / 中 / 高 / 超高 (minimal/max when offered).
+      level: { off: '关', minimal: '最少', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' },
       switching: '切换中', model: '模型', switchAriaLabel: '切换当前会话模型', switchSession: '切换当前会话使用的模型',
       pinnedSession: (connection, model) => `本会话固定模型：${connection} · ${model}`,
       switchTitle: (title) => `${title}。设置里的默认模型只影响新建会话；这里会更新当前会话。`,
@@ -373,10 +367,10 @@ const CONVERSATION_COPY = {
     },
     permissions: {
       mode: {
-        explore: { label: '只读', hint: '只读取和搜索，不写入文件、不访问网络；需要这些权限时会先来问你。' },
-        ask: { label: '自动', hint: '在 Maka 的保护层内自动执行；需要超出当前权限范围时会先来问你。' },
-        execute: { label: '自动执行', hint: '常见工具直接执行；破坏性、特权和浏览器操作仍会请求确认。' },
-        bypass: { label: '完全权限', hint: '本地工具直接访问你的文件和网络，不经 Maka 的保护层。仅用于你完全信任的任务。' },
+        explore: { label: '只读', hint: '只读搜索，不写文件、不上网；需要时先问你。' },
+        ask: { label: '自动', hint: '保护层内自动执行，越权先问你。' },
+        execute: { label: '自动执行', hint: '常见工具直接执行；危险操作仍会确认。' },
+        bypass: { label: '完全权限', hint: '直接访问文件和网络，仅限可信任务。' },
       },
       modeAriaLabel: (label) => `权限模式：${label}`,
     },
@@ -487,9 +481,8 @@ const CONVERSATION_COPY = {
       placeholder: 'Describe a task, @ to reference files, / for skills…', textareaAriaLabel: 'Message input', pastedQuoteLabel: 'Pasted text', selectedSkillsAriaLabel: 'Selected Skills', removeSkillAriaLabel: (name) => `Remove Skill: ${name}`, awaitingPermission: 'Waiting for your permission decision…',
       sending: 'Sending…', importing: 'Importing…', sendLabel: 'Send', stopLabel: 'Stop', stopping: 'Stopping…',
       streaming: 'Maka is responding…', processing: 'Maka is working…', continuing: 'Maka is continuing…',
-      interruptHint: 'or click Stop to interrupt', addContext: 'Add context', importText: 'Import text file', attachFile: 'Attach file',
+      interruptHint: 'or click Stop to interrupt', addContext: 'Add context',
       selectModel: 'Choose model', dropToImport: 'Drop to import file contents', addingAttachment: 'Adding attachment', addFileOrDirectory: 'Add file or directory',
-      uploadTitle: 'Upload a file or directory', modesLabel: 'Modes', modesTitle: 'Collaboration modes',
       skillPicker: {
         label: 'Skills', title: 'Choose skills', panelAriaLabel: 'Skill selection', searchPlaceholder: 'Search skills…',
         autoHint: 'Leave empty and Maka picks the relevant skills', selectAll: 'Select all', clearAll: 'Clear all',
@@ -521,10 +514,10 @@ const CONVERSATION_COPY = {
     },
     permissions: {
       mode: {
-        explore: { label: 'Read only', hint: 'Reads and searches only — no writing files, no network. Asks you first when it needs either.' },
-        ask: { label: 'Auto', hint: "Runs automatically inside Maka's protection layer; asks you first when something needs to go beyond the current permissions." },
-        execute: { label: 'Auto execute', hint: 'Common tools run directly; destructive, privileged, and browser actions still require confirmation.' },
-        bypass: { label: 'Full access', hint: "Local tools reach your files and your network directly, outside Maka's protection layer. Use only for tasks you fully trust." },
+        explore: { label: 'Read only', hint: 'Read and search only; asks before write or network.' },
+        ask: { label: 'Auto', hint: "Runs inside Maka's protection; asks before going further." },
+        execute: { label: 'Auto execute', hint: 'Common tools run; risky actions still confirm.' },
+        bypass: { label: 'Full access', hint: 'Direct file and network access. Trust-only tasks.' },
       },
       modeAriaLabel: (label) => `Permission mode: ${label}`,
     },
