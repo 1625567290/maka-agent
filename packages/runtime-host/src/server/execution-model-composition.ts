@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { PROVIDER_DEFAULTS, type RuntimeExecutionConnection } from '@maka/core/llm-connections';
 import { isModelExplicitlyUnsupportedForChat } from '@maka/core/model-catalog';
 import { resolveModelVisionSupport } from '@maka/core/model-metadata';
+import type { ModelCallAttempt } from '@maka/core/model-call-attempt';
 import type { RuntimePolicy } from '@maka/core/runtime-policy';
 import type { SessionHeader } from '@maka/core/session';
 import {
@@ -487,6 +488,54 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
   const recordLlmUsage = (event: Parameters<typeof recordLlmCall>[1]) => {
     void recordLlmCall({ repo: telemetry, lookupPricing: pricing }, event);
   };
+  /**
+   * One canonical record, one commit point (#1679).
+   *
+   * The AgentRun stream is the only durable authority. The Usage ledger is a
+   * projection of it and is written only once the authority holds the record —
+   * writing both in parallel would make the ledger a second source of truth,
+   * free to diverge with no way back.
+   *
+   * A failed projection is recoverable, not lost: the run is marked so the
+   * Usage authority re-derives it from the stream, and even a lost marker is
+   * recovered by a full re-projection. Neither step may fail the turn — the
+   * provider call has already completed and billed.
+   */
+  let accountingAuthorityFailed = false;
+  const recordModelCallAttempt = async (attempt: ModelCallAttempt): Promise<void> => {
+    try {
+      await input.context.recordModelCallAttempt?.(attempt);
+    } catch (error) {
+      accountingAuthorityFailed = true;
+      throw error;
+    }
+    // Mark before projecting, not after failing. A marker written only on a
+    // caught error cannot cover the case the error path never runs — the
+    // process exiting between the two writes — which would leave the record in
+    // the authority and invisible to Usage. Marking first makes this an intent
+    // record: a crash anywhere after it still leaves a run the repair finds.
+    await input.usage.modelCalls
+      .markRunPendingReprojection(attempt.sessionId, attempt.runId)
+      .catch(() => undefined);
+    await input.usage.modelCalls.recordModelCallAttempt(attempt);
+    await input.usage.modelCalls
+      .clearPendingReprojection(attempt.sessionId, attempt.runId)
+      .catch(() => undefined);
+  };
+  /**
+   * Fail-closed pre-dispatch gate, keyed on the authority alone. A stale
+   * projection is recoverable and must not block a send; an authority that has
+   * stopped accepting records means the next dispatch produces spend nothing
+   * will ever hold, so the send fails before the provider is called.
+   *
+   * Not `telemetryDrainRequested`: that flag tracks the frozen legacy table,
+   * which no longer meters main sends at all.
+   */
+  const assertModelCallAccountingReady = (): void => {
+    if (accountingAuthorityFailed) {
+      throw new Error('Canonical model-call accounting authority is unavailable');
+    }
+  };
   let artifactDrainRequested = false;
   const providerRequestCapture = input.context.recordProviderRequestCapture
     ? createProviderRequestCaptureRecorder({
@@ -595,6 +644,8 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         shellRunContextSummary: input.context.shellRunContextSummary,
         lookupPricing: pricing,
         recordLlmCall: recordLlmUsage,
+        recordModelCallAttempt,
+        assertModelCallAccountingReady,
         recordToolInvocation: (event) => recordToolInvocation({ repo: telemetry }, event),
         ...(input.runtimeCommitSink ? { runtimeCommitSink: input.runtimeCommitSink } : {}),
         ...(providerRequestCapture
