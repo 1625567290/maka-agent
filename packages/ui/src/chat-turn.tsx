@@ -1,7 +1,7 @@
-import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Fragment, memo, useEffect, useId, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import { Button as BaseButton } from '@base-ui/react/button';
 import { useMountedRef } from './use-mounted-ref.js';
-import { AlertOctagon, Ban, Brain, Check, Copy, GitBranch, Info, Loader2, Pencil, RefreshCcw, Timer } from './icons.js';
+import { AlertOctagon, Ban, Brain, Check, ChevronDown, Copy, GitBranch, Info, Loader2, Pencil, RefreshCcw, Timer } from './icons.js';
 import { type ClipboardCopyPhase, useClipboardCopyFeedback } from './clipboard-feedback.js';
 import { Markdown } from './markdown.js';
 import { formatAbsoluteTimestamp, formatClockTime, turnAbortMarkerLabel } from './chat-display-helpers.js';
@@ -9,9 +9,12 @@ import { prepareSmoothStreamText, useSmoothStreamContent } from './smooth-stream
 import { tokenizeFade, useStreamFade, type StreamFade } from './stream-fade.js';
 import {
   Button as UiButton,
-  Collapsible as AstryxCollapsible,
+  ChatMessage,
+  ChatMessageBubble,
   IconButton as UiIconButton,
+  Text as AstryxText,
 } from '@astryxdesign/core';
+import { useCollapsible } from '@astryxdesign/core/Collapsible';
 import { Dialog } from '@astryxdesign/core/Dialog';
 import { Layout, LayoutContent } from '@astryxdesign/core/Layout';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
@@ -21,17 +24,28 @@ import type { TurnTimelineItem, TurnViewModel } from './materialize.js';
 import { foldTimeline, type FoldedTimelineChild } from './timeline-fold.js';
 import { AttachmentFileCard } from './attachment-file-card.js';
 import { QuoteRefChip } from './quote-ref-chip.js';
-import { Bubble, Marker, markerVariants, Message, TextShimmer } from './primitives/chat.js';
-import { SETTLE_FADE, ToolKindIcon, ToolTrow, useToolDisclosure } from './tool-activity.js';
-import {
-  isProcessingRunning,
-  processingActivityKind,
-  processingNeedsAttention,
-  summarizeProcessing,
-} from './tool-activity/trow-summary.js';
-import { isSandboxDeniedTool } from './tool-activity/sandbox-denial.js';
+import { Marker, markerVariants, TextShimmer } from './primitives/chat.js';
+import { ToolTrow } from './tool-activity.js';
 import { useUiLocale } from './locale-context.js';
 import { getConversationCopy } from './conversation-copy.js';
+import { AstryxLocaleProvider } from './astryx-i18n.js';
+
+function LocalizedChatMessage({
+  accessibleLabel,
+  ...props
+}: Omit<ComponentPropsWithoutRef<typeof ChatMessage>, 'aria-label'> & {
+  accessibleLabel: string;
+}) {
+  const overrides = useMemo(
+    () => ({ '@astryx.chatMessage.messageFrom': accessibleLabel }),
+    [accessibleLabel],
+  );
+  return (
+    <AstryxLocaleProvider overrides={overrides}>
+      <ChatMessage {...props} />
+    </AstryxLocaleProvider>
+  );
+}
 
 /**
  * Injected host capability that reads a session attachment's bytes. @maka/ui is
@@ -148,7 +162,7 @@ const MessageBody = memo(function MessageBody(props: {
     // (same primitive + `markerVariants('footer-action')`).
     return (
       <>
-        <Bubble variant="user">
+        <ChatMessageBubble className="maka-chat-message-bubble maka-chat-message-bubble-user">
           <span>{props.text}</span>
           {props.quotes && props.quotes.length > 0 ? (
             <div className="maka-user-quotes flex flex-wrap items-start gap-1 mt-1">
@@ -173,10 +187,10 @@ const MessageBody = memo(function MessageBody(props: {
               ))}
             </div>
           ) : null}
-        </Bubble>
+        </ChatMessageBubble>
         {/* #642: the whole meta row — absolute HH:mm time + copy — hides by
             default and appears when the user bubble is hovered or keyboard
-            focus lands inside (keys off `group/usermsg` on the user Message).
+            focus lands inside (keys off `group/usermsg` on the user ChatMessage).
             Absolute wall-clock time (not relative "N 小时前"); the full date
             stays on the time's `title` and the bubble's own `title`. */}
         <div className="maka-message-meta opacity-0 [transition:opacity_var(--duration-quick)_var(--ease-out-strong)] group-hover/usermsg:opacity-100 focus-within:opacity-100">
@@ -215,9 +229,9 @@ const MessageBody = memo(function MessageBody(props: {
   // duration · cost) lives in the footer's info tooltip; copy + the other
   // actions live in the turn footer.
   return (
-    <Bubble variant="assistant" className="maka-bubble-with-actions">
+    <ChatMessageBubble variant="ghost" className="maka-chat-message-bubble maka-chat-message-bubble-assistant maka-bubble-with-actions">
       <Markdown text={props.text} />
-    </Bubble>
+    </ChatMessageBubble>
   );
 });
 
@@ -353,7 +367,7 @@ export const TurnView = memo(function TurnView(props: {
   searchHighlighted?: boolean;
   /**
    * #642 single render path: set only on the active streaming tail turn. When
-   * present, the assistant `Message` renders the live 深度思考 + answer bubble as
+   * present, the assistant `ChatMessage` renders the live 深度思考 + answer bubble as
    * the trailing entries of its timeline — the SAME node the committed turn
    * will settle into, so live→settled is a data-source swap (no unmount/mount).
    * While live the footer is a reserved-height placeholder, not the real
@@ -380,7 +394,7 @@ export const TurnView = memo(function TurnView(props: {
   const { turn } = props;
   const forwardBadges = props.lineageBadges?.filter((b) => b.direction === 'forward') ?? [];
   const reverseBadges = props.lineageBadges?.filter((b) => b.direction === 'reverse') ?? [];
-  // The assistant `Message` mounts once the turn has any timeline content OR
+  // The assistant `ChatMessage` mounts once the turn has any timeline content OR
   // this is the live streaming tail (a thinking-only / textless streaming turn
   // has an empty committed timeline but must still show its live answer block).
   const showAssistantMessage = turn.timeline.length > 0 || !!props.liveStreaming;
@@ -445,11 +459,10 @@ export const TurnView = memo(function TurnView(props: {
         </Marker>
       )}
       {turn.user && (
-        <Message
-          variant="user"
-          aria-label={copy.userAriaLabel}
-          title={turn.user.ts ? formatAbsoluteTimestamp(turn.user.ts, locale) : undefined}
-          className="group/usermsg"
+        <LocalizedChatMessage
+          accessibleLabel={copy.userAriaLabel}
+          sender="user"
+          className="maka-chat-message group/usermsg"
         >
           <MessageBody
             role="user"
@@ -487,23 +500,24 @@ export const TurnView = memo(function TurnView(props: {
             }
           />
 
-        </Message>
+        </LocalizedChatMessage>
       )}
       {turn.notes.map((note) => (
-        <Message
+        <LocalizedChatMessage
+          accessibleLabel={copy.systemAriaLabel}
           key={note.id}
-          variant="system"
-          title={note.ts ? formatAbsoluteTimestamp(note.ts, locale) : undefined}
+          sender="system"
+          className="maka-chat-message"
         >
           <MessageBody role="system" text={note.text} ts={note.ts} />
-        </Message>
+        </LocalizedChatMessage>
       ))}
       {showAssistantMessage && (
-        <Message
-          variant="assistant"
+        <LocalizedChatMessage
+          accessibleLabel={copy.assistantAriaLabel}
+          sender="assistant"
           data-turn-status={turn.status}
-          aria-label={copy.assistantAriaLabel}
-          className="group/answer"
+          className="maka-chat-message group/answer"
         >
           <div className="flex flex-col gap-2">
             {/* PR109d-c: aborted turn gets a muted "(已中断)" marker + Ban icon
@@ -608,7 +622,7 @@ export const TurnView = memo(function TurnView(props: {
               />
             )
           )}
-        </Message>
+        </LocalizedChatMessage>
       )}
     </section>
   );
@@ -901,7 +915,7 @@ function StreamingAssistantBubble(props: { text: string; live: boolean; truncate
   }, [props.live, catchingUp, props.onSettled]);
 
   return (
-    <Bubble variant="assistant" className="maka-bubble-streaming">
+    <ChatMessageBubble variant="ghost" className="maka-chat-message-bubble maka-chat-message-bubble-assistant maka-bubble-streaming">
       <Markdown text={displayed} streaming />
       {props.truncated && (
         <div
@@ -913,7 +927,7 @@ function StreamingAssistantBubble(props: { text: string; live: boolean; truncate
           {copy.truncated}
         </div>
       )}
-    </Bubble>
+    </ChatMessageBubble>
   );
 }
 
@@ -954,93 +968,26 @@ function TurnTimelineEntry(props: {
 }
 
 /**
- * "Processing" — a folded run of the model's reasoning + tool activity between
- * two answer texts (#1307; the fold is derived at render time by
- * `foldTimeline`, which only folds runs containing tool activity — a
- * pure-thinking run renders as the bare 深度思考 disclosure). Collapsed by
- * default (controlled by the same product state machine as 深度思考 / the tool
- * trow): the summary line shows the current activity while running and
- * freezes to the settled tool roll-up (tool counts + 「N 个失败」 in
- * destructive; folded reasoning is not counted) once the turn ends. A
- * `waiting_permission` prompt inside forces the block open (trowNeedsAttention);
- * an errored tool stays collapsed with its failure count on the summary line.
- * The expanded panel preserves the full timeline with the SAME 深度思考
- * disclosures and direct tool rows. Processing already owns the group summary,
- * so nesting another tool-group disclosure would duplicate that layer.
+ * A folded reasoning/tool run keeps its original timeline order but adds no
+ * visual chrome of its own. DeepThinking and Astryx ChatToolCalls each own
+ * their native disclosures directly, avoiding a duplicate Processing layer.
  */
 function ProcessingBlock(props: { entries: FoldedTimelineChild[] }) {
-  const locale = useUiLocale();
   const { entries } = props;
-  const running = isProcessingRunning(entries);
-  const attention = processingNeedsAttention(entries);
-  // Reuse the tool disclosure state machine: ordinary work summarized, a
-  // permission prompt opens, an explicit toggle sticks across status changes.
-  const disclosure = useToolDisclosure({ kind: 'tool', summary: '', needsAttention: attention });
-  // #646 settle seam: play the one-shot landing fade only if this block was
-  // seen running here (not a replayed transcript), matching the tool trow.
-  const everRunningRef = useRef(false);
-  if (running) everRunningRef.current = true;
-  const settled = !running;
-  const settling = settled && everRunningRef.current;
-  const hasSandboxBlocked = entries.some(
-    (entry) => entry.kind === 'tools' && entry.items.some(isSandboxDeniedTool),
-  );
-  const hasError = entries.some(
-    (entry) =>
-      entry.kind === 'tools' &&
-      entry.items.some(
-        (item) => item.status === 'errored' && !isSandboxDeniedTool(item),
-      ),
-  );
-  const settledTone = hasError
-    ? 'text-[color:var(--destructive)]'
-    : hasSandboxBlocked
-      ? 'text-[color:var(--warning-text,var(--info-text))]'
-      : 'text-[color:var(--muted-foreground)]';
-  const activityKind = processingActivityKind(entries);
-  const summary = summarizeProcessing(entries, { live: running, locale });
   return (
-    <AstryxCollapsible
-      className="flex flex-col"
-      data-processing="block"
-      data-settled={settled ? 'true' : undefined}
-      isOpen={disclosure.open}
-      onOpenChange={disclosure.setOpen}
-      trigger={(
-        <span className="flex min-w-0 items-center gap-2 py-0.5">
-          <ToolKindIcon
-            kind={activityKind}
-            size={16}
-            aria-hidden="true"
-            className={cn('shrink-0', settledTone)}
-          />
-          {running ? (
-            <TextShimmer active delayed className="min-w-0 truncate text-[length:var(--font-size-base)]">{summary}</TextShimmer>
-          ) : (
-            <span className={cn('min-w-0 truncate text-[length:var(--font-size-base)]', settledTone, settling && SETTLE_FADE)}>{summary}</span>
-          )}
-        </span>
-      )}
-    >
-      {disclosure.open ? (
-        <div className="mt-0.5 ml-2 flex flex-col gap-0.5 border-l border-[var(--border)] pl-2.5">
-          {entries.map((entry, index) =>
-            entry.kind === 'tools' ? (
-              <ToolTrow key={timelineEntryKey(entry, index)} items={entry.items} variant="rows" />
-            ) : (
-              <TurnTimelineEntry key={timelineEntryKey(entry, index)} item={entry} />
-            ),
-          )}
-        </div>
-      ) : null}
-    </AstryxCollapsible>
+    <div className="maka-processing-sequence">
+      {entries.map((entry, index) => (
+        <TurnTimelineEntry key={timelineEntryKey(entry, index)} item={entry} />
+      ))}
+    </div>
   );
 }
 
 /**
  * "深度思考" — the unified reasoning disclosure for both live streaming and
- * committed history. Controlled Astryx Collapsible, collapsed by default, with
- * the fixed title "深度思考".
+ * committed history. Astryx's public `useCollapsible` owns disclosure state;
+ * the custom row follows ChatToolCalls geometry without pretending reasoning
+ * is a tool call. It starts collapsed with the fixed title "深度思考".
  *
  * `live=true` (thinking still flowing): the title shimmers (TextShimmer) and the
  * expanded body streams plain redacted text through `useSmoothStreamContent`
@@ -1063,10 +1010,12 @@ function DeepThinking(props: { text: string; live: boolean; truncated?: boolean 
   // so we tokenize `displayed` directly and wrap post-boundary tokens. Inactive
   // (returns undefined) when settled or under snap.
   const streamFade = useStreamFade(displayed, props.live && !snap);
-  // Controlled open (see ReasoningPanel history: a raw `open` attribute lets the
-  // ~60Hz stream re-render re-assert open state and undo a manual collapse).
-  // Collapsed by default so the answer reads cleanly; the click sticks.
-  const [open, setOpen] = useState(false);
+  // Astryx's state machine keeps a manual disclosure choice stable across the
+  // ~60Hz streaming re-renders. Collapsed by default so the answer reads cleanly.
+  const { isOpen: open, toggle } = useCollapsible({
+    isCollapsible: { defaultIsOpen: false },
+  });
+  const contentId = useId();
   const bodyRef = useRef<HTMLPreElement>(null);
   useEffect(() => {
     if (!props.live || !open) return;
@@ -1074,68 +1023,86 @@ function DeepThinking(props: { text: string; live: boolean; truncated?: boolean 
     if (el) el.scrollTop = el.scrollHeight;
   }, [displayed, props.live, open]);
   return (
-    <AstryxCollapsible
-      className="flex flex-col"
+    <div
+      className="flex w-full flex-col"
+      data-slot="reasoning-disclosure"
       data-deep-thinking={props.live ? 'live' : undefined}
-      isOpen={open}
-      onOpenChange={setOpen}
-      trigger={(
-        <span className="flex min-w-0 items-center gap-2 py-0.5">
-          <Brain
-            size={16}
-            aria-hidden="true"
-            className="shrink-0 text-[color:var(--muted-foreground)]"
-          />
-          {props.live ? (
-            <TextShimmer active={!snap} className="min-w-0 truncate text-[length:var(--font-size-base)]">{copy.thinking}</TextShimmer>
-          ) : (
-            <span className="min-w-0 truncate text-[length:var(--font-size-base)] text-[color:var(--muted-foreground)]">{copy.thinking}</span>
-          )}
-          {props.truncated && (
-            <span
-              className="rounded-[var(--radius-control)] border border-[oklch(from_var(--warning)_l_c_h_/_0.30)] bg-[oklch(from_var(--warning)_l_c_h_/_0.06)] px-1 text-[length:var(--font-size-caption)] text-[color:var(--warning-text,var(--info-text))]"
-              data-truncated="true"
-              title={copy.thinkingTruncatedTitle}
-            >
-              {copy.truncated}
-            </span>
-          )}
-        </span>
-      )}
     >
-      {/* Left-border-indented quiet detail block, one language with the tool
-          trow's expanded body. `live` and settled render the SAME plain-text
-          body at the caption tier so the two states never jump size; settled
-          is muted + regular weight (long reasoning in italic reads poorly).
+      <BaseButton
+        type="button"
+        data-slot="reasoning-trigger"
+        aria-expanded={open}
+        aria-controls={contentId}
+        onClick={toggle}
+        className="flex min-h-6 w-full min-w-0 cursor-pointer items-center gap-1.5 rounded-[var(--radius-control)] border-0 bg-transparent py-0.5 text-left font-normal text-[color:var(--muted-foreground)] outline-none [transition:background-color_var(--duration-quick)_var(--ease-out-strong)] hover:bg-[var(--foreground-alpha-4)] focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+      >
+        <Brain
+          size={16}
+          aria-hidden="true"
+          className="shrink-0 text-[color:var(--muted-foreground)]"
+        />
+        {props.live ? (
+          <TextShimmer active={!snap} className="min-w-0 truncate">
+            <AstryxText type="supporting">{copy.thinking}</AstryxText>
+          </TextShimmer>
+        ) : (
+          <AstryxText type="supporting" className="min-w-0 truncate">{copy.thinking}</AstryxText>
+        )}
+        {props.truncated && (
+          <span
+            className="rounded-[var(--radius-control)] border border-[oklch(from_var(--warning)_l_c_h_/_0.30)] bg-[oklch(from_var(--warning)_l_c_h_/_0.06)] px-1 text-[length:var(--font-size-caption)] text-[color:var(--warning-text,var(--info-text))]"
+            data-truncated="true"
+            title={copy.thinkingTruncatedTitle}
+          >
+            {copy.truncated}
+          </span>
+        )}
+        <ChevronDown
+          size={14}
+          aria-hidden="true"
+          className={cn(
+            'ml-auto shrink-0 text-[color:var(--muted-foreground)] [transition:transform_var(--duration-quick)_var(--ease-out-strong)]',
+            open && 'rotate-180',
+          )}
+        />
+      </BaseButton>
+      {/* ChatToolCalls indents detail by its 16px status slot plus the 6px row
+          gap. Reasoning uses the same 22px content edge while retaining a
+          prose body instead of impersonating tool output. `live` and settled
+          render the SAME plain-text body at the caption tier so the two states
+          never jump size; settled is muted + regular weight (long reasoning in
+          italic reads poorly).
           The copy action is an icon-only hover affordance pinned top-right so
           it never squeezes the reading column into a vertical char stack. */}
-      {open ? (
-        <div className="group/reasoning relative mt-1 ml-2 border-l border-[var(--border)] pl-2.5 pr-7">
-          {props.live ? (
-            <pre
-              ref={bodyRef}
-              className="m-0 max-h-64 overflow-y-auto whitespace-pre-wrap [word-break:break-word] [font-family:inherit] text-[length:var(--font-size-base)] leading-normal text-[color:var(--muted-foreground)] [scroll-behavior:auto]"
-            >
-              <DeepThinkingBody text={displayed} streamFade={streamFade} />
-            </pre>
-          ) : (
-            <>
-              {/* Same `max-h-64 overflow-y-auto` bound as the live `<pre>` above
-                  so an expanded panel doesn't jump taller the frame thinking
-                  settles (live→settled swaps this body in place). Long reasoning
-                  stays a compact scroll box in both states. Body uses base 13px
-                  so tool output and thinking share one reading size. */}
-              <div className="max-h-64 overflow-y-auto whitespace-pre-wrap [word-break:break-word] text-[length:var(--font-size-base)] leading-normal text-[color:var(--muted-foreground)]">
-                {props.text}
-              </div>
-              <div className="absolute right-0 top-0 opacity-0 [transition:opacity_var(--duration-quick)_var(--ease-out-strong)] group-hover/reasoning:opacity-100 focus-within:opacity-100">
-                <MessageCopyButton text={props.text} label={copy.copyThinking} footerStyle />
-              </div>
-            </>
-          )}
-        </div>
-      ) : null}
-    </AstryxCollapsible>
+      <div id={contentId} data-slot="reasoning-content" hidden={!open}>
+        {open ? (
+          <div className="group/reasoning relative ml-[22px] pb-2 pr-7">
+            {props.live ? (
+              <pre
+                ref={bodyRef}
+                className="m-0 max-h-64 overflow-y-auto whitespace-pre-wrap [word-break:break-word] [font-family:inherit] text-[length:var(--font-size-base)] leading-normal text-[color:var(--muted-foreground)] [scroll-behavior:auto]"
+              >
+                <DeepThinkingBody text={displayed} streamFade={streamFade} />
+              </pre>
+            ) : (
+              <>
+                {/* Same `max-h-64 overflow-y-auto` bound as the live `<pre>` above
+                    so an expanded panel doesn't jump taller the frame thinking
+                    settles (live→settled swaps this body in place). Long reasoning
+                    stays a compact scroll box in both states. Body uses base 13px
+                    so tool output and thinking share one reading size. */}
+                <div className="max-h-64 overflow-y-auto whitespace-pre-wrap [word-break:break-word] text-[length:var(--font-size-base)] leading-normal text-[color:var(--muted-foreground)]">
+                  {props.text}
+                </div>
+                <div className="absolute right-0 top-0 opacity-0 [transition:opacity_var(--duration-quick)_var(--ease-out-strong)] group-hover/reasoning:opacity-100 focus-within:opacity-100">
+                  <MessageCopyButton text={props.text} label={copy.copyThinking} footerStyle />
+                </div>
+              </>
+            )}
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
