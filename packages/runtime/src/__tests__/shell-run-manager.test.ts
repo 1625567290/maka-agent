@@ -8,10 +8,17 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, test, type TestContext } from 'node:test';
-import type { ShellRunRecord, ShellRunStore, ShellRunUpdate, ToolResultContent } from '@maka/core';
+import {
+  SHELL_RUN_SOURCE_TOOL_CALL_ID_MAX_BYTES,
+  type ShellRunRecord,
+  type ShellRunStore,
+  type ShellRunUpdate,
+  type ToolResultContent,
+} from '@maka/core';
 import { createLegacyShellRunStoreForTest } from '@maka/storage/legacy-execution-test-support';
 
 import { ShellRunProcessManager } from '../shell-run-manager.js';
+import { ShellRunPtyControlClosedError } from '../shell-run-contract.js';
 import { defaultShellPlan, type ShellPlan } from '../shell-detect.js';
 import { PTY_PROTOCOL_REPLY_MAX_BYTES } from '../pty-screen-collector.js';
 
@@ -25,6 +32,34 @@ after(async () => {
 });
 
 describe('ShellRunProcessManager', () => {
+  test('rejects unprojectable provider tool-call identities before durable admission', async () => {
+    const cwd = await workspace();
+    const store = createLegacyShellRunStoreForTest(cwd);
+    const manager = createManager(store);
+    const completions: boolean[] = [];
+    const maximumMultibyteId = '😀'.repeat(SHELL_RUN_SOURCE_TOOL_CALL_ID_MAX_BYTES / 4);
+    assert.equal(
+      Buffer.byteLength(maximumMultibyteId, 'utf8'),
+      SHELL_RUN_SOURCE_TOOL_CALL_ID_MAX_BYTES,
+    );
+
+    await assert.rejects(
+      () =>
+        manager.runBackgroundBash(
+          shellInput({
+            cwd,
+            command: 'printf should-not-run',
+            sourceToolCallId: `${maximumMultibyteId}x`,
+            onCompletion: ({ successful }) => completions.push(successful),
+          }),
+        ),
+      /ShellRun source tool-call ID must be non-empty/,
+    );
+
+    assert.deepEqual(await store.listSessionShellRuns('session-1'), []);
+    assert.deepEqual(completions, [false]);
+  });
+
   test('keeps the default pipe path separated, durable, redacted, and observed', async () => {
     const cwd = await workspace();
     const store = createLegacyShellRunStoreForTest(cwd);
@@ -739,11 +774,42 @@ describe('ShellRunProcessManager', () => {
           input: 'late input',
           abortSignal: NO_ABORT,
         }),
-      /stopping and no longer accepts input/,
+      (error: unknown) =>
+        error instanceof ShellRunPtyControlClosedError &&
+        /stopping and no longer accepts input/.test(error.message),
     );
     const stopped = await stopping;
     assertShellRun(stopped);
     assert.deepEqual(stopped.operation, { kind: 'stop', applied: true });
+  });
+
+  test('closes PTY control at its mutation cut when shutdown starts after admission', async () => {
+    const manager = await createTestManager();
+    const initial = await manager.runBackgroundBash(
+      shellInput({
+        cwd: await workspace(),
+        command: waitForeverCommand('READY\n'),
+        pty: true,
+        timeoutMs: 5_000,
+      }),
+    );
+    assert.equal(initial.kind, 'shell_run');
+    await waitForPtyText(manager, initial.ref, /READY/);
+
+    const control = manager.writeStdin({
+      sessionId: 'session-1',
+      ref: initial.ref,
+      input: 'late input',
+      abortSignal: NO_ABORT,
+    });
+    const shutdown = manager.terminateAll();
+    await assert.rejects(
+      control,
+      (error: unknown) => error instanceof ShellRunPtyControlClosedError,
+    );
+    await shutdown;
+    const terminal = await manager.inspectResource('session-1', initial.ref);
+    assert.equal(terminal.status, 'cancelled');
   });
 
   test('reopens PTY control only after every pre-commit Stop has aborted', async () => {
@@ -777,7 +843,9 @@ describe('ShellRunProcessManager', () => {
         input: 'blocked',
         abortSignal: NO_ABORT,
       }),
-      /stopping and no longer accepts input/,
+      (error: unknown) =>
+        error instanceof ShellRunPtyControlClosedError &&
+        /stopping and no longer accepts input/.test(error.message),
     );
     secondAbort.abort();
     await Promise.all([first, blocked, second]);
@@ -1974,7 +2042,7 @@ describe('ShellRunProcessManager', () => {
         });
         return false;
       } catch (error) {
-        if (/stopping and no longer accepts input/.test(String(error))) return true;
+        if (error instanceof ShellRunPtyControlClosedError) return true;
         throw error;
       }
     });
@@ -2159,13 +2227,14 @@ function shellInput(input: {
   abortSignal?: AbortSignal;
   emitOutput?: (stream: 'stdout' | 'stderr', chunk: string) => void;
   shell?: ShellPlan;
+  sourceToolCallId?: string;
   onCompletion?: (outcome: { successful: boolean }) => void;
 }) {
   return {
     sessionId: 'session-1',
     sourceRunId: 'run-1',
     sourceTurnId: 'turn-1',
-    sourceToolCallId: 'tool-1',
+    sourceToolCallId: input.sourceToolCallId ?? 'tool-1',
     cwd: input.cwd,
     command: input.command,
     ...(input.argv !== undefined ? { argv: input.argv } : {}),
