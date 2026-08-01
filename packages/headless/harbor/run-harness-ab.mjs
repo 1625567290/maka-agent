@@ -358,8 +358,20 @@ const SUPPORTED_HARNESS_COMPOSITIONS = new Set([
   'deep-swe-1.1|openai-codex-gpt-5.6-sol-xhigh|codex',
   'deep-swe-1.1-full|kimi-coding-plan-k3-max|kimi-code',
   'deep-swe-1.1-full|openai-codex-gpt-5.6-sol-xhigh|codex',
+  'deep-swe-1.1-full|deepseek-v4-flash-max|opencode',
 ]);
 const RESOLVED_HARNESS_COMPOSITIONS = new WeakSet();
+
+/** Resolve host-proxy hub options from the harness environment. Pier's
+ * in-container agents dial the host credential proxy at an advertised host;
+ * the default (host.docker.internal) only exists on Docker Desktop, so a
+ * native-Linux VM must name a docker-bridge-reachable address explicitly. */
+export function resolveHarnessProviderProxyHubOptions(
+  raw = process.env.MAKA_HARNESS_AB_PROVIDER_PROXY_ADVERTISED_HOST,
+) {
+  const advertisedHost = raw?.trim();
+  return advertisedHost ? { providerProxyAdvertisedHost: advertisedHost } : {};
+}
 
 export function resolveHarnessCompetitorProfile(raw = 'kimi-code') {
   const profile = HARNESS_COMPETITOR_PROFILES[raw];
@@ -936,7 +948,9 @@ async function runLocked({
   const systemPromptPath = join(runRoot, 'prompts', 'default-system-prompt.txt');
   const evaluatedTaskIds = new Set(evaluationTasks.map((task) => task.id));
   const providerProxyHub =
-    benchmarkProfile.executor === 'pier' ? await createPierProviderProxyHub() : undefined;
+    benchmarkProfile.executor === 'pier'
+      ? await createPierProviderProxyHub(resolveHarnessProviderProxyHubOptions())
+      : undefined;
 
   const report = await runExperiment({
     runRoot,
