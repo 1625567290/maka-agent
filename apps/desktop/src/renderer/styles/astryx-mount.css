@@ -27,6 +27,7 @@
      AND product CSS consumes is --font-size-base (13px vs 0.875rem);
      `inherit` reopens the path to the product's :root value. Re-derive this
      list (astryx theme defs ∩ product defs ∩ product var() usage) whenever
-     the Astryx pin moves. */
+     the Astryx pin moves. SideNav section titles that need product scale are
+     pinned locally in sidebar.css — do not widen this list to --font-size-sm. */
   --font-size-base: inherit;
 }
