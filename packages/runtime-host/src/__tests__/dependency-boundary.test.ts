@@ -50,6 +50,7 @@ const allowedServerExternalImports = new Set([
   '@maka/storage/automation-authority',
   '@maka/storage/execution-stores',
   '@maka/storage/interaction-store',
+  '@maka/storage/long-term-memory-store',
   '@maka/storage/memory-bundle-store',
   '@maka/storage/runtime-policy-stores',
   '@maka/storage/shell-run-authority',
@@ -182,6 +183,7 @@ test('the production Candidate dependency graph remains non-serving', () => {
         specifier === '@maka/runtime' ||
         specifier === '@maka/storage/agent-graph-control-store' ||
         specifier === '@maka/storage/execution-stores' ||
+        specifier === '@maka/storage/long-term-memory-store' ||
         specifier === '@maka/storage/memory-bundle-store' ||
         specifier === '@maka/storage/runtime-policy-stores' ||
         specifier === '@maka/storage/task-ledger-authority'

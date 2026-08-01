@@ -18,6 +18,10 @@ import {
 } from '@maka/storage/artifact-stores';
 import { openInteractiveAutomationAuthorityForWrite } from '@maka/storage/automation-authority';
 import { openInteractiveExecutionStoresForWrite } from '@maka/storage/execution-stores';
+import {
+  type InteractiveLongTermMemoryWriter,
+  openInteractiveLongTermMemoryStoreForWrite,
+} from '@maka/storage/long-term-memory-store';
 import { openInteractiveMemoryBundleStoreForWrite } from '@maka/storage/memory-bundle-store';
 import { runWithStorageRootLease } from '@maka/storage/root-authority';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
@@ -63,6 +67,7 @@ export async function createExecutionRuntimeHostComposition(
   let usageStores: Awaited<ReturnType<typeof openInteractiveUsageStoresForWrite>> | undefined;
   let artifactStore: Awaited<ReturnType<typeof openInteractiveArtifactStoreForWrite>> | undefined;
   let shellRunStore: Awaited<ReturnType<typeof openInteractiveShellRunStoreForWrite>> | undefined;
+  let longTermMemoryStore: InteractiveLongTermMemoryWriter | undefined;
   let automationStore:
     | Awaited<ReturnType<typeof openInteractiveAutomationAuthorityForWrite>>
     | undefined;
@@ -76,6 +81,7 @@ export async function createExecutionRuntimeHostComposition(
     );
     automationStore = openedAutomationStore;
     const memoryStore = await openInteractiveMemoryBundleStoreForWrite(context.owner.lease);
+    longTermMemoryStore = await openInteractiveLongTermMemoryStoreForWrite(context.owner.lease);
     taskLedgerStore = await openInteractiveTaskLedgerStoreForWrite(context.owner.lease);
     const openedArtifactStore = await openInteractiveArtifactStoreForWrite(context.owner.lease);
     artifactStore = openedArtifactStore;
@@ -498,6 +504,11 @@ export async function createExecutionRuntimeHostComposition(
           errors.push(error);
         }
         try {
+          longTermMemoryStore?.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
           clientCapabilities?.close();
         } catch (error) {
           errors.push(error);
@@ -576,6 +587,11 @@ export async function createExecutionRuntimeHostComposition(
     }
     try {
       shellRunStore?.close();
+    } catch (closeError) {
+      errors.push(closeError);
+    }
+    try {
+      longTermMemoryStore?.close();
     } catch (closeError) {
       errors.push(closeError);
     }
