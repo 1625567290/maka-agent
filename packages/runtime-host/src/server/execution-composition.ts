@@ -53,6 +53,7 @@ import { HostRuntimePolicyCoordinator } from './runtime-policy-coordinator.js';
 import { HostRuntimeResourceCoordinator } from './runtime-resource-coordinator.js';
 import { SessionAdmissionGate } from './session-admission-gate.js';
 import { HostSessionCatalogCoordinator } from './session-catalog-coordinator.js';
+import { HostSessionRetirementCoordinator } from './session-retirement-coordinator.js';
 import { HostSessionRevisionCoordinator } from './session-revision-coordinator.js';
 import { SessionContinuityCoordinator } from './session-continuity-coordinator.js';
 import { HostSkillCatalogCoordinator } from './skill-catalog-coordinator.js';
@@ -121,7 +122,11 @@ export async function createExecutionRuntimeHostComposition(
             getLaunchSpec: filesystemWorkerLaunchSpecProvider,
           })
         : undefined;
-    const taskLedger = new HostTaskLedgerCoordinator(taskLedgerStore, sessionAdmission);
+    const taskLedger = new HostTaskLedgerCoordinator(
+      taskLedgerStore,
+      sessionAdmission,
+      stores.sessionStore,
+    );
     const openedGraphControlStore = createAgentGraphControlStore(
       context.owner.capability.canonicalPath,
     );
@@ -210,6 +215,7 @@ export async function createExecutionRuntimeHostComposition(
     const interactions = new HostInteractionCoordinator({
       store: stores.interactionStore,
       sessionAdmission,
+      sessions: stores.sessionStore,
       preflightSessionSnapshot: (sessionId, interactionProjection) =>
         canonicalProjectionReader.fitsCandidate(sessionId, {
           interactions: interactionProjection,
@@ -369,6 +375,7 @@ export async function createExecutionRuntimeHostComposition(
       root: { executeRoot: (input) => coordinator.executeRoot(input) },
       runtimePolicy: runtimePolicyStores,
       isSessionActive: (sessionId) => coordinator.readRootState(sessionId).kind !== 'idle',
+      sessionAdmission,
       acquireResidency: context.acquireResidency,
       requestDrain: context.requestDrain,
     });
@@ -434,16 +441,35 @@ export async function createExecutionRuntimeHostComposition(
       isSessionActive: (sessionId) => coordinator.readRootState(sessionId).kind !== 'idle',
       requestDrain: context.requestDrain,
     });
+    const sessionRetirement = new HostSessionRetirementCoordinator({
+      stores: stores.sessionStore,
+      admission: sessionAdmission,
+      root: coordinator,
+      messages,
+      interactions,
+      goals: requireGoal(goal),
+      automation: automations,
+      resources: runtimeResources,
+      manager,
+      capabilities: clientCapabilities,
+      continuity: continuityCoordinator,
+      artifacts: openedArtifactStore,
+      taskLedger: taskLedgerStore,
+      purgeOperationalState: (sessionId) => stores.purgeConversationOperationalState(sessionId),
+      requestDrain: context.requestDrain,
+    });
     const artifacts = new HostArtifactCoordinator(
       openedArtifactStore,
       context.requestDrain,
       sessionAdmission,
+      stores.sessionStore,
     );
     const handlers = {
       ...coordinator.handlers,
       ...requireGoal(goal).handlers,
       ...sessionCatalog.handlers,
       ...sessionRevisions.handlers,
+      ...sessionRetirement.handlers,
       ...messages.handlers,
       ...interactions.handlers,
       ...runtimePolicy.handlers,
@@ -464,6 +490,7 @@ export async function createExecutionRuntimeHostComposition(
         await requireMemory(memory).recover();
         await skills.recover();
         await openedArtifactStore.recover();
+        await sessionRetirement.recover();
         await sessionRevisions.recover();
         const sessions = await stores.sessionStore.listForRecovery();
         for (const session of sessions) {
@@ -583,6 +610,11 @@ export async function createExecutionRuntimeHostComposition(
         }
         try {
           await openedUsageStores.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          await sessionRetirement.close();
         } catch (error) {
           errors.push(error);
         }
