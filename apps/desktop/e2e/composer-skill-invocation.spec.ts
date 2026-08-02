@@ -1,22 +1,22 @@
 import type { Page } from '@playwright/test';
-import { expect, test } from './fixtures';
+import { expect, test, COMPOSER_INPUT } from './fixtures';
 
 async function createStarterSkillAndReload(page: Page): Promise<void> {
   const result = await page.evaluate(() => window.maka.skills.createStarter());
   expect(result.ok).toBe(true);
   await page.reload();
-  await expect(page.locator('.maka-composer-textarea')).toBeVisible();
+  await expect(page.locator(COMPOSER_INPUT)).toBeVisible();
 }
 
 async function selectStarterSkill(page: Page): Promise<void> {
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   await composer.fill('/');
   const listbox = page.getByRole('listbox', { name: '技能' });
   await expect(listbox).toBeVisible();
   await expect(listbox.getByRole('option', { name: /示例技能/ })).toBeVisible();
   await composer.press('Enter');
   await expect(page.locator('.maka-composer-skill-token')).toContainText('示例技能');
-  await expect(composer).toHaveValue('');
+  await expect(composer).toHaveText('');
 }
 
 test('the composer selects a structured Skill from slash suggestions', async ({
@@ -25,7 +25,7 @@ test('the composer selects a structured Skill from slash suggestions', async ({
   await createStarterSkillAndReload(page);
   await selectStarterSkill(page);
 
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   const token = page.locator('.maka-composer-skill-token');
   await expect(token).toContainText('示例技能');
   const removeButton = token.getByRole('button');
@@ -39,10 +39,32 @@ test('the composer selects a structured Skill from slash suggestions', async ({
   await expect(token).toHaveCount(0);
 });
 
+/**
+ * Backspace eats the staged Skill only from the very start of the draft. On a
+ * textarea that was `selectionStart === 0`; on a contentEditable it is a Range
+ * comparison, and getting it wrong is silent — the Skill disappears while the
+ * user is deleting a character in the middle of a word.
+ */
+test('Backspace away from the start deletes a character, not the staged Skill', async ({
+  window: page,
+}) => {
+  await createStarterSkillAndReload(page);
+  await selectStarterSkill(page);
+
+  const composer = page.locator(COMPOSER_INPUT);
+  const token = page.locator('.maka-composer-skill-token');
+  await composer.click();
+  await composer.pressSequentially('abc');
+  await composer.press('Backspace');
+
+  await expect(composer).toHaveText('ab');
+  await expect(token).toHaveCount(1);
+});
+
 test('slash suggestions follow Runtime project discovery and host gating', async ({
   invocableSkillsWindow: page,
 }) => {
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   await composer.fill('/');
   const listbox = page.getByRole('listbox', { name: '技能' });
   await expect(listbox).toBeVisible();
@@ -62,7 +84,7 @@ test('slash suggestions follow Runtime project discovery and host gating', async
 test('slash suggestions in a Deep Research session drop non-research Skills', async ({
   invocableSkillsWindow: page,
 }) => {
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   const listbox = page.getByRole('listbox', { name: '技能' });
 
   await composer.fill('/');
@@ -82,7 +104,7 @@ test('slash suggestions in a Deep Research session drop non-research Skills', as
 test('open Skill suggestions follow current collaboration capabilities', async ({
   invocableSkillsWindow: page,
 }) => {
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   await expect(composer).toBeVisible();
   await composer.fill('Open a session');
   await composer.press('Enter');
@@ -116,7 +138,7 @@ test('chip-only send renders a readable user message', async ({ window: page }) 
   await createStarterSkillAndReload(page);
   await selectStarterSkill(page);
 
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   await composer.press('Enter');
 
   await expect(page.getByLabel('你发送的消息').first()).toContainText('/skill:starter-skill');
@@ -130,12 +152,12 @@ test('a blocked Skill invocation keeps the complete composer draft', async ({
   const disabled = await page.evaluate(() => window.maka.skills.setEnabled('starter-skill', false));
   expect(disabled.ok).toBe(true);
 
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   await composer.fill('run it');
   await composer.press('Enter');
 
   await expect(page.getByText('Skill 调用失败，消息未发送')).toBeVisible();
-  await expect(composer).toHaveValue('run it');
+  await expect(composer).toHaveText('run it');
   await expect(page.locator('.maka-composer-skill-token')).toContainText('示例技能');
   await expect(page.locator('.maka-turn')).toHaveCount(0);
   // #1433: the composer creates the session BEFORE it sends, so a rejected

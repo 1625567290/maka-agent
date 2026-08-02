@@ -1,4 +1,4 @@
-import { test, expect } from './fixtures';
+import { test, expect, COMPOSER_INPUT } from './fixtures';
 
 /**
  * Core chat loop: type a message, send it, see the deterministic fake backend
@@ -7,7 +7,7 @@ import { test, expect } from './fixtures';
  * seeded 'e2e' connection clears onboarding so the composer is usable.
  */
 test('send a message and see the fake backend stream a reply', async ({ window: page }) => {
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   // #1433: the deleted first-run panel had its own input, and the spec that
   // covered the handoff between the two asserted this accessible name. With
   // one composer left, the name is what a screen-reader user has to find the
@@ -19,9 +19,69 @@ test('send a message and see the fake backend stream a reply', async ({ window: 
   await expect(page.getByText(/Fake backend received: hello e2e/)).toBeVisible();
 });
 
+/**
+ * Enter commits a candidate in a CJK IME; nothing else may act on it. Both the
+ * composer's send and ChatComposerInput's trigger menu read Enter, and the
+ * component runs its menu handling before the `onKeyDown` we pass it — so the
+ * guard is a native capture on the composer root that takes the key away from
+ * React entirely.
+ */
+test('Enter mid-IME-composition commits the candidate instead of sending', async ({
+  window: page,
+}) => {
+  const composer = page.locator(COMPOSER_INPUT);
+  await composer.fill('中文草稿');
+  await composer.evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    // `isComposing: false` on purpose: only the composition we track ourselves
+    // can stop this one, so a passing test can't be crediting the component's
+    // own `nativeEvent.isComposing` check.
+    element.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    );
+    element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+  });
+
+  // A leaked send is asynchronous, so `toHaveCount(0)` can pass before it
+  // lands, and a second send of the same text would hide it. Send something
+  // different and pin the total instead.
+  await composer.fill('中文草稿 已提交');
+  await composer.press('Enter');
+  await expect(page.getByText(/Fake backend received: 中文草稿 已提交/)).toBeVisible();
+  await expect(page.getByLabel('你发送的消息')).toHaveCount(1);
+});
+
+/**
+ * Enter is the send key, so the modifiers are the composer's only way to write
+ * a second line — and a mishandled one is destructive rather than inert:
+ * ChatComposerInput's own Enter branch clears the editor before it knows
+ * whether anything was sent, and it only exempts Shift.
+ */
+for (const modifier of ['Shift', 'Alt'] as const) {
+  test(`${modifier}+Enter adds a line instead of sending`, async ({ window: page }) => {
+    const composer = page.locator(COMPOSER_INPUT);
+    await composer.click();
+    await composer.pressSequentially('line one');
+    await composer.press(`${modifier}+Enter`);
+    await composer.pressSequentially('line two');
+
+    // Read the raw text: `toHaveText` normalizes whitespace, so it matches a
+    // newline against a plain space and cannot tell a real break from one that
+    // silently became a space. Assert the character and its position.
+    await expect
+      .poll(() => composer.evaluate((element) => element.textContent ?? ''))
+      .toBe('line one\nline two');
+    await composer.press('Enter');
+    const bubble = page.getByLabel('你发送的消息').first();
+    await expect(bubble).toBeVisible();
+    const wire = await bubble.evaluate((element) => element.textContent ?? '');
+    expect(wire).toContain('line one\nline two');
+  });
+}
+
 test('exposes the Astryx Markdown code-copy action', async ({ window: page }) => {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
-  const composer = page.locator('.maka-composer-textarea');
+  const composer = page.locator(COMPOSER_INPUT);
   await composer.fill([
     'show code',
     '',
