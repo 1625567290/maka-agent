@@ -7,6 +7,7 @@ import {
   createFilesystemWorkerLaunchSpecProvider,
   FakeBackend,
   FilesystemWorkerClient,
+  isOAuthEnrollmentProviderEnabled,
   isBuiltinFilesystemWorkerSandboxAvailable,
   SessionManager,
   ShellRunProcessManager,
@@ -43,6 +44,7 @@ import { HostInteractionCoordinator } from './interaction-coordinator.js';
 import { HostMemoryCoordinator } from './memory-coordinator.js';
 import { type HostMessageRootPort, HostMessageCoordinator } from './message-coordinator.js';
 import { HostOAuthExecutionAuthority } from './oauth-execution-authority.js';
+import { HostOAuthCoordinator } from './oauth-coordinator.js';
 import type { DomainOperationHandlerMap } from './operation-dispatcher.js';
 import { RootAdmissionOwner } from './root-admission-owner.js';
 import { RootTurnCoordinator } from './root-turn-coordinator.js';
@@ -135,6 +137,7 @@ export async function createExecutionRuntimeHostComposition(
     let canonicalProjection: CanonicalSessionProjectionReader | undefined;
     let memory: HostMemoryCoordinator | undefined;
     let clientCapabilities: HostClientCapabilityCoordinator | undefined;
+    let oauth: HostOAuthCoordinator | undefined;
     let automations: HostAutomationCoordinator | undefined;
     let goal: HostGoalCoordinator | undefined;
     const rootPort: HostMessageRootPort = {
@@ -201,6 +204,7 @@ export async function createExecutionRuntimeHostComposition(
       connectionEffects.beginDrain();
       skills.beginDrain();
       memory?.beginDrain();
+      oauth?.beginDrain();
       clientCapabilities?.beginDrain();
     };
     const interactions = new HostInteractionCoordinator({
@@ -316,7 +320,23 @@ export async function createExecutionRuntimeHostComposition(
     };
     clientCapabilities = new HostClientCapabilityCoordinator({
       activation: runtimePolicyActivation,
-      onRegistryChanged: registerBackendInvalidation,
+      onModelToolsChanged: registerBackendInvalidation,
+    });
+    oauth = new HostOAuthCoordinator({
+      runtimePolicy: runtimePolicyStores,
+      activation: runtimePolicyActivation,
+      clientCapabilities,
+      isProviderEnabled: isOAuthEnrollmentProviderEnabled,
+      acquireResidency: context.acquireResidency,
+      invalidateBackends: () => manager.refreshIdleBackends(),
+      onFatal: (error) => {
+        if (poisonFailure) return;
+        poisonFailure = error;
+        runtimePolicyActivation.poison();
+        context.retainUntilProcessExit();
+        beginDrain();
+        context.requestDrain();
+      },
     });
     const usagePricing = new HostUsagePricingCoordinator(
       openedUsageStores,
@@ -434,6 +454,7 @@ export async function createExecutionRuntimeHostComposition(
       ...skills.handlers,
       ...usagePricing.handlers,
       ...requireMemory(memory).handlers,
+      ...oauth.handlers,
       ...clientCapabilities.handlers,
       ...runtimeResources.handlers,
       ...automations.handlers,
@@ -542,6 +563,11 @@ export async function createExecutionRuntimeHostComposition(
         }
         try {
           await memory?.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          await oauth?.close();
         } catch (error) {
           errors.push(error);
         }
