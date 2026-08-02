@@ -63,6 +63,10 @@ import {
   type EffectiveOrchestration,
 } from '@maka/core/orchestration';
 import type { PlanToolResult } from './plan-tools.js';
+import {
+  YIELD_AGENT_GRAPH_TOOL_NAME,
+  type YieldAgentGraphToolResult,
+} from './stream-graph-supervisor-tools.js';
 import type { AttachmentByteReader } from '@maka/core/attachments';
 import {
   MAX_PROVIDER_IMAGE_REQUEST_BYTES,
@@ -522,7 +526,7 @@ export class AiSdkBackend implements AgentBackend {
   private abortController: AbortController | null = null;
   private currentTurnId: string | null = null;
   private loopStopRequested = false;
-  private handoffStopReason: CompleteEvent['stopReason'] | undefined;
+  private loopStopReason: CompleteEvent['stopReason'] | undefined;
   private currentInvocationId: string | null = null;
   /**
    * User messages steered into the running turn, drained from the caller's
@@ -1602,12 +1606,24 @@ export class AiSdkBackend implements AgentBackend {
               (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
             );
             if (rejectedSettlement) throw rejectedSettlement.reason;
-            const settlements = settlementOutcomes.flatMap((outcome) =>
-              outcome.status === 'fulfilled' ? [outcome.value] : [],
-            );
-            for (const settlement of settlements) {
+            const settlements = settlementOutcomes.map((outcome) => {
+              // A rejected settlement was handled above, so preserving the
+              // original array shape also preserves tool-call identity by index.
+              if (outcome.status === 'rejected') throw outcome.reason;
+              return outcome.value;
+            });
+            for (let index = 0; index < settlements.length; index += 1) {
+              const settlement = settlements[index]!;
+              const toolCall = returnedToolCalls[index];
               if (isPlanToolResult(settlement.result)) {
                 this.handlePlanToolResult(settlement.result, turnId, queue);
+              }
+              if (
+                returnedToolCalls.length === 1 &&
+                toolCall?.toolName === YIELD_AGENT_GRAPH_TOOL_NAME &&
+                isAgentGraphYieldToolResult(settlement.result)
+              ) {
+                this.handleAgentGraphYieldToolResult(settlement.result);
               }
             }
             await queue.waitUntilConsumedThroughCurrent();
@@ -1781,7 +1797,7 @@ export class AiSdkBackend implements AgentBackend {
         // win even when it arrives during post-stream usage persistence.
         if (this.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
         const stopReason =
-          this.handoffStopReason ??
+          this.loopStopReason ??
           (this.maxSteps !== undefined && finishReason === 'tool-calls'
             ? 'step_limit'
             : this.mapFinishReason(finishReason));
@@ -1947,7 +1963,7 @@ export class AiSdkBackend implements AgentBackend {
         revision: proposal.revision,
         storeVersion: result.storeVersion,
       });
-      this.handoffStopReason = 'plan_handoff';
+      this.loopStopReason = 'plan_handoff';
       this.loopStopRequested = true;
       return;
     }
@@ -1962,6 +1978,21 @@ export class AiSdkBackend implements AgentBackend {
     if (result.kind === 'plan_execution_completed' || result.kind === 'plan_execution_cancelled') {
       this.loopStopRequested = true;
     }
+  }
+
+  private handleAgentGraphYieldToolResult(result: YieldAgentGraphToolResult): void {
+    this.currentRunTrace?.emit(
+      'agent_graph',
+      'graph_supervisor_yielded',
+      'Graph supervisor yielded',
+      {
+        pendingWorkCount: result.pendingWorkCount,
+        liveOperatorCount: result.liveOperatorCount,
+        reason: result.reason,
+      },
+    );
+    this.loopStopReason = 'graph_yield';
+    this.loopStopRequested = true;
   }
 
   // --------------------------------------------------------------------------
@@ -2934,7 +2965,7 @@ export class AiSdkBackend implements AgentBackend {
     this.currentRunTrace = null;
     this.currentUserIntent = undefined;
     this.loopStopRequested = false;
-    this.handoffStopReason = undefined;
+    this.loopStopReason = undefined;
     this.injectedSteeringMessages = [];
     try {
       await this.toolRuntime.endTurn(turnId, this.aborted ? 'aborted' : 'completed');
@@ -3064,6 +3095,25 @@ function isPlanToolResult(output: unknown): output is PlanToolResult {
     'plan_execution_completed',
     'plan_execution_cancelled',
   ].includes(String((output as { kind?: unknown }).kind));
+}
+
+function isAgentGraphYieldToolResult(output: unknown): output is YieldAgentGraphToolResult {
+  if (output === null || typeof output !== 'object' || Array.isArray(output)) return false;
+  const result = output as Record<string, unknown>;
+  return (
+    Object.keys(result).length === 4 &&
+    result.kind === 'agent_graph_yielded' &&
+    typeof result.pendingWorkCount === 'number' &&
+    Number.isSafeInteger(result.pendingWorkCount) &&
+    result.pendingWorkCount > 0 &&
+    typeof result.liveOperatorCount === 'number' &&
+    Number.isSafeInteger(result.liveOperatorCount) &&
+    result.liveOperatorCount >= 0 &&
+    typeof result.reason === 'string' &&
+    result.reason.length > 0 &&
+    result.reason.length <= 4_000 &&
+    result.reason.trim() === result.reason
+  );
 }
 
 export function repairMakaToolCall(input: {
