@@ -923,13 +923,81 @@ export const Composer = forwardRef<
         ? copy.switchDisabledPermission
         : undefined;
 
+  /**
+   * The drawer's contract is context staged for the *next send*: quotes,
+   * attachments and Skills are consumed when the message goes out, and this
+   * count tells the user how many such items are pending. Plan / Swarm / Graph
+   * are session-scoped modes that survive the send, so they are not counted
+   * here and no longer render inside the drawer (#1897) — they read as mode
+   * state on the footer toolbar instead.
+   */
   const drawerTokenCount =
     (props.pendingQuotes?.length ?? 0)
     + (props.pendingAttachments?.length ?? 0)
-    + skillDraft.skills.length
-    + (props.planModeActive ? 1 : 0)
-    + (props.swarmModeActive ? 1 : 0)
-    + (props.graphModeActive ? 1 : 0);
+    + skillDraft.skills.length;
+  /**
+   * The session modes that are currently on, in the order the ＋ menu lists
+   * them. The menu stays the switch — it turns each mode on *and* off; these
+   * marks are the resting state readout, plus one nearby way out. They sit at
+   * the tail of the footer's left controls, after the model and thinking
+   * pickers, so switching a mode never shifts those two.
+   *
+   * Which mode a mark is comes from its icon, never from a hue. Maka blue is
+   * the single product accent (DESIGN.md), so a per-mode colour would be a
+   * second and third accent carrying no semantic — and a coloured pill per
+   * status is on the same file's Don't list.
+   */
+  const modes: ReadonlyArray<{
+    id: 'plan' | 'swarm' | 'graph';
+    active: boolean;
+    icon: ReactNode;
+    label: string;
+    onTitle: string;
+    isDisabled: boolean;
+    disabledReason: string | undefined;
+    onDeactivate(): void;
+  }> = [
+    {
+      id: 'plan',
+      active: props.planModeActive === true && props.onPlanModeChange !== undefined,
+      icon: <ListTodo size={15} aria-hidden="true" />,
+      label: copy.planModeLabel,
+      onTitle: copy.planModeOnTitle,
+      isDisabled:
+        props.disabled === true
+        || props.planModePending === true
+        || Boolean(props.planModeDisabledReason),
+      disabledReason: props.planModeDisabledReason,
+      onDeactivate: () => { void props.onPlanModeChange?.(false); },
+    },
+    {
+      id: 'swarm',
+      active: props.swarmModeActive === true && props.onSwarmModeChange !== undefined,
+      icon: <Network size={15} aria-hidden="true" />,
+      label: copy.swarmModeLabel,
+      onTitle: copy.swarmModeOnTitle,
+      isDisabled:
+        props.disabled === true
+        || props.swarmModePending === true
+        || Boolean(props.swarmModeDisabledReason),
+      disabledReason: props.swarmModeDisabledReason,
+      onDeactivate: () => { void props.onSwarmModeChange?.(false); },
+    },
+    {
+      id: 'graph',
+      active: props.graphModeActive === true && props.onGraphModeChange !== undefined,
+      icon: <Workflow size={15} aria-hidden="true" />,
+      label: copy.graphModeLabel,
+      onTitle: copy.graphModeOnTitle,
+      isDisabled:
+        props.disabled === true
+        || props.graphModePending === true
+        || Boolean(props.graphModeDisabledReason),
+      disabledReason: props.graphModeDisabledReason,
+      onDeactivate: () => { void props.onGraphModeChange?.(false); },
+    },
+  ];
+  const activeModes = modes.filter((mode) => mode.active);
   const showPlusMenu = Boolean(
     props.onPickAttachments
     || props.mentionSkills
@@ -1036,75 +1104,6 @@ export const Composer = forwardRef<
                     }}
                   />
                 ))}
-                {props.planModeActive ? (
-                  <span
-                    className="maka-composer-mode-indicator"
-                    data-mode="plan"
-                    title={props.planModeDisabledReason ?? copy.planModeOnTitle}
-                  >
-                    <Token
-                      size="sm"
-                      color="blue"
-                      label={copy.planModeLabel}
-                      isDisabled={
-                        props.disabled
-                        || props.planModePending === true
-                        || Boolean(props.planModeDisabledReason)
-                      }
-                      onRemove={
-                        props.disabled || props.planModePending || props.planModeDisabledReason
-                          ? undefined
-                          : () => { void props.onPlanModeChange?.(false); }
-                      }
-                    />
-                  </span>
-                ) : null}
-                {props.swarmModeActive ? (
-                  <span
-                    className="maka-composer-mode-indicator"
-                    data-mode="swarm"
-                    title={props.swarmModeDisabledReason ?? copy.swarmModeOnTitle}
-                  >
-                    <Token
-                      size="sm"
-                      color="teal"
-                      label={copy.swarmModeLabel}
-                      isDisabled={
-                        props.disabled
-                        || props.swarmModePending === true
-                        || Boolean(props.swarmModeDisabledReason)
-                      }
-                      onRemove={
-                        props.disabled || props.swarmModePending || props.swarmModeDisabledReason
-                          ? undefined
-                          : () => { void props.onSwarmModeChange?.(false); }
-                      }
-                    />
-                  </span>
-                ) : null}
-                {props.graphModeActive ? (
-                  <span
-                    className="maka-composer-mode-indicator"
-                    data-mode="graph"
-                    title={props.graphModeDisabledReason ?? copy.graphModeOnTitle}
-                  >
-                    <Token
-                      size="sm"
-                      color="cyan"
-                      label={copy.graphModeLabel}
-                      isDisabled={
-                        props.disabled
-                        || props.graphModePending === true
-                        || Boolean(props.graphModeDisabledReason)
-                      }
-                      onRemove={
-                        props.disabled || props.graphModePending || props.graphModeDisabledReason
-                          ? undefined
-                          : () => { void props.onGraphModeChange?.(false); }
-                      }
-                    />
-                  </span>
-                ) : null}
               </div>
             </ChatComposerDrawer>
           ) : undefined}
@@ -1313,6 +1312,32 @@ export const Composer = forwardRef<
                   )}
                 </div>
               ) : null}
+              {/* Mode readouts sit after the model pair, so a mode turning on
+                  or off never nudges the model and thinking pickers (#1897).
+                  Same ghost icon button as ＋ and permission two slots left —
+                  a mode is state on this toolbar, not a coloured pill, and the
+                  icon carries which mode it is. Clicking it leaves the mode,
+                  which unmounts this button, so focus is handed back to the
+                  input exactly as removing a Skill token does; otherwise a
+                  keyboard user is dropped on `document.body`. */}
+              {activeModes.map((mode) => (
+                <IconButton
+                  key={mode.id}
+                  variant="ghost"
+                  type="button"
+                  size="sm"
+                  className="maka-composer-mode-button"
+                  data-mode={mode.id}
+                  label={mode.label}
+                  tooltip={mode.disabledReason ?? mode.onTitle}
+                  isDisabled={mode.isDisabled}
+                  onClick={() => {
+                    mode.onDeactivate();
+                    window.requestAnimationFrame(() => focusInput());
+                  }}
+                  icon={mode.icon}
+                />
+              ))}
               {props.mentionSkills ? (
                 <ComposerSkillPicker
                   hideTrigger

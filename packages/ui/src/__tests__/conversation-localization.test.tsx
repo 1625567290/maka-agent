@@ -238,21 +238,21 @@ describe('localized conversation journey', () => {
     assert.match(markup, /aria-disabled="true"[^>]*>[\s\S]*?添加文件或目录|添加文件或目录[\s\S]*?aria-disabled="true"/);
   });
 
-  it('shows a Plan token in the drawer only while Plan is active', () => {
+  it('marks Plan on the footer toolbar only while Plan is active', () => {
     const on = render(
       'zh',
       <Composer onSend={() => {}} onStop={() => {}} planModeActive onPlanModeChange={() => {}} />,
     );
-    assert.match(on, /maka-composer-mode-indicator[^>]*data-mode="plan"/);
-    assert.match(on, /Plan 模式已启用|title="Plan 模式已启用/);
-    assert.match(on, /astryx-token/);
-    assert.match(on, /aria-label="Remove Plan"/);
+    assert.match(on, /data-mode="plan"/);
+    assert.match(on, /Plan 模式已启用/);
+    assert.match(on, /maka-composer-mode-button/);
+    assert.match(on, /aria-label="Plan"/);
 
     const off = render('zh', <Composer onSend={() => {}} onStop={() => {}} onPlanModeChange={() => {}} />);
-    assert.doesNotMatch(off, /maka-composer-mode-indicator/);
+    assert.doesNotMatch(off, /data-mode=/);
   });
 
-  it('keeps the active-mode token visible but non-removable with reason while streaming', () => {
+  it('keeps the active-mode mark visible but inert with its reason while streaming', () => {
     const markup = render(
       'zh',
       <Composer
@@ -264,13 +264,24 @@ describe('localized conversation journey', () => {
         onSwarmModeChange={() => {}}
       />,
     );
-    assert.match(markup, /maka-composer-mode-indicator[^>]*data-mode="swarm"/);
-    assert.match(markup, /等待流式输出结束/);
-    // Disabled reason keeps the remove control off the token.
-    assert.doesNotMatch(markup, /aria-label="Remove Swarm"/);
+    assert.match(markup, /data-mode="swarm"/);
+    // Scope to the mark's own <button>: the same reason also reaches the ＋
+    // menu's aria-description, so a document-wide search would pass on that
+    // alone. Astryx renders a tooltip'd disabled button as aria-disabled — it
+    // stays focusable precisely so the reason remains reachable — never as the
+    // native attribute, so that is the one form to pin.
+    const at = markup.indexOf('data-mode="swarm"');
+    const mark = markup.slice(markup.lastIndexOf('<button', at), markup.indexOf('</button>', at));
+    assert.match(mark, /aria-disabled="true"/);
+    // …and the reason is what the button actually points at, rather than some
+    // other element on the page that happens to carry the same string.
+    const describedBy = /aria-describedby="([^"]+)"/.exec(mark)?.[1];
+    assert.ok(describedBy, 'a disabled mark must name its reason');
+    const tooltip = markup.slice(markup.indexOf(`id="${describedBy}"`));
+    assert.match(tooltip.slice(0, tooltip.indexOf('</div></div>')), /等待流式输出结束/);
   });
 
-  it('localizes the active Graph Mode token title', () => {
+  it('localizes the active Graph Mode tooltip', () => {
     const zh = render(
       'zh',
       <Composer
