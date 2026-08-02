@@ -172,6 +172,154 @@ export function findFontShorthandOffenders(css: string, label: string): string[]
   return offenders;
 }
 
+// --- size ↔ leading pairing ------------------------------------------------
+
+/** Every style rule's own declarations, at any nesting depth.
+ *
+ * Depth-aware rather than `/([^{}]+)\{([^{}]*)\}/g`, which only ever matches
+ * the INNERMOST block. That form reads correctly against this repo's CSS today
+ * and is wrong the moment anyone writes native nesting: given
+ * `.a { font-size: X; & span { … } }` it yields only `& span`, and the
+ * declarations on `.a` vanish from every scan built on it — silently
+ * disarming the pairing contract for that rule. Nesting is supported by the
+ * build (Vite/Lightning CSS) and unused today, which is exactly when a parser
+ * bug is cheapest to fix and most likely to go unnoticed.
+ *
+ * At-rule bodies (`@media`, `@layer`, `@keyframes`) are not themselves rules,
+ * so they are not emitted; the style rules nested inside them are.
+ */
+export function parseCssBlocks(css: string): { selector: string; body: string }[] {
+  const src = stripCssComments(css);
+  const out: { selector: string; body: string }[] = [];
+  const stack: { selector: string; body: string }[] = [];
+  let buf = '';
+
+  for (const ch of src) {
+    if (ch === '{') {
+      // Declarations the enclosing rule made before this nested block opened
+      // are everything up to the last `;`; the remainder is the selector.
+      const cut = buf.lastIndexOf(';');
+      if (stack.length > 0 && cut >= 0) stack[stack.length - 1].body += buf.slice(0, cut + 1);
+      stack.push({ selector: (cut >= 0 ? buf.slice(cut + 1) : buf).trim(), body: '' });
+      buf = '';
+    } else if (ch === '}') {
+      const rule = stack.pop();
+      if (!rule) continue;
+      rule.body += buf;
+      buf = '';
+      if (!rule.selector.startsWith('@')) {
+        out.push({ selector: rule.selector.split('\n').pop()!.trim(), body: rule.body });
+      }
+    } else {
+      buf += ch;
+    }
+  }
+  return out;
+}
+
+/** Last-declared value of `prop` in a block body, or undefined.
+ *
+ * Last, not first: within one block CSS takes the later declaration, so a
+ * scanner that reads `body.match(...)` reports the value the browser discards.
+ * `assertCustomPropPinnedOnce` below documents that same false-green at length
+ * for custom properties; this is the longhand case of it.
+ *
+ * `\s*` around the colon because nothing normalizes it — biome.jsonc excludes
+ * both `apps/desktop/**` and `packages/ui/**` from the formatter, so
+ * `font-size : 18px` would otherwise slip every check in this file. */
+function lastDecl(body: string, prop: string): string | undefined {
+  const matches = [...body.matchAll(new RegExp(`(?:^|[;{])\\s*${prop}\\s*:\\s*([^;}]+)`, 'g'))];
+  return matches.at(-1)?.[1].trim();
+}
+
+/**
+ * Report blocks whose `font-size` and `line-height` name different tiers.
+ *
+ * The rule is not "leading must be token X": Astryx's leading is a pure
+ * function of size (`expandTypeScale.ts` snaps each tier to the 4px grid), so
+ * several role names share one value at one size and the choice between them
+ * is a readability one. What must hold is that the role whose leading a block
+ * names is the role sized like the size the block declares — checked by
+ * resolving both through the generated theme rather than against a hand-copied
+ * table, so an Astryx scale change moves this contract with it instead of
+ * failing it.
+ *
+ * Bidirectional. An earlier revision checked only size→leading and deferred
+ * leading-without-size to the e2e sweep — but that sweep measures one window,
+ * and measured, none of the three leading-only blocks in the tree rendered in
+ * it, so the class had no coverage anywhere. It is also the exact shape
+ * maka-tokens.css bans in prose ("leading belongs on the element that sets the
+ * size, never on a container above it"), and one of the three
+ * (`.maka-stat-tile-value`) was dead code overridden by both of its own
+ * variants. A rule that declares only a leading is either redundant with what
+ * it inherits or a ratio waiting to meet a size it was not chosen for.
+ *
+ * `inherit`/`unset`/`revert` are a legal pair when BOTH sides use them: the
+ * block is deferring the whole pairing upward, not splitting it.
+ */
+export function findLeadingPairingOffenders(
+  css: string,
+  themeCss: string,
+  tokensCss: string,
+): string[] {
+  const theme = parseCssCustomProps(themeCss);
+  const tokens = parseCssCustomProps(tokensCss);
+  const first = (map: Map<string, string[]>, name: string) => map.get(name)?.[0];
+
+  // Raw size token → length. Product aliases resolve through one hop.
+  const sizeOf = (token: string): string | undefined => {
+    const direct = first(theme, token);
+    if (direct && !direct.startsWith('var(')) return direct;
+    const alias = first(tokens, token) ?? direct;
+    const inner = alias?.match(/var\((--[\w-]+)\)/)?.[1];
+    return inner ? first(theme, inner) : undefined;
+  };
+  // Role leading token → the length of the tier that role is sized at.
+  const leadingTierOf = (token: string): string | undefined => {
+    if (token === '--maka-line-body') return sizeOf('--text-body-size');
+    const role = token.match(/^--text-(.+)-leading$/)?.[1];
+    if (!role) return undefined;
+    const sized = first(theme, `--text-${role}-size`)?.match(/var\((--[\w-]+)\)/)?.[1];
+    return sized ? sizeOf(sized) : undefined;
+  };
+
+  const DEFER = /^(?:inherit|unset|revert)$/;
+  const offenders: string[] = [];
+  for (const { selector, body } of parseCssBlocks(css)) {
+    const size = lastDecl(body, 'font-size');
+    const leading = lastDecl(body, 'line-height');
+    if (!size && !leading) continue;
+    if (size && leading && DEFER.test(size) && DEFER.test(leading)) continue;
+    if (!leading) {
+      offenders.push(`${selector}: declares font-size ${size} and no line-height`);
+      continue;
+    }
+    if (!size) {
+      offenders.push(`${selector}: declares line-height ${leading} and no font-size`);
+      continue;
+    }
+    // Naming a token is the whole mechanism: a literal is a copy of what the
+    // tier happened to compute before the last scale change. `18px` typed out
+    // is how `.maka-onboarding-setup header h1` drifted in the first place,
+    // and the em/rem ban alone never saw it.
+    const sizeToken = /^var\((--[\w-]+)/.exec(size)?.[1];
+    const leadingToken = /^var\((--[\w-]+)/.exec(leading)?.[1];
+    if (!sizeToken || !leadingToken) {
+      offenders.push(
+        `${selector}: font-size ${size} / line-height ${leading} — both must name a scale token`,
+      );
+      continue;
+    }
+    const want = sizeOf(sizeToken);
+    const got = leadingTierOf(leadingToken);
+    if (want && got && want === got) continue;
+    offenders.push(
+      `${selector}: font-size ${sizeToken} (${want}) paired with ${leadingToken} (${got})`,
+    );
+  }
+  return offenders;
+}
+
 // --- token pin (exact-once) -----------------------------------------------
 
 /** Parse all custom property declarations (`--token: value;`) from CSS.

@@ -133,6 +133,82 @@ test('resolves one type scale from the root down to the transcript', async ({
     expect(await label.evaluate((el) => getComputedStyle(el).fontSize)).toBe('14px');
   });
 
+  await test.step('the document default leading pairs with the body tier', async () => {
+    // The single highest-leverage line in the leading convergence, and one no
+    // stylesheet in this repo used to own: Astryx's reset declares
+    // `line-height: 1.5` on `:where(html)`, so every element that did not
+    // declare a leading inherited that ratio — measured 21px at the 14px body
+    // tier, on hundreds of nodes. `body` in maka-tokens.css now declares the
+    // body role's leading next to the body size it already declared.
+    expect(
+      Number.parseFloat(
+        await page.evaluate(() => getComputedStyle(document.body).lineHeight),
+      ),
+    ).toBeCloseTo(20, 1);
+  });
+
+  await test.step('every rendered line box sits on the 4px grid', async () => {
+    // The measurement the pairing contract cannot make. That contract reads
+    // co-located declarations; this asks the resolved document, which is where
+    // an inherited ratio meets an overridden size — the failure that had
+    // `.maka-attachment-file-content` holding one 1.25 for a 14px name and a
+    // 12px size at once, and `.maka-onboarding-setup header h1` taking a 16px
+    // rule's leading at 18px.
+    //
+    // The grid rule is Astryx's own (expandTypeScale.ts `computeLeading`):
+    // target 1.5 under 20px, 1.4 through 31px, 1.25 above, snapped to 4px,
+    // floored at the next 4px step at or above size + 4. Recomputed here
+    // rather than table-copied so an Astryx scale change moves the
+    // expectation with it — which only works if it is the same arithmetic:
+    // an earlier revision floored at `size + 4` instead of rounding that
+    // floor up to the grid, and at a 9px tier would have accepted 13px and
+    // rejected Astryx's own 16px.
+    //
+    // Scope stated with the measured number rather than hidden: this window
+    // renders 129 elements with their own text, and of the 323 classes whose
+    // rules declare a leading, 3 land on one. Sweeping every scenario would
+    // import other surfaces' vendor gaps, and an allowlist keyed to generated
+    // atom class names would rot on the next Astryx build. TextArea has two:
+    // its counter row declares --text-supporting-size with no matching leading
+    // (off-grid in the plan-reminders window, measured), and its input raises
+    // the size to `max(1rem, --text-body-size)` under `(pointer: coarse)`
+    // without raising the leading with it — 16px against the 14px tier's
+    // 1.4286, so 22.86px where the grid wants 24. Both are upstream: this
+    // sweep is first-party CSS's guard, and vendor component styles are not
+    // in any scan in this repo.
+    //
+    // So this is not the repo-wide guard and must not be described as one:
+    // what it covers is the one thing text cannot, an inherited ratio meeting
+    // an overridden size in a resolved document. Repo-wide coverage is the
+    // pairing contract's, which now checks both directions — an earlier
+    // revision of that contract deferred leading-without-size here, and
+    // measured, none of the three such blocks in the tree rendered in this
+    // window, so the class had no coverage in either place.
+    const offGrid = await page.evaluate(() => {
+      const grid = (px: number) => {
+        const target = px < 20 ? 1.5 : px < 32 ? 1.4 : 1.25;
+        return Math.max(Math.round((px * target) / 4) * 4, Math.ceil((px + 4) / 4) * 4);
+      };
+      const out: string[] = [];
+      for (const el of document.querySelectorAll('*')) {
+        const hasOwnText = [...el.childNodes].some(
+          (n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? '').trim().length > 0,
+        );
+        if (!hasOwnText) continue;
+        const style = getComputedStyle(el);
+        const size = Number.parseFloat(style.fontSize);
+        const leading = Number.parseFloat(style.lineHeight);
+        if (!Number.isFinite(leading)) continue; // `normal` — no declared leading to check
+        const want = grid(size);
+        if (Math.abs(leading - want) < 0.51) continue;
+        const name = typeof el.className === 'string' ? el.className.split(' ')[0] : '';
+        out.push(`${el.tagName.toLowerCase()}.${name}: ${size}px leading ${leading}px, grid wants ${want}px`);
+      }
+      return [...new Set(out)];
+    });
+    expect(offGrid).toEqual([]);
+  });
+
   await test.step('code elements resolve the theme mono stack, not the reset one', async () => {
     expect(
       await page.evaluate(() => {
