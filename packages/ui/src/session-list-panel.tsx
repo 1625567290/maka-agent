@@ -66,6 +66,13 @@ export function SessionListPanel(props: {
     groups,
   } = props;
 
+  // Astryx SideNav owns both widths already — an inline px `width` from its
+  // resizable state when expanded, and the 48px `rootCollapsed` class when not —
+  // and both ends are computed px lengths, so width interpolates across the swap
+  // on its own. The only thing it does not declare is a transition; that lives in
+  // shell-layout.css, gated off the handle's own `data-resizing`/focus rather
+  // than a flag mirrored into React state here.
+
   const groupingMenu = onViewModeChange ? (
     <DropdownMenu
       button={{
@@ -92,6 +99,7 @@ export function SessionListPanel(props: {
     <SideNav
       handleRef={props.collapseHandleRef}
       className="maka-session-panel agents-sidebar"
+      data-collapsed={collapsed ? 'true' : 'false'}
       aria-label={copy.listAriaLabel}
       collapsible={{
         isCollapsed: collapsed,

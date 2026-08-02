@@ -292,8 +292,91 @@ test('titlebar restores the chosen SideNav width across a collapse round trip', 
   await page.getByRole('button', { name: '收起侧边栏' }).click();
   await expect(shell).toHaveAttribute('data-sidebar-state', 'collapsed');
 
+  // The collapsed rail is 48px, and that number is load-bearing rather than
+  // cosmetic: the column edge is dropped in this state precisely BECAUSE the
+  // traffic lights (~62px) are wider than the rail, so an edge there would cut
+  // through the light cluster. A wider rail silently invalidates that argument.
+  // Astryx owns the value (`rootCollapsed` → --spacing-12); this asserts what it
+  // renders, so the lock survives the product not naming the number anywhere.
+  // Polled: the width eases, so the first sample is mid-interpolation.
+  await expect.poll(panelWidth).toBe(48);
+
   await page.getByRole('button', { name: '展开侧边栏' }).click();
   await expect(shell).toHaveAttribute('data-sidebar-state', 'expanded');
   await expect.poll(panelWidth).toBe(chosenWidth);
   expect(chosenWidth).toBeGreaterThanOrEqual(180);
+
+  // The width transition is suppressed while the user is driving the width
+  // themselves, so a drag does not trail the cursor by one 280ms ease per
+  // pointer-move. The suppression is derived from the handle's own state
+  // (`data-resizing`, and focus for the keyboard path) rather than stored, which
+  // is what this asserts: with the handle focused — the state the keyboard
+  // resize above leaves behind — the nav must not be animating.
+  await handle.focus();
+  await expect
+    .poll(() => panel.evaluate((element) => getComputedStyle(element).transitionProperty))
+    .toBe('none');
+});
+
+/**
+ * Column-edge contract.
+ *
+ * The session column is separated from the content column by two things and no
+ * others: the material difference AppShell paints from the theme's
+ * `--color-background-body` / `--color-background-surface`, and the 1px rule
+ * makaTheme.ts adds to the nav panel. Both were absent before this landed —
+ * Maka ran `variant="surface"`, which paints both columns the same and draws no
+ * divider — and the boundary was invisible.
+ *
+ * Neither half has a static gate: the material comes from a generated theme
+ * file, the rule from a component override inside it, and a CSS grep would pass
+ * on declarations that never reach the element. This asserts the rendered
+ * result instead, in both sidebar states, because collapsed deliberately drops
+ * BOTH halves — the traffic lights are wider than the 48px rail, so any column
+ * edge there cuts through the light cluster.
+ *
+ * Both samples are taken off AppShell's OWN elements — the nav panel and
+ * `.astryx-layout-content` — because those are what the theme paints. Sampling
+ * the product's `.maka-panel-detail` inside the content column measured a copy:
+ * it declared the same color itself, so the assertion held even when AppShell
+ * painted nothing at all.
+ */
+test('the session column carries an edge expanded and drops it collapsed', async ({
+  window: page,
+}) => {
+  const shell = page.locator('.appFrame');
+  const navColumn = page.locator('.astryx-app-shell-sidenav');
+  const contentColumn = page.locator('.maka-shell-astryx .astryx-layout-content');
+  const edge = () =>
+    navColumn.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        background: style.backgroundColor,
+        borderWidth: style.borderInlineEndWidth,
+        borderColor: style.borderInlineEndColor,
+      };
+    });
+  const contentBackground = () =>
+    contentColumn.evaluate((element) => getComputedStyle(element).backgroundColor);
+
+  await page.getByRole('button', { name: '展开侧边栏' }).click();
+  await expect(shell).toHaveAttribute('data-sidebar-state', 'expanded');
+
+  // Both halves of the edge ease between states, so settle on the resting
+  // value rather than sampling mid-interpolation (the transition passes through
+  // oklab() on the way).
+  await expect
+    .poll(async () => (await edge()).background === (await contentBackground()))
+    .toBe(false);
+  const expanded = await edge();
+  expect(expanded.borderWidth).toBe('1px');
+  expect(expanded.borderColor).not.toBe('rgba(0, 0, 0, 0)');
+
+  await page.getByRole('button', { name: '收起侧边栏' }).click();
+  await expect(shell).toHaveAttribute('data-sidebar-state', 'collapsed');
+
+  await expect
+    .poll(async () => (await edge()).background === (await contentBackground()))
+    .toBe(true);
+  await expect.poll(async () => (await edge()).borderColor).toBe('rgba(0, 0, 0, 0)');
 });

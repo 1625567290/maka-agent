@@ -2056,39 +2056,52 @@ function AppShellContent({
     <div
       className="appFrame agents-layout-root"
       data-agents-page
+      /* The single writer for sidebar state in the DOM. It sits on the frame,
+         above both the chrome strip and the shell, so every rule that keys on
+         it (shell-layout.css, sidebar.css) reaches its target as a descendant.
+         Copies on the shell and the detail panel bought nothing — one had no
+         readers at all — and three writers of the same value is three chances
+         for them to disagree. */
       data-sidebar-state={sessionListCollapsed ? 'collapsed' : 'expanded'}
     >
+      {/* Window chrome is frame-level hit-test only (not AppShell topNav): a
+          transparent drag overlay so column surfaces paint to the window top.
+          Must precede the shell in document order for Chromium app-region
+          subtraction (see e2e/window-titlebar.spec.ts). */}
+      <header
+        className="maka-window-titlebar"
+        aria-hidden={hasModalOpen ? 'true' : undefined}
+        inert={hasModalOpen ? true : undefined}
+      >
+        <AppShellTopbarActions
+          sidebarCollapsed={sessionListCollapsed}
+          sidebarHandleRef={sessionSideNavHandleRef}
+          onOpenSearchModal={() => setSearchModalOpen(true)}
+        />
+        {!VIEWS_WITHOUT_WORKSPACE_ACTIONS.has(agentsView) && (
+          <AppShellWorkspaceTopActions
+            workbarAvailable={navSelection.section === 'sessions' && Boolean(activeId)}
+            workbarCollapsed={workbarCollapsed}
+            onToggleWorkbar={() => setWorkbarCollapsed((current) => !current)}
+            onOpenFeedback={() => openSettingsSection('about')}
+            onOpenPalette={openPalette}
+            onOpenHelp={openHelp}
+            onOpenHealth={() => openSettingsSection('health')}
+          />
+        )}
+      </header>
       <AstryxAppShell
         className="app maka-shell-astryx agents-layout-body"
-        variant="surface"
+        /* Astryx's default: nav column takes --color-background-body, content takes
+           --color-background-surface. Both point at the product palette through
+           makaTheme.ts, so the shell follows a palette switch. Declared rather
+           than defaulted — it decides what separates the two columns. */
+        variant="elevated"
         height="fill"
         contentPadding={0}
         mobileNav={{ breakpoint: 'none', hasToggle: false }}
         aria-hidden={hasModalOpen ? 'true' : undefined}
         inert={hasModalOpen ? true : undefined}
-        data-modal-background-hidden={hasModalOpen ? 'true' : undefined}
-        data-sidebar-state={sessionListCollapsed ? 'collapsed' : 'expanded'}
-        topNav={
-          <header className="maka-window-titlebar">
-            <AppShellTopbarActions
-              sidebarCollapsed={sessionListCollapsed}
-              sidebarHandleRef={sessionSideNavHandleRef}
-              onOpenSearchModal={() => setSearchModalOpen(true)}
-              onCreateSession={createSession}
-            />
-            {!VIEWS_WITHOUT_WORKSPACE_ACTIONS.has(agentsView) && (
-              <AppShellWorkspaceTopActions
-                workbarAvailable={navSelection.section === 'sessions' && Boolean(activeId)}
-                workbarCollapsed={workbarCollapsed}
-                onToggleWorkbar={() => setWorkbarCollapsed((current) => !current)}
-                onOpenFeedback={() => openSettingsSection('about')}
-                onOpenPalette={openPalette}
-                onOpenHelp={openHelp}
-                onOpenHealth={() => openSettingsSection('health')}
-              />
-            )}
-          </header>
-        }
         sideNav={
           <SessionListPanel
             collapseHandleRef={sessionSideNavHandleRef}
@@ -2123,10 +2136,7 @@ function AppShellContent({
           />
         }
       >
-        <AppShellDetailPanel
-          data-sidebar-state={sessionListCollapsed ? 'collapsed' : 'expanded'}
-          agentsView={agentsView}
-        >
+        <AppShellDetailPanel agentsView={agentsView}>
           {/* PR-UI-RENDER-2: install the internal-URI dispatcher
               for any Markdown rendered inside ChatView (assistant
               answers, thinking panels, streaming bubbles). Wrapping
