@@ -2,14 +2,15 @@
  * Type-scale contracts.
  *
  * The renderer has exactly one type-scale authority: `typography.scale` in
- * astryx-theme/makaTheme.ts, whose generated ladder the product aliases. Three
- * things make that arrangement work, and all three are invisible at the call
- * site — reverting any one of them silently hands back Astryx's neutral
+ * astryx-theme/makaTheme.ts, whose generated ladder the role table composes.
+ * Three things make that arrangement work, and all three are invisible at the
+ * call site — reverting any one of them silently hands back Astryx's neutral
  * defaults or an implicit rem multiplier, with nothing else failing:
  *
  *   1. the root font-size stays at the browser default,
  *   2. the generated theme layer sits after the Astryx component layer,
- *   3. the product size names stay aliases instead of holding values.
+ *   3. the product keeps no name of its own for a size, a family or a
+ *      leading, so there is nothing that can drift from the Astryx one.
  *
  * Each is a pure text declaration, so it belongs here rather than in e2e —
  * the same demotion #1854 made for the settings floor layout. What text
@@ -26,8 +27,7 @@ import {
   cssRuleBody,
   assertCssRuleDecls,
   assertCustomPropPinnedOnce,
-  findFontShorthandOffenders,
-  findLeadingPairingOffenders,
+  findTextRoleOffenders,
   parseCssCustomProps,
   readAllRendererCss,
 } from './css-test-helpers.js';
@@ -78,19 +78,30 @@ describe('type scale contracts', () => {
     assert.equal(layers.at(-1), 'components', 'product CSS must stay last');
   });
 
-  it('keeps the product size names as aliases of the ladder', async () => {
-    const tokens = await read('maka-tokens.css');
-    assertCustomPropPinnedOnce(tokens, '--font-size-heading', 'var(--font-size-lg)');
-    assertCustomPropPinnedOnce(tokens, '--font-size-stat', 'var(--font-size-2xl)');
-    assertCustomPropPinnedOnce(tokens, '--font-size-ui', 'var(--font-size-base)');
-    assertCustomPropPinnedOnce(tokens, '--font-size-caption', 'var(--font-size-sm)');
-    assertCustomPropPinnedOnce(tokens, '--font-sans', 'var(--font-family-body)');
-    assertCustomPropPinnedOnce(tokens, '--font-mono', 'var(--font-family-code)');
-    assert.equal(
-      parseCssCustomProps(tokens).get('--font-size-base'),
-      undefined,
-      '--font-size-base IS the Astryx token; redefining it here shadows the scale and makes --font-size-ui self-referential',
-    );
+  it('keeps no product name for a size or a family', async () => {
+    // The previous shape of this test pinned six aliases —
+    // --font-size-heading/stat/ui/caption, --font-sans, --font-mono — because
+    // a call site named a size or a family and the alias was what kept that
+    // name pointing at the ladder. A call site names a role now, so all six
+    // reached zero consumers (check-dead-css found them) and are deleted. What
+    // has to hold is the stronger thing the aliases were only approximating:
+    // there is no product name for a size or a family at all, so there is
+    // nothing to drift from the Astryx one.
+    const tokens = parseCssCustomProps(await read('maka-tokens.css'));
+    for (const gone of [
+      '--font-size-heading',
+      '--font-size-stat',
+      '--font-size-ui',
+      '--font-size-caption',
+      '--font-sans',
+      '--font-mono',
+      '--font-default',
+      // --font-size-base was never defined here: it IS the Astryx token, and
+      // redefining the name would shadow the scale.
+      '--font-size-base',
+    ]) {
+      assert.equal(tokens.get(gone), undefined, `${gone} is superseded by the role table — do not reintroduce it`);
+    }
   });
 
   it('derives the transcript baseline instead of typing it in', async () => {
@@ -120,16 +131,56 @@ describe('type scale contracts', () => {
     rung('--font-size-2xl', '1.25rem'); //   20px — stat
   });
 
-  it('routes code elements through the monospace token', async () => {
-    // Astryx's reset hard-codes a stack on :where(code, kbd, samp, pre) that
-    // never consults --font-family-code, so every code element silently opted
-    // out of the theme. The regression is subtle enough that only a contract
-    // catches it.
-    assertCssRuleDecls(
-      stripCssComments(await read('maka-tokens.css')),
-      ':where(code, kbd, samp, pre)',
-      [/font-family:\s*var\(--font-mono\)/],
+  it('composes each role from its own Astryx atoms, on both anchors', async () => {
+    // The role table is the whole mechanism, so its shape is the one thing a
+    // call-site scan cannot see. Three properties, each of which failed
+    // silently while every other check here stayed green:
+    //
+    //   - a role must read ONLY its own atoms. `--maka-text-body` built from
+    //     `--text-heading-4-weight` is a hand-rolled tuple wearing a role name,
+    //     and it is exactly what this branch spent 348 call sites removing.
+    //   - the table must be declared on the code group as well as `:root`.
+    //     var() in a custom property is substituted where the property is
+    //     DECLARED, and the resolved string is what inherits — so a table
+    //     composed only on `:root` freezes the sans stack into every role, and
+    //     no rebind further down can reach it. Measured before the second
+    //     anchor landed: `.maka-tool-diff-body`, a real <pre>, read
+    //     `--maka-font-family: "Geist Mono Variable"` and computed
+    //     `font-family: -apple-system`.
+    //   - the family axis must be pinned once per anchor. A second definition
+    //     is a second family authority, which is the divergence the shorthand's
+    //     mandatory family slot exists to close.
+    const tokens = stripCssComments(await read('maka-tokens.css'));
+    const roles = [...tokens.matchAll(/(--maka-text-([\w-]+))\s*:\s*([^;]+);/g)];
+    assert.ok(roles.length >= 12, `expected the full role table, found ${roles.length}`);
+    for (const [, name, role, value] of roles) {
+      for (const [, atom] of value.matchAll(/var\((--text-[\w-]+)\)/g)) {
+        assert.match(
+          atom,
+          new RegExp(`^--text-${role}-(?:size|weight|leading)$`),
+          `${name} reads ${atom} — a role may only be composed from its own atoms`,
+        );
+      }
+    }
+    // Both anchors, and the family longhand that serves elements naming no
+    // role at all. Asserted as text because the tokens file is the one place
+    // the call-site scan below cannot reach.
+    assert.match(
+      tokens,
+      /:root,\s*:where\(code, kbd, samp, pre\)\s*\{[^}]*--maka-text-body:/,
+      'the role table must be anchored on :root AND the code element group',
     );
+    assertCssRuleDecls(tokens, ':where(code, kbd, samp, pre)', [
+      /--maka-font-family:\s*var\(--font-family-code\)/,
+      /font-family:\s*var\(--font-family-code\)/,
+    ]);
+    // Twice, not once: the axis is declared on each anchor, and that is the
+    // whole point of the second anchor. A third declaration would be a third
+    // family authority, which is what the pin exists to prevent.
+    assert.deepEqual(parseCssCustomProps(tokens).get('--maka-font-family'), [
+      'var(--font-family-body)',
+      'var(--font-family-code)',
+    ]);
   });
 
   it('flattens transcript headings to two steps, inside the turn only', async () => {
@@ -140,12 +191,12 @@ describe('type scale contracts', () => {
     assertCssRuleDecls(
       chat,
       '.maka-turn [data-maka-contract="markdown"] h1',
-      [/font-size:\s*var\(--font-size-lg\)/],
+      [/font:\s*var\(--maka-text-heading-3\)/],
     );
     assertCssRuleDecls(
       chat,
       '.maka-turn [data-maka-contract="markdown"] :is(h2, h3, h4, h5, h6)',
-      [/font-size:\s*var\(--text-body-size\)/],
+      [/font:\s*var\(--maka-text-heading-4\)/],
     );
     // Scanned repo-wide, not just in this file: the invariant is about the
     // shared MarkdownBody contract, and the Daily Review panel it protects
@@ -171,99 +222,48 @@ describe('type scale contracts', () => {
         /--text-supporting-leading:\s*var\(--maka-line-body\)/,
       ],
     );
-    // Repo-wide, and deliberately wider than the rule above it. A
-    // `font-size: … !important` anywhere in the renderer is a site declaring
-    // itself exempt from the ladder, which is the thing this branch exists to
-    // end; the sidebar's section-title pin was exactly that shape, and it
-    // survived because the ban only looked at one file. Product CSS sits in
-    // the last cascade layer, so nothing here needs the keyword to win.
-    assert.doesNotMatch(
-      stripCssComments(await readAllRendererCss()),
-      /font-size:[^;]*!important/,
-      'no renderer stylesheet may force a font-size — product CSS is already in the last layer',
-    );
   });
 
-  it('leaves no product leading vocabulary to compete with the roles', async () => {
-    // Both halves matter. A surviving `--leading-*` DEFINITION is a second
-    // authority waiting to be used; a surviving REFERENCE with the definition
-    // gone resolves to nothing and lands as `line-height: <invalid>`, which
-    // renders as the inherited leading rather than as a visible break. The
-    // scan covers packages/ui too — its bare `@import "@maka/ui/styles.css"`
-    // is expanded by readAllRendererCss, and it held eight of the literals.
+  it('lets a rule name a text role and nothing else', async () => {
+    // This one assertion replaces six. Before the roles, size / leading /
+    // weight / family were four independent properties, so each needed its
+    // own guard — a ban on `--leading-*` tiers, on literal ratios, on
+    // `!important` leadings and sizes, on em/rem multipliers, a ban on the
+    // `font:` shorthand, and a pairing check that resolved a block's size and
+    // leading through the generated theme to prove they named the same tier.
+    // Every one of those describes a way for the four to come apart. None of
+    // them is expressible now: a rule that cannot write a font longhand cannot
+    // write a literal ratio, an em multiplier, a forced size, or a mismatched
+    // pair, and the shorthand is inverted from the bypass into the only legal
+    // form. The atom-rebind arm folded in here too, for the same reason:
+    // two authorities on "may this name hold a value" would leave people
+    // reading the weaker one.
+    //
+    // Scope is every renderer stylesheet, this file included. Excluding
+    // maka-tokens.css wholesale — which the first shape of this contract did,
+    // to spare the one family longhand the role table needs — exempted the
+    // ~40 ordinary component rules that also live there from the only
+    // remaining guard.
+    const offenders = findTextRoleOffenders(
+      await readAllRendererCss(),
+      await read('maka-tokens.css'),
+      'renderer',
+    );
+    assert.deepEqual(offenders, [], `rules must name a text role:\n${offenders.join('\n')}`);
+  });
+
+  it('keeps no product leading vocabulary to compete with the roles', async () => {
+    // Not covered by the scan above, because this is about a NAME rather than
+    // a declaration: a surviving `--leading-*` definition is a second leading
+    // authority waiting to be used, and a surviving reference with the
+    // definition gone resolves to nothing and lands as an invalid
+    // `line-height` — which renders as the inherited leading, not as a
+    // visible break.
     const css = stripCssComments(await readAllRendererCss());
     assert.deepEqual(
       [...css.matchAll(/--leading-[\w-]+/g)].map((m) => m[0]),
       [],
       'no renderer stylesheet may define or read a product --leading-* tier',
-    );
-    // Literals are the same divergence written inline. `1.4286` typed out is
-    // not the body role: it is a copy of what the role happened to compute
-    // before the last scale change.
-    assert.deepEqual(
-      [...css.matchAll(/line-height\s*:\s*[\d.]+/g)].map((m) => m[0]),
-      [],
-      'line-height must name an Astryx role token, not a literal ratio',
-    );
-    // The bypass the two checks above cannot see, and the one this branch is
-    // most exposed to: rebinding a role token itself. The transcript uses that
-    // mechanism deliberately (`--text-supporting-leading: var(--maka-line-body)`
-    // in chat-message.css), so a rebind is legal — but only to another token.
-    // Rebound to a literal, one line re-establishes a second leading authority
-    // for a whole subtree and reaches every `line-height: var(--text-*-leading)`
-    // site under it, with every other check in this file still green.
-    assert.deepEqual(
-      [...css.matchAll(/--text-[\w-]+-leading\s*:\s*[\d.]+/g)].map((m) => m[0]),
-      [],
-      'an Astryx leading role may be rebound to another token, never to a literal',
-    );
-    // Product CSS is already in the last cascade layer, so the keyword buys
-    // nothing here and costs the ability to retune a tier from the theme. The
-    // font-size ban below has always said this; leading was left out.
-    assert.deepEqual(
-      [...css.matchAll(/line-height:[^;]*!important/g)].map((m) => m[0]),
-      [],
-      'no renderer stylesheet may force a line-height',
-    );
-    // `font:` shorthand carries a leading in its `/` slot (`12px/1.9 sans`),
-    // which every longhand scan above is blind to. The backstop for exactly
-    // this existed in css-test-helpers.ts with no caller anywhere in the repo
-    // outside its own unit test — a guard that was written but never posted.
-    assert.deepEqual(findFontShorthandOffenders(css, 'renderer'), []);
-  });
-
-  it('pairs every font-size and every line-height with its own tier', async () => {
-    // The pairing this branch exists to make unbreakable. Size and leading
-    // were separately chosen per site, so a site could move one and leave the
-    // other — measured, `.maka-onboarding-setup header h1` had done exactly
-    // that, overriding the size to 18px while the leading came from a 16px
-    // rule one selector up, and rendering 22.5px.
-    //
-    // Both directions, because both are ways for the pair to come apart: a
-    // size with no leading takes whatever ratio it inherits, and a leading
-    // with no size pins a ratio to a size it was never chosen against. The
-    // second half found three blocks in this tree that no check anywhere saw.
-    //
-    // Resolved through the generated theme rather than a copied table, so
-    // this tracks an Astryx scale change instead of failing on one.
-    const offenders = findLeadingPairingOffenders(
-      await readAllRendererCss(),
-      await read('astryx-theme/maka.css'),
-      await read('maka-tokens.css'),
-    );
-    assert.deepEqual(offenders, [], `size/leading pairs must name one tier:\n${offenders.join('\n')}`);
-  });
-
-  it('keeps font-size off em multipliers and rem', async () => {
-    // Both are ways of re-deriving the ladder per site. `em` compounds off
-    // whatever the parent happens to be (the hero title was hand-derived from
-    // a 15px body, then silently rendered 27.7px under a 13px one); `rem`
-    // reintroduces the root as a density knob. The ladder is the only source.
-    const css = stripCssComments(await readAllRendererCss());
-    assert.deepEqual(
-      [...css.matchAll(/font-size:\s*[\d.]+(?:em|rem)\b/g)].map((m) => m[0]),
-      [],
-      'font-size must reference the type scale, not an em/rem multiplier',
     );
   });
 });
