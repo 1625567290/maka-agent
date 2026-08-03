@@ -262,6 +262,8 @@ export const AGENT_RUN_EVENT_TYPES = [
   'sandbox_denial_detected',
   'provider_request_captured',
   'provider_request_attempt_recorded',
+  // No current writer; shipped ledgers still carry it and strict reads must not reject them (#1942).
+  'usage_recorded',
   'model_call_attempt_recorded',
   'history_compact_checkpoint_recorded',
   'active_full_compact_block_recorded',
