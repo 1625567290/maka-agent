@@ -1236,6 +1236,10 @@ export type {
   RuntimeEventToDraftOptions,
 } from './runtime-event-adapters.js';
 
+// session-trace-projection.ts — per-session causal trace for the Inspector (#1625).
+export { projectSessionTrace, attributeTurnFailure } from './session-trace-projection.js';
+export type { SessionTraceInput } from './session-trace-projection.js';
+
 // runtime-event-read-model.ts — side-by-side RuntimeEvent read projection.
 export {
   projectRuntimeEventsToStoredMessages,
