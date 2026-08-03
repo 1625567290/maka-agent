@@ -26,6 +26,19 @@ export const COMPUTER_USE_ERROR_CODES = [
   'target_missing',
   'ambiguous_target',
   'target_changed',
+  // The action is bound to an observation and the model also named an app or a
+  // window, and the two disagree. Its own word because the recovery is its own:
+  // not "look again" but "look at the thing you meant". It was being written
+  // into refusal text without being in this list, so the model read a
+  // twenty-ninth error word that appeared in no table, and the result carried no
+  // `error` at all — a refusal recorded as a successful invocation.
+  'target_mismatch',
+  // An argument arrived holding one of the placeholders this host writes into
+  // the model's own call record in place of a withheld value — `<text:18>`,
+  // `<point>`. Nothing was dispatched: the model is replaying the shape of its
+  // history rather than the text it means, and typing those characters into the
+  // user's field is the one outcome worse than refusing.
+  'withheld_value_replayed',
   'target_occluded',
   'page_target_changed',
   'duplicate_action',
@@ -183,6 +196,11 @@ export const CU_SEMANTIC_ACTION_TYPES = [
   'set_value',
   'select_text',
   'secondary_action',
+  'scroll_element',
+  'window_action',
+  // Dispatched step by step through `runSemantic` like the rest, so it belongs
+  // on this side of the partition even though one call carries several steps.
+  'element_sequence',
   'press_key',
 ] as const;
 export type CuSemanticActionType = (typeof CU_SEMANTIC_ACTION_TYPES)[number];
@@ -206,12 +224,15 @@ export type CuSemanticActionType = (typeof CU_SEMANTIC_ACTION_TYPES)[number];
  * `computer-use-schema-parity.test.ts` (@maka/runtime, which can import the
  * schema; this package cannot) compares the two lists in both directions.
  *
- * It is no longer hand-written: the two openers are named here and the rest is
- * spliced from `CU_SEMANTIC_ACTION_TYPES`, so there is one place to add a
- * semantic action rather than two that must agree.
+ * It is no longer hand-written: the three openers are named here and the rest
+ * is spliced from `CU_SEMANTIC_ACTION_TYPES`, so there is one place to add a
+ * semantic action rather than two that must agree. `launch_app` is an opener
+ * rather than a semantic action because it names an application, not an
+ * element: there is no observation for it to be bound to.
  */
 export const COMPUTER_USE_SEMANTIC_ACTIONS = [
   'list_apps',
+  'launch_app',
   'observe',
   ...CU_SEMANTIC_ACTION_TYPES,
 ] as const;
@@ -341,6 +362,26 @@ export type ComputerUseActionOutcome =
       ok: false;
       error: ComputerUseErrorCode;
       message: string;
+      /**
+       * The message may be shown to the model.
+       *
+       * Set only by a backend that guarantees its diagnostics carry no text
+       * belonging to the observed application. `maka.cu/2` §1.2 makes that a
+       * protocol rule: `error.message` is a fixed sentence chosen by
+       * `error.code`, and application text is confined to the declared
+       * observation fields. cua-driver made no such promise, which is why the
+       * message was withheld from every backend alike.
+       *
+       * Withholding it costs more than it protects. The executor writes "say
+       * Backspace or ForwardDelete rather than delete"; the model was handed
+       * `unsupported_action` alone, and the tool description tells it that code
+       * means keyboard input is off in this build. One mistyped key name taught
+       * it that the keyboard does not work.
+       *
+       * Absent means withheld, so a backend that forgets this flag is quiet
+       * rather than leaky.
+       */
+      messageIsAppTextFree?: boolean;
       evidence?: ComputerUseDispatchEvidence;
       completedSubSteps?: number;
     };
@@ -395,6 +436,23 @@ export interface ComputerUseApprovalSummary {
  * Accepts either dialect on input, so it can project raw arguments or an
  * approval summary recovered from storage.
  */
+/**
+ * One step of an `element_sequence`, as the model reads it back.
+ *
+ * Projected member by member rather than as one shape, because `steps` is an
+ * array in both schemas and `"<2 items>"` is a string: a model replaying its own
+ * sequence sent `steps: "<2 items>"`, the `.strict()` wire schema rejected the
+ * call before `impl`, and the rejection never reached the debug journal. A step
+ * that keeps its own shape stays an array, so the call is refused by name
+ * instead of disappearing.
+ */
+export interface ComputerUseModelCallStep {
+  label: string;
+  role?: string;
+  do?: string;
+  value?: string;
+}
+
 export interface ComputerUseModelCallArgs {
   action: string;
   app?: string;
@@ -402,7 +460,13 @@ export interface ComputerUseModelCallArgs {
   observation_id?: string;
   element_id?: string;
   /** Every other argument the call carried, values reduced to their shape. */
-  [key: string]: string | number | boolean | readonly number[] | undefined;
+  [key: string]:
+    | string
+    | number
+    | boolean
+    | readonly number[]
+    | readonly ComputerUseModelCallStep[]
+    | undefined;
 }
 
 /**
@@ -416,7 +480,12 @@ export interface ComputerUseModelCallArgs {
  * path, so without this the model would read back a call carrying a key it has
  * no way to send and whose value came off the accessibility tree.
  */
-const HOST_ONLY_ARGS = new Set(['approvalClass', 'rememberForTurnAllowed', 'element_identity']);
+const HOST_ONLY_ARGS = new Set([
+  'approvalClass',
+  'rememberForTurnAllowed',
+  'element_identity',
+  'elementIdentity',
+]);
 
 /** The keys projected by name above, so the sweep below does not repeat them. */
 const MODEL_CALL_NAMED_ARGS = new Set([
@@ -445,12 +514,37 @@ const MODEL_CALL_NAMED_ARGS = new Set([
  * wrong for the rest — and the wrong half is the one that motivated this
  * projection: the model read back `press_key ... text: <text>` and could not
  * see which key it had pressed.
+ *
+ * The rule this map has to satisfy, and did not: an argument whose value is a
+ * choice from a set the tool publishes must come back as that choice, because
+ * the set is what the schema validates against. `window_action` came back as
+ * `"<text:4>"`, `scroll_element`'s direction as `"<text:4>"`, and both are
+ * `z.enum`s — so a model replaying its own call was rejected by the SDK before
+ * `impl` ran and the rejection never reached the debug journal. `observe`'s
+ * `query` and `menu` and `wait`'s `wait_for_text` are worse: they are plain
+ * strings, so the replay is accepted, and a model that filtered a 1,200-element
+ * window with `query:"下载"` and asked for that view again matched nothing and
+ * read `showing 0 of 1200` as proof the control does not exist.
+ *
+ * `query`, `menu` and `wait_for_text` are the model's own words in the sense
+ * that matters here: they are predicates it composed and sent, not a verbatim
+ * copy of a field's contents the way `select_text`'s substring is, and not a
+ * value a person asked to have typed the way `type` and `set_value` are. They
+ * go through `redactSecrets` and a length bound like every other plain value.
  */
 const MODEL_CALL_PLAIN_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
-  ['observe', new Set(['include_screenshot'])],
+  // `query` and `menu` name what to look at, not what was found there.
+  ['observe', new Set(['include_screenshot', 'query', 'menu'])],
   ['screenshot', new Set(['include_screenshot'])],
   ['scroll', new Set(['scroll_direction', 'scroll_amount'])],
-  ['wait', new Set(['duration'])],
+  // The semantic twin of `scroll`, added after this map was written.
+  ['scroll_element', new Set(['scroll_direction', 'scroll_amount'])],
+  // The verb, from the enum the schema publishes. `position` and `size` are
+  // geometry and are handled by MODEL_CALL_GEOMETRY_ARGS below.
+  ['window_action', new Set(['window_action'])],
+  // The text a wait is waiting for is a prediction about the screen, written
+  // before the screen shows it.
+  ['wait', new Set(['duration', 'wait_for_text', 'wait_for_text_gone'])],
   // The key name, from the set of key names the executor accepts.
   ['press_key', new Set(['text'])],
   ['key', new Set(['text'])],
@@ -460,15 +554,35 @@ const MODEL_CALL_PLAIN_VALUES: ReadonlyMap<string, ReadonlySet<string>> = new Ma
 ]);
 
 /**
+ * Members of an `element_sequence` step that are the model's own choice.
+ *
+ * `do` is a two-value enum and `role` is an accessibility role name from a
+ * fixed vocabulary; both are rejected by the schema when they come back as a
+ * shape. `label` and `value` are not here: a label is the text a control shows,
+ * and a value is what a person asked to have written.
+ */
+const MODEL_CALL_PLAIN_STEP_MEMBERS = new Set(['do', 'role']);
+
+/**
  * Geometry the model itself chose, projected verbatim.
  *
- * Independent of action, because these three names mean the same thing
- * wherever they appear and none of them ever holds screen content: a
- * coordinate, the drag origin, and the zoom rectangle are numbers the model
- * wrote into the call. A model that clicked a point and missed has to be able
- * to see which point, or its next call is the same call.
+ * Independent of action, because these names mean the same thing wherever they
+ * appear and none of them ever holds screen content: a coordinate, the drag
+ * origin, the zoom rectangle, and the place and size a window was asked to take
+ * are numbers the model wrote into the call. A model that clicked a point and
+ * missed has to be able to see which point, or its next call is the same call.
+ *
+ * `position` and `size` joined late, with `window_action`. Reduced to
+ * `"<point>"` they were a string where the schema wants a tuple, so a replayed
+ * window move was rejected off the wire.
  */
-const MODEL_CALL_GEOMETRY_ARGS = new Set(['coordinate', 'start_coordinate', 'region']);
+const MODEL_CALL_GEOMETRY_ARGS = new Set([
+  'coordinate',
+  'start_coordinate',
+  'region',
+  'position',
+  'size',
+]);
 
 /** Integers only, so a mistyped `coordinate` still degrades to a shape. */
 function integerTuple(value: unknown): readonly number[] | undefined {
@@ -484,6 +598,15 @@ function integerTuple(value: unknown): readonly number[] | undefined {
  * The value is what a person typed or what a window showed, so it stays out.
  * The key does not: without it the model reads its own history as a call it
  * never made.
+ *
+ * A string carries its length. `<text>` on its own was a placeholder in the
+ * shape of a fill-in-the-blank, and `value`/`text` are `z.string().max(8000)`
+ * with no lower bound or pattern — so `"<text>"` was a legal call at the wire
+ * schema and at the strict union both, and a model replaying its own
+ * `set_value` typed those six characters into the user's field. A length is a
+ * description of the value rather than a substitute for it, and
+ * `COMPUTER_USE_WITHHELD_VALUE` below is what the tool refuses on so the
+ * mistake is named instead of typed.
  */
 function shapeOf(value: unknown): string {
   if (Array.isArray(value)) {
@@ -491,10 +614,49 @@ function shapeOf(value: unknown): string {
       ? '<point>'
       : `<${value.length} ${value.length === 1 ? 'item' : 'items'}>`;
   }
-  if (typeof value === 'string') return '<text>';
+  if (typeof value === 'string') return `<text:${value.length}>`;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return '<value>';
 }
+
+/**
+ * The steps of an `element_sequence`, each member projected on its own terms.
+ *
+ * Returns `undefined` for anything that is not a list of step-shaped objects,
+ * so a malformed `steps` still degrades to a shape rather than being echoed.
+ */
+function projectSteps(value: unknown): readonly ComputerUseModelCallStep[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 32) return undefined;
+  const projected: ComputerUseModelCallStep[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return undefined;
+    const step = asRecord(entry);
+    const out: ComputerUseModelCallStep = { label: shapeOf(ownDataProperty(step, 'label')) };
+    for (const member of MODEL_CALL_PLAIN_STEP_MEMBERS) {
+      const held = ownDataProperty(step, member);
+      if (typeof held === 'string' && held.length > 0) {
+        out[member as 'do' | 'role'] = boundedDisplay(redactSecrets(held), 64);
+      }
+    }
+    if ('value' in step) out.value = shapeOf(ownDataProperty(step, 'value'));
+    projected.push(out);
+  }
+  return projected;
+}
+
+/**
+ * The marks a withheld argument leaves in the record the model reads back.
+ *
+ * Exported so the tool can refuse one instead of acting on it literally: the
+ * record is the shape a model imitates, and these are the only strings in it
+ * that were never a value.
+ *
+ * Bare `<text>` is here although nothing writes it any more. It is what the
+ * previous release wrote, and a conversation that started under that release
+ * carries it in history; a model replaying that call has to be refused too,
+ * not have those six characters typed into the user's field.
+ */
+export const COMPUTER_USE_WITHHELD_VALUE = /^<(?:text(?::\d+)?|point|value|\d+ items?)>$/;
 
 export function computerUseModelCallArgs(args: unknown): ComputerUseModelCallArgs {
   const record = asRecord(args);
@@ -521,12 +683,20 @@ export function computerUseModelCallArgs(args: unknown): ComputerUseModelCallArg
   // worked and sends it again — and a real session refused eighteen calls for
   // missing exactly the fields the projection had removed. The privacy boundary
   // is about values, and only values are withheld.
-  const rest: Record<string, string | number | boolean | readonly number[]> = {};
+  const rest: Record<
+    string,
+    string | number | boolean | readonly number[] | readonly ComputerUseModelCallStep[]
+  > = {};
   const plain = MODEL_CALL_PLAIN_VALUES.get(action);
   for (const [key, value] of Object.entries(record ?? {})) {
     if (MODEL_CALL_NAMED_ARGS.has(key) || HOST_ONLY_ARGS.has(key)) continue;
     if (MODEL_CALL_GEOMETRY_ARGS.has(key)) {
       rest[key] = integerTuple(value) ?? shapeOf(value);
+      continue;
+    }
+    if (key === 'steps') {
+      const steps = projectSteps(value);
+      rest[key] = steps ?? shapeOf(value);
       continue;
     }
     if (plain?.has(key)) {
@@ -579,7 +749,23 @@ const POINTER_ACTIONS = new Set([
 ]);
 
 const KEYBOARD_ACTIONS = new Set(['type', 'key', 'hold_key', 'press_key']);
-const SEMANTIC_ACTIONS = new Set(['click_element', 'set_value', 'select_text', 'secondary_action']);
+const SEMANTIC_ACTIONS = new Set([
+  'click_element',
+  'set_value',
+  'select_text',
+  'secondary_action',
+  // Scrolling an element moves what is on screen without changing any value.
+  // It is still a mutation of the target's state, and it is the semantic twin
+  // of the coordinate `scroll` that already sits in POINTER_ACTIONS.
+  'scroll_element',
+  // A sequence of element actions is still element actions: same class, same
+  // approval, one call.
+  'element_sequence',
+  // Starting an app changes what is on screen. It touches no element, but it
+  // is not a read, and letting it fall through to the default would have
+  // classified it correctly by accident rather than on purpose.
+  'launch_app',
+]);
 
 // Exactly the wire vocabulary, derived rather than restated: an action the tool
 // accepts is an action a person can be asked to approve.

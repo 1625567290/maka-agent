@@ -622,6 +622,7 @@ export {
   CU_SCROLL_DIRECTIONS,
   CU_SEMANTIC_ACTION_TYPES,
   CU_TOOL_ACTION_TYPES,
+  COMPUTER_USE_WITHHELD_VALUE,
   computerUseApprovalScopeKey,
   computerUseApprovalSummary,
   computerUseModelCallArgs,
