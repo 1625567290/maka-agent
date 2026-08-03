@@ -107,11 +107,17 @@ export {
   TOOL_OUTPUT_STREAMS,
 } from './events.js';
 
-// tool-result-status.ts — settled tool activity status from tool_result
-export type { SettledToolActivityStatus } from './tool-result-status.js';
+// tool-result-status.ts — tool activity status from a result, or from its absence
+export type {
+  InFlightToolActivityStatus,
+  SettledToolActivityStatus,
+  ToolActivityStatus,
+} from './tool-result-status.js';
 export {
   isCancelledToolResultContent,
+  isInFlightToolStatus,
   toolResultActivityStatus,
+  unfinishedToolActivityStatus,
 } from './tool-result-status.js';
 
 // agent-swarm.ts — bounded projection over the canonical settled tool result.
