@@ -460,7 +460,11 @@ export interface SessionStreamerDeps {
   computerUseOverlay: AssembledTools['computerUseOverlay'];
   computerUseTools: AssembledTools['computerUseTools'];
   safeSendToRenderer: (channel: string, ...args: unknown[]) => void;
-  emitSessionsChanged: (reason: SessionChangedReason, sessionId?: string) => void;
+  emitSessionsChanged: (
+    reason: SessionChangedReason,
+    sessionId?: string,
+    extra?: { turnId?: string },
+  ) => void;
   interruptActivePlanExecution?: (sessionId: string, reason: string) => Promise<unknown>;
 }
 
@@ -511,15 +515,15 @@ export function createSessionStreamer(deps: SessionStreamerDeps): StreamEvents {
         goalWiring.coordinator.beginObservedTurn(externalSessionId, externalTurnId),
       onEvent: (event) => {
         if (!userAppendBroadcasted) {
-          emitSessionsChanged('message-appended', sessionId);
+          emitSessionsChanged('message-appended', sessionId, { turnId });
           userAppendBroadcasted = true;
         }
         safeSendToRenderer(`sessions:event:${sessionId}`, event);
         if (isStatusChangingSessionEvent(event)) {
-          emitSessionsChanged('status-change', sessionId);
+          emitSessionsChanged('status-change', sessionId, { turnId });
         }
         if (isTurnStatusChangingSessionEvent(event)) {
-          emitSessionsChanged('turn-status-change', sessionId);
+          emitSessionsChanged('turn-status-change', sessionId, { turnId });
           computerUseOverlay.clearForSession(sessionId);
           computerUseTools.clearSession(sessionId);
         }
@@ -537,13 +541,13 @@ export function createSessionStreamer(deps: SessionStreamerDeps): StreamEvents {
           message: errorMessage(error),
         } satisfies SessionEvent;
         safeSendToRenderer(`sessions:event:${sessionId}`, event);
-        emitSessionsChanged('status-change', sessionId);
-        emitSessionsChanged('turn-status-change', sessionId);
+        emitSessionsChanged('status-change', sessionId, { turnId });
+        emitSessionsChanged('turn-status-change', sessionId, { turnId });
         computerUseOverlay.clearForSession(sessionId);
         computerUseTools.clearSession(sessionId);
       },
       onDrained: async (outcome) => {
-        emitSessionsChanged('message-appended', sessionId);
+        emitSessionsChanged('message-appended', sessionId, { turnId });
         if (
           interruptActivePlanExecution &&
           (outcome.kind === 'aborted' || outcome.kind === 'errored')
@@ -555,6 +559,14 @@ export function createSessionStreamer(deps: SessionStreamerDeps): StreamEvents {
         }
       },
     });
+    // Thrown SYNCHRONOUSLY, and that is load-bearing. A refused turn never runs
+    // `onEvent` / `onStreamError` / `onDrained`, so no change ever names it —
+    // and a client's arm stays unconfirmed until its turn is named, holding Stop
+    // and the composer lock. Throwing synchronously is what carries the failure
+    // out through the `void streamEvents(...)` call in the send handler: it
+    // rejects that handler's promise instead of resolving `{ ok: true }`, so the
+    // client disarms in its own catch. Made async, this line would be swallowed
+    // by the `void` and latch the UI until restart.
     if (started.kind === 'unavailable') throw new Error(started.reason);
     return started.completion.then((outcome) => {
       const failureReason = outcome.kind === 'errored' || outcome.kind === 'suspended'

@@ -247,7 +247,6 @@ function AppShellContent({
     refreshSessions,
     seedSessions,
     upsertSessionSummary,
-    markSessionRunningOptimistic,
     markSessionReadLocally,
     activeId,
     activeIdRef,
@@ -268,6 +267,7 @@ function AppShellContent({
     setMessageRetryPendingBySession,
     setStopPendingBySession,
     setLiveTurnBySession,
+    confirmLiveTurn,
     setShellRunUpdatesBySession,
     setInteractionBySession,
     setSessionEventHealthBySession,
@@ -613,16 +613,15 @@ function AppShellContent({
     streamingSessionIds,
     liveTools,
     hasInFlightLiveTools,
-    turnInFlight,
-    sessionAwaitingModel,
+    turnActive,
     showProcessingIndicator,
     showContinuingIndicator,
   } = useShellLiveTurn({
     activeId,
+    activeSession,
     activeLiveTurn,
     liveTurnBySession,
     shellRunUpdatesBySession,
-    activeSession,
   });
   // Surface a credential-lifecycle alert directly in the chat header when
   // the active session's connection is in `needs_reauth` / `error` or has
@@ -1373,7 +1372,6 @@ function AppShellContent({
     isNewChatSendSurfaceActive,
     isShellSurfaceOwnerActive,
     markSessionReadLocally,
-    markSessionRunningOptimistic,
     messageRetryPendingRef,
     refreshSessions,
     setActiveId,
@@ -1822,6 +1820,7 @@ function AppShellContent({
     applyE2eFixture,
     bootstrapSessions,
     clearPendingTurnActionsForSession: turnActionRegistry.clearForSession,
+    confirmLiveTurn,
     clearSessionRendererState,
     createSession,
     handleConnectionEvent,
@@ -2274,18 +2273,12 @@ function AppShellContent({
                   // #646: Stop must be available for the WHOLE turn - the moment the
                   // user most wants to interrupt is a long wait with nothing on
                   // screen (first token, or a slow provider's step-to-step lull).
-                  // Drive Stop off `turnInFlight` (armed at send, cleared at the
-                  // terminal event), not the wait indicators, so it never blinks out
-                  // in a mid-turn gap. But `turnInFlight` alone goes STALE: the event
-                  // stream only follows `activeId`, so a session whose turn completes
-                  // while backgrounded never receives its terminal event and keeps its
-                  // arm. Gate on `sessionAwaitingModel` (status === 'running', kept
-                  // truthful for backgrounded sessions by sessions:changed and made
-                  // synchronous at send by markSessionRunningOptimistic) so returning
-                  // to such a session shows Send, not a stuck Stop that hides it.
-                  // `activeStreamingLive` is folded in defensively for the rare replay
-                  // where the arm was over-cleared.
-                  streaming={(sessionAwaitingModel && turnInFlight) || activeStreamingLive}
+                  // `turnActive` unions the send's zero-lag local arm with the
+                  // runtime's live `runningTurnIds` (turns this renderer did not
+                  // send), so neither witness can veto the other — see
+                  // `deriveTurnActive`. `activeStreamingLive` is folded in
+                  // defensively for the rare replay where the arm was over-cleared.
+                  streaming={turnActive || activeStreamingLive}
                   // #646: in the first-token wait (Stop up, nothing streams yet) the
                   // hint reads "Maka 正在处理…"; in a mid-turn lull it reads the calm
                   // "Maka 继续中…". Both are mutually exclusive with activeStreamingLive.
@@ -2390,12 +2383,18 @@ function AppShellContent({
                   }
                   permissionMode={activePermissionMode}
                   permissionModePending={activeId ? pendingPermissionModeBySession[activeId] === true : false}
+                  // Every "cannot change this mid-turn" gate reads `turnActive`,
+                  // the same witness Stop reads. Reading the persisted status
+                  // here instead left these toggles live through the whole
+                  // send→run-start window — long enough on a cold backend for a
+                  // mode change to land before the run registers and alter the
+                  // execution config of the turn already sent.
                   permissionModeDisabledReason={
                     activeId && pendingPermissionModeBySession[activeId] === true
                         ? shellCopy.permissionModeChanging
                       : activeStreamingLive
                           ? shellCopy.permissionModeStreaming
-                        : activeId && activeSessionForView?.status === 'running'
+                        : activeId && turnActive
                             ? shellCopy.permissionModeRunning
                           : activeId && activeSessionForView?.status === 'waiting_for_user'
                               ? shellCopy.permissionModeWaiting
@@ -2415,7 +2414,7 @@ function AppShellContent({
                       ? shellCopy.planModeChanging
                       : activeStreamingLive
                           ? shellCopy.planModeStreaming
-                        : activeId && activeSessionForView?.status === 'running'
+                        : activeId && turnActive
                             ? shellCopy.planModeRunning
                           : activeId && activeSessionForView?.status === 'waiting_for_user'
                               ? shellCopy.planModeWaiting
@@ -2431,7 +2430,7 @@ function AppShellContent({
                       ? shellCopy.swarmModeChanging
                       : activeStreamingLive
                           ? shellCopy.swarmModeStreaming
-                        : activeId && activeSessionForView?.status === 'running'
+                        : activeId && turnActive
                             ? shellCopy.swarmModeRunning
                           : activeId && activeSessionForView?.status === 'waiting_for_user'
                               ? shellCopy.swarmModeWaiting
@@ -2449,7 +2448,7 @@ function AppShellContent({
                       ? shellCopy.graphModeChanging
                       : activeStreamingLive
                           ? shellCopy.graphModeStreaming
-                        : activeId && activeSessionForView?.status === 'running'
+                        : activeId && turnActive
                             ? shellCopy.graphModeRunning
                           : activeId && activeSessionForView?.status === 'waiting_for_user'
                               ? shellCopy.graphModeWaiting

@@ -877,8 +877,31 @@ export class SessionManager {
     return headerToSummary(header);
   }
 
+  /**
+   * Sessions plus the turn each one is running right now. The persisted status
+   * cannot carry that: it is written only at the END of `AgentRun.begin`, it
+   * reads the same before a turn starts and after it ends, and a crash between
+   * a turn's end and its status write leaves `running` behind for good. The
+   * live run is the fact, so a client can name what is running and — because
+   * nothing survives the process — a restart reports the truth by itself.
+   */
+  /**
+   * The turns this session is running right now. Same live fact `listSessions`
+   * projects, for callers that need it about one session — notably to name the
+   * turns a change is about.
+   */
+  runningTurnIds(sessionId: string): string[] {
+    return this.runtimeKernel.runningTurnIds?.(sessionId) ?? [];
+  }
+
   async listSessions(filter?: SessionListFilter): Promise<SessionSummary[]> {
-    return this.deps.store.list(filter);
+    const sessions = await this.deps.store.list(filter);
+    const runningTurnIds = this.runtimeKernel.runningTurnIds?.bind(this.runtimeKernel);
+    if (!runningTurnIds) return sessions;
+    return sessions.map((session) => {
+      const turnIds = runningTurnIds(session.id);
+      return turnIds.length === 0 ? session : { ...session, runningTurnIds: turnIds };
+    });
   }
 
   async listChildSessions(parentSessionId: string): Promise<SessionSummary[]> {
