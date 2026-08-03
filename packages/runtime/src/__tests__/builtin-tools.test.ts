@@ -1295,6 +1295,39 @@ describe('builtin Bash streaming output', () => {
     ]);
   });
 
+  test('Read normalizes a blank ref to "no ref" before validating the file-or-resource union', async () => {
+    const read = buildBuiltinTools({
+      runtimeResources: {
+        readRuntimeResource: async () => ({ kind: 'text', text: 'unused' }),
+      },
+    }).find((tool) => tool.name === 'Read');
+    if (!read) throw new Error('Read tool missing');
+    const parameters = read.parameters as {
+      validate(value: unknown): PromiseLike<{
+        success: boolean;
+        value?: unknown;
+        error?: unknown;
+      }>;
+    };
+
+    // A blank ref alongside a path passes, and the ref key is dropped so the
+    // canonical input is the pure file variant.
+    const normalized = await parameters.validate({
+      path: 'config.yaml',
+      ref: '',
+      offset: 2,
+    });
+    assert.equal(normalized.success, true);
+    if (normalized.success) {
+      assert.deepEqual(normalized.value, { path: 'config.yaml', offset: 2 });
+      assert.ok(!('ref' in (normalized.value as Record<string, unknown>)));
+    }
+    assert.equal((await parameters.validate({ path: 'config.yaml', ref: '   ' })).success, true);
+    // A lone blank ref still fails: there is no readable target.
+    assert.equal((await parameters.validate({ ref: '' })).success, false);
+    assert.equal((await parameters.validate({ ref: '   ' })).success, false);
+  });
+
   test('StopBackgroundTask stops a runtime ref in the current session', async () => {
     const calls: unknown[] = [];
     const backgroundTasks = {
