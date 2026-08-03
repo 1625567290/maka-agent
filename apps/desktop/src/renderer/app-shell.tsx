@@ -72,7 +72,7 @@ import {
   usePlanModeState,
 } from './plan-mode-panel';
 import { McpPage } from './mcp-page';
-import { useOnboardingSnapshot } from './use-onboarding-snapshot';
+import { getOnboardingActivationCandidate, useOnboardingSnapshot } from './use-onboarding-snapshot';
 import type { AppUpdateStatus, OnboardingSnapshot } from '../preload/bridge-contract.js';
 import { ProviderLogo } from './settings/provider-display';
 import { ProviderBrandMark } from './settings/provider-brand-marks';
@@ -317,6 +317,13 @@ function AppShellContent({
     refreshConnections,
     handleConnectionEvent,
   } = useShellConnections({ toastApi, uiLocale });
+  const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
+  const onboardingState = onboarding.snapshot?.state;
+  const onboardingSettled = hasSettledInitialOnboarding(onboarding.snapshot?.milestones ?? []);
+  const onboardingActivationCandidate = getOnboardingActivationCandidate(
+    onboarding.snapshot,
+    sessions.length > 0,
+  );
   const {
     settingsOpen,
     settingsRequestedSection,
@@ -622,7 +629,6 @@ function AppShellContent({
     newChatModelLabel,
     newChatThinkingLevels,
     newChatThinkingLevel,
-    validPendingNewChatModel,
     setPendingNewChatModel,
     pendingNewChatThinkingLevel,
     setPendingNewChatThinkingLevel,
@@ -632,6 +638,7 @@ function AppShellContent({
     connections,
     connectionsRevision,
     defaultConnection,
+    activationCandidate: onboardingActivationCandidate,
     activeSession,
     // Only trust the loaded transcript once the active session's
     // messages finished loading; during the load the list may still be
@@ -1076,12 +1083,9 @@ function AppShellContent({
   // `sessions:changed` + `connections:event`. The hero renders only
   // when sessions.length === 0; any session (including archived /
   // aborted) takes over with the existing chat surface.
-  const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
   // Re-entrancy lock only — a ref, not state, because nothing renders
   // from it (#1433 removed its last reader with the first-run hero).
   const sessionStartPendingRef = useRef(false);
-  const onboardingState = onboarding.snapshot?.state;
-  const onboardingSettled = hasSettledInitialOnboarding(onboarding.snapshot?.milestones ?? []);
   // Seed sessions from the onboarding snapshot on first load — the snapshot
   // already fetches the session list + connections internally, so separate
   // `sessions:list` / `connections:list` / `getDefault` IPCs are redundant.
@@ -1369,7 +1373,7 @@ function AppShellContent({
     showModelSetupToast,
     toastApi,
     upsertSessionSummary,
-    validPendingNewChatModel,
+    newChatModel: newChatModel ?? null,
     pendingNewChatThinkingLevel: newChatThinkingLevel ?? null,
     newChatCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
     newChatOrchestrationMode: newChatGraphModeActive
@@ -2538,6 +2542,7 @@ function AppShellContent({
                   if (section) openSettingsSection(section);
                   else openSettings();
                 }}
+                onOpenConnectionDetail={openConnectionDetail}
                 onAddProvider={openProviderCreate}
                 onBrowseProviders={openProviderCatalog}
                 connections={connections}
