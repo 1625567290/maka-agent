@@ -18,25 +18,15 @@
  *   Vite dev server + Electron            ─── fork
  */
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import { build as esbuildBuild } from 'esbuild';
 import { buildCursorOverlay } from '../../../scripts/build-cursor-overlay.mjs';
-import {
-  clearDevelopmentSession,
-  createDevelopmentSession,
-  quitMacosDevelopmentApp,
-  recoverStaleDevelopmentSession,
-  resolveMacosDevelopmentLaunch,
-  waitForMacosDevelopmentApp,
-  writeDevelopmentSession,
-} from './dev-app-runtime.mjs';
+import { monitorDevelopmentApp, startDevelopmentApp } from './dev-app-runtime.mjs';
 
 const DESKTOP_DIR = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const REPO_ROOT    = resolve(DESKTOP_DIR, '..', '..');
-const ON_WINDOWS   = process.platform === 'win32';
 const TSC_CLI      = join(REPO_ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 const RUNTIME_WORKER_BUILD = join(REPO_ROOT, 'packages', 'runtime', 'scripts', 'build-filesystem-worker.mjs');
 
@@ -59,16 +49,6 @@ function runNodeTool(dir, script, args) {
     });
     child.on('error', reject_);
   });
-}
-
-function resolveElectronBin() {
-  for (let dir = DESKTOP_DIR; ; dir = dirname(dir)) {
-    const exe = ON_WINDOWS
-      ? join(dir, 'node_modules', 'electron', 'dist', 'electron.exe')
-      : join(dir, 'node_modules', '.bin', 'electron');
-    if (existsSync(exe)) return exe;
-    if (dirname(dir) === dir) return 'electron';
-  }
 }
 
 // ── build phases ─────────────────────────────────────────────────────────────
@@ -151,74 +131,48 @@ if (!devUrl) {
 }
 
 log('electron', `launching against ${devUrl} (renderer HMR live)`);
-const appArgs = [DESKTOP_DIR, ...process.argv.slice(2)];
-const macosLaunch = await resolveMacosDevelopmentLaunch();
-if (macosLaunch) {
-  await recoverStaleDevelopmentSession();
-  const userDataArg = process.argv.slice(2).find((arg) => arg.startsWith('--user-data-dir='));
-  writeDevelopmentSession(createDevelopmentSession({
-    supervisorPid: process.pid,
-    viteUrl: devUrl,
-    env: process.env,
-    userDataDir: userDataArg?.slice('--user-data-dir='.length),
-    electronArgs: process.argv.slice(2).filter((arg) => !arg.startsWith('--user-data-dir=')),
-  }));
-}
-const electron = spawn(macosLaunch?.command ?? resolveElectronBin(), macosLaunch?.args ?? appArgs, {
-  cwd: DESKTOP_DIR,
-  stdio: 'inherit',
-  env: { ...process.env, VITE_DEV_SERVER_URL: devUrl },
-});
 
+let app = null;
 let shuttingDown = false;
-async function shutdown(code, options = {}) {
+async function shutdown(code) {
   if (shuttingDown) return;
   shuttingDown = true;
-  if (macosLaunch) {
-    await quitMacosDevelopmentApp();
-    clearDevelopmentSession();
-  }
-  if (options.killElectron !== false) {
-    await terminateProcessTree(electron);
-  }
+  await app?.stop();
   await server.close().catch(() => {});
   process.exit(code);
 }
 
-function terminateProcessTree(child) {
-  if (child.exitCode !== null || child.killed) return Promise.resolve();
-  if (ON_WINDOWS && child.pid) {
-    return new Promise((resolve_) => {
-      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-        stdio: ['ignore', 'ignore', 'ignore'],
-      });
-      killer.on('exit', () => resolve_());
-      killer.on('error', () => resolve_());
-    });
-  }
-  child.kill('SIGTERM');
-  return Promise.resolve();
-}
+// Registered before the launch await: preparing the bundle can take a codesign
+// rebuild, and a signal arriving with no handler installed takes the default
+// action, leaving the dev server and any app behind.
+process.on('SIGINT', () => shutdown(0));
+process.on('SIGTERM', () => shutdown(0));
+// Closing the terminal window sends SIGHUP; without this the detached bundle
+// survives as an orphan holding the single-instance lock.
+process.on('SIGHUP', () => shutdown(0));
 
-if (!macosLaunch) {
-  electron.on('exit', (code) => shutdown(code ?? 0, { killElectron: false }));
-} else {
-  electron.on('exit', (code) => {
-    if (code && code !== 0) shutdown(code, { killElectron: false });
-  });
-}
-electron.on('error', (err) => {
+app = await startDevelopmentApp({ argv: process.argv.slice(2), viteUrl: devUrl });
+if (app.isMacosBundle) log('electron', 'launched Maka Dev.app through LaunchServices');
+
+app.child.on('error', (err) => {
   console.error(`[dev] failed to start Electron: ${err.message}`);
   shutdown(1);
 });
-if (macosLaunch) {
-  void waitForMacosDevelopmentApp().then(
-    () => log('electron', 'Maka Dev startup handshake complete'),
-    (error) => {
-      console.error(`[dev] ${error.message}`);
+if (app.isMacosBundle) {
+  // `open` exits 0 at the handoff, so only a failure to hand off is news here;
+  // the app's own lifetime is what the monitor reports.
+  app.child.on('exit', (code) => {
+    if (code) shutdown(code);
+  });
+  monitorDevelopmentApp({ stopped: () => shuttingDown }).then((outcome) => {
+    if (outcome === 'never-started') {
+      console.error('[dev] Maka Dev.app did not start (see the output above)');
       shutdown(1);
-    },
-  );
+    } else if (outcome === 'exited') {
+      log('electron', 'Maka Dev.app quit');
+      shutdown(0);
+    }
+  });
+} else {
+  app.child.on('exit', (code) => shutdown(code ?? 0));
 }
-process.on('SIGINT', () => shutdown(0));
-process.on('SIGTERM', () => shutdown(0));
