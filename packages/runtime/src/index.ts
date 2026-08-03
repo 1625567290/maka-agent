@@ -845,7 +845,10 @@ export {
   requestOAuthEndpointJson,
   requestOAuthTokenEndpointJson,
 } from './oauth-login.js';
-export { isOAuthEnrollmentProviderEnabled } from './oauth-provider-contracts.js';
+export {
+  isOAuthEnrollmentProviderEnabled,
+  OAuthDeviceAuthorizationExpiredError,
+} from './oauth-provider-contracts.js';
 export type { OAuthEnrollmentProvider } from './oauth-provider-contracts.js';
 export {
   pollXaiDeviceAuthorization,
@@ -856,6 +859,18 @@ export type {
   StartXaiDeviceAuthorizationInput,
   XaiDeviceAuthorization,
 } from './xai-oauth-enrollment.js';
+export {
+  exchangeCodexDeviceAuthorizationCode,
+  pollCodexDeviceAuthorization,
+  startCodexDeviceAuthorization,
+} from './codex-oauth-enrollment.js';
+export type {
+  CodexDeviceAuthorization,
+  CodexDeviceAuthorizationGrant,
+  ExchangeCodexDeviceAuthorizationCodeInput,
+  PollCodexDeviceAuthorizationInput,
+  StartCodexDeviceAuthorizationInput,
+} from './codex-oauth-enrollment.js';
 export type {
   ExchangeOAuthAuthorizationCodeInput,
   OAuthLoginAuthorization,
@@ -869,7 +884,12 @@ export type {
 } from './oauth-login.js';
 export { buildSubscriptionModelFetch } from './subscription-model-fetch.js';
 export type { SubscriptionModelFetchInput } from './subscription-model-fetch.js';
-export { extractCodexAccountId, openAiCodexHeaders } from './subscription-auth.js';
+export {
+  extractCodexAccountClaims,
+  extractCodexAccountId,
+  openAiCodexHeaders,
+} from './subscription-auth.js';
+export type { CodexAccountClaims } from './subscription-auth.js';
 export {
   compactionDecisionDiagnosticPatch,
   compactionDecisionToDiagnostic,

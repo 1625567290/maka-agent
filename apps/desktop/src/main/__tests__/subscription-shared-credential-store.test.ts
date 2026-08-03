@@ -8,7 +8,6 @@
 import { strict as assert } from 'node:assert';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 import type { SubscriptionActionResult } from '@maka/core';
@@ -408,7 +407,7 @@ describe('OAuth subscription token authority (shared CredentialStore)', () => {
     await assert.rejects(stat(join(userDataDir, '.claude_subscription_token')), { code: 'ENOENT' });
   });
 
-  it('Codex login writes the loopback exchange result to its shared credential', async () => {
+  it('Codex login writes the device-auth exchange result to its shared credential', async () => {
     const credentials = createMemoryCredentialStore();
     const userDataDir = await makeUserDataDir();
     let openedUrl: string | undefined;
@@ -418,15 +417,36 @@ describe('OAuth subscription token authority (shared CredentialStore)', () => {
         openedUrl = url;
       },
       now: () => NOW,
-      fetchFn: async () =>
-        Response.json({
-          access_token: jwt({
-            sub: 'codex-login-subject',
-            'https://api.openai.com/auth': { chatgpt_account_id: 'codex-login-account' },
-          }),
-          refresh_token: 'codex-login-refresh',
-          expires_in: 3600,
-        }),
+      sleep: async () => {},
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url.endsWith('/deviceauth/usercode')) {
+          return Response.json({
+            device_auth_id: 'deviceauth-codex-login',
+            user_code: 'CODE-1234',
+            interval: '5',
+            expires_at: new Date(NOW + 600_000).toISOString(),
+          });
+        }
+        if (url.endsWith('/deviceauth/token')) {
+          return Response.json({
+            authorization_code: 'codex-login-code',
+            code_challenge: 'challenge',
+            code_verifier: 'codex-login-verifier',
+          });
+        }
+        if (url.endsWith('/oauth/token')) {
+          return Response.json({
+            access_token: jwt({
+              sub: 'codex-login-subject',
+              'https://api.openai.com/auth': { chatgpt_account_id: 'codex-login-account' },
+            }),
+            refresh_token: 'codex-login-refresh',
+            expires_in: 3600,
+          });
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      },
       credentialStore: credentials.store,
     });
 
@@ -435,15 +455,9 @@ describe('OAuth subscription token authority (shared CredentialStore)', () => {
     const authRequestId = authorization.authRequestId;
     try {
       assert.deepEqual(await service.openAuthorizationUrl(authRequestId), { ok: true });
-      assert.ok(openedUrl);
-      const state = new URL(openedUrl).searchParams.get('state');
-      assert.ok(state);
-      const callback = new URL('http://127.0.0.1:1455/auth/callback');
-      callback.searchParams.set('code', 'codex-login-code');
-      callback.searchParams.set('state', state);
-      const callbackResponse = await fetch(callback);
-      assert.equal(callbackResponse.status, 200);
-      await callbackResponse.text();
+      // The verification page is the fixed server-owned device URL; no
+      // local loopback callback is involved.
+      assert.equal(openedUrl, 'https://auth.openai.com/codex/device');
 
       assert.deepEqual(await service.completeAuthorization(authRequestId), { ok: true });
       const stored = JSON.parse(
@@ -457,38 +471,6 @@ describe('OAuth subscription token authority (shared CredentialStore)', () => {
     }
   });
 
-  it('Codex login falls back to the official allowlisted port when 1455 is occupied', async () => {
-    const occupyingServer = createServer();
-    await new Promise<void>((resolve, reject) => {
-      occupyingServer.once('error', reject);
-      occupyingServer.listen(1455, '127.0.0.1', resolve);
-    });
-    let service: OpenAiCodexService | undefined;
-    try {
-      let openedUrl: string | undefined;
-      service = new OpenAiCodexService({
-        userDataDir: await makeUserDataDir(),
-        openExternal: async (url) => {
-          openedUrl = url;
-        },
-        credentialStore: createMemoryCredentialStore().store,
-        fetchFn: async () => assert.fail('opening authorization must not exchange tokens'),
-      });
-      const authorization = await service.getAuthorizationUrl();
-      assert.ok('authRequestId' in authorization);
-      await service.openAuthorizationUrl(authorization.authRequestId);
-      const redirectUri = new URL(openedUrl!).searchParams.get('redirect_uri');
-      assert.equal(redirectUri, 'http://localhost:1457/auth/callback');
-      assert.equal(new URL(redirectUri!).port, '1457');
-      service.cancelAuthorization(authorization.authRequestId);
-    } finally {
-      service?.cancelAuthorization();
-      await new Promise<void>((resolve, reject) =>
-        occupyingServer.close((error) => error ? reject(error) : resolve()),
-      );
-    }
-  });
-
   it('Codex login does not revive an authorization cancelled while the browser opens', async () => {
     let finishOpening!: () => void;
     const opening = new Promise<void>((resolve) => {
@@ -498,7 +480,17 @@ describe('OAuth subscription token authority (shared CredentialStore)', () => {
       userDataDir: await makeUserDataDir(),
       openExternal: async () => opening,
       credentialStore: createMemoryCredentialStore().store,
-      fetchFn: async () => assert.fail('a cancelled login must not exchange tokens'),
+      fetchFn: async (url) => {
+        if (String(url).endsWith('/deviceauth/usercode')) {
+          return Response.json({
+            device_auth_id: 'deviceauth-cancel-open',
+            user_code: 'CODE-CANCEL',
+            interval: '5',
+            expires_at: new Date(NOW + 600_000).toISOString(),
+          });
+        }
+        assert.fail(`unexpected fetch ${String(url)}`);
+      },
     });
     const authorization = await service.getAuthorizationUrl();
     assert.ok('authRequestId' in authorization);
