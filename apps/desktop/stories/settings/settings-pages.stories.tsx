@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
+import { userEvent } from 'storybook/test';
 import { ToastProvider } from '@maka/ui';
 import type {
   AppSettings,
@@ -788,6 +789,56 @@ async function waitForStoryCondition(predicate: () => boolean, errorMessage: str
   throw new Error(errorMessage);
 }
 
+async function openDailyReviewModelSelector(canvasElement: HTMLElement): Promise<HTMLButtonElement> {
+  const selector = await waitForStoryButton(
+    canvasElement,
+    (candidate) => candidate.textContent?.includes('跟随对话默认') === true,
+  );
+  await userEvent.click(selector);
+  await waitForStoryCondition(
+    () => selector.getAttribute('aria-expanded') === 'true',
+    'Daily Review model selector did not open',
+  );
+  return selector;
+}
+
+function assertDailyReviewSettingsBounds(
+  canvasElement: HTMLElement,
+  selector: HTMLButtonElement,
+): void {
+  const time = canvasElement.querySelector<HTMLInputElement>('input[type="text"]');
+  const page = canvasElement.querySelector<HTMLElement>('.settingsFormPage');
+  const timeForm = time?.closest<HTMLElement>('.settingsFormLayout');
+  const selectorForm = selector.closest<HTMLElement>('.settingsFormLayout');
+  const listbox = document.querySelector<HTMLElement>('[role="listbox"]');
+  const popover = listbox?.closest<HTMLElement>('[popover]');
+  if (!time || !page || !timeForm || !selectorForm || !popover) {
+    throw new Error('Daily Review bounds contract could not resolve its production elements');
+  }
+
+  const withinHorizontally = (inner: DOMRect, outer: DOMRect) =>
+    inner.left >= outer.left - 1 && inner.right <= outer.right + 1;
+  const timeRect = time.getBoundingClientRect();
+  const selectorRect = selector.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  const pageRect = page.getBoundingClientRect();
+  const doesNotCoverTrigger =
+    popoverRect.top >= selectorRect.bottom - 1
+    || popoverRect.bottom <= selectorRect.top + 1;
+  const valid =
+    withinHorizontally(timeRect, timeForm.getBoundingClientRect())
+    && withinHorizontally(selectorRect, selectorForm.getBoundingClientRect())
+    && popoverRect.width > 0
+    && popoverRect.height > 0
+    && withinHorizontally(popoverRect, pageRect)
+    && popoverRect.left >= -1
+    && popoverRect.right <= window.innerWidth + 1
+    && doesNotCoverTrigger;
+  if (!valid) {
+    throw new Error(`Daily Review controls overflow at ${window.innerWidth}px`);
+  }
+}
+
 // Real path: sidebar footer 设置 → 模型.
 export const Models: Story = {
   decorators: [withSettingsBridge],
@@ -875,6 +926,34 @@ export const BotChatNeedsAttention: Story = {
 export const DailyReview: Story = {
   decorators: [withSettingsBridge],
   render: () => <SettingsStory section="daily-review" />,
+};
+
+// Real path at a narrow desktop window.
+// Real path: Settings → Daily Review at a narrow window.
+export const DailyReviewNarrow: Story = {
+  ...DailyReview,
+  parameters: { viewport: { defaultViewport: 'mobile2' } },
+};
+
+// Real path with the Astryx model selector expanded.
+// Real path: Settings → Daily Review → Analysis model.
+export const DailyReviewModelSelectorOpen: Story = {
+  decorators: [withSettingsBridge],
+  render: () => <SettingsStory section="daily-review" />,
+  play: async ({ canvasElement }) => {
+    await openDailyReviewModelSelector(canvasElement);
+  },
+};
+
+// Real path: Settings → Daily Review → Analysis model at the minimum window width.
+export const DailyReviewModelSelectorOpenNarrow: Story = {
+  decorators: [withSettingsBridge],
+  parameters: { viewport: { defaultViewport: 'mobile2' } },
+  render: () => <SettingsStory section="daily-review" />,
+  play: async ({ canvasElement }) => {
+    const selector = await openDailyReviewModelSelector(canvasElement);
+    assertDailyReviewSettingsBounds(canvasElement, selector);
+  },
 };
 // Real path: 设置 → 数据.
 export const Data: Story = {

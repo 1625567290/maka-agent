@@ -1677,10 +1677,8 @@ export type {
   DailyReviewArchiveStatus,
   DailyReviewArchiveSummary,
   DailyReviewConfig,
-  DailyReviewExternalNotify,
-  DailyReviewMode,
+  DailyReviewRange,
   DailyReviewSectionKey,
-  DailyReviewSectionToggles,
   DailyReviewSessionRow,
   DailyReviewSummary,
   DailyReviewTopEntry,
@@ -1691,7 +1689,7 @@ export type {
 export {
   DAILY_REVIEW_ARCHIVE_STATUSES,
   DAILY_REVIEW_LIST_LIMIT,
-  DAILY_REVIEW_MODES,
+  DAILY_REVIEW_RANGES,
   DAILY_REVIEW_SECTION_KEYS,
   DEFAULT_DAILY_REVIEW_CONFIG,
   buildDailyReviewSummary,
@@ -1702,6 +1700,7 @@ export {
   localDayBoundsAt,
   localDayBoundsForInstant,
   normalizeDailyReviewConfig,
+  normalizeDailyReviewArchive,
   pickDailyReviewSessions,
   pickDailyReviewTopEntries,
 } from './daily-review.js';
