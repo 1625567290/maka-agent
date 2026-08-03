@@ -245,12 +245,16 @@ export interface MakaBridge {
             attachmentItems?: RendererIngestInput[];
             turnOrchestration?: TurnOrchestration;
             quotes?: import('@maka/core').QuoteRef[];
+            workspaceFileReferences?: Array<
+              Pick<import('@maka/core').InlineReference, 'value' | 'start'>
+            >;
           },
     ): Promise<
       | {
           ok: true;
           turnId: string;
           attachments: import('@maka/core').AttachmentRef[];
+          inlineReferences: import('@maka/core').InlineReference[];
           skillInvocation: import('@maka/runtime').SkillInvocationResult;
         }
       | {

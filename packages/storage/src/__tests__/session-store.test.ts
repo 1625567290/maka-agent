@@ -104,6 +104,51 @@ describe('FileSessionStore CRUD', () => {
     });
   });
 
+  test('round-trips frozen inline references with the user message', async () => {
+    await withStore(async (store) => {
+      const header = await store.create(makeInput({ name: 'Inline references' }));
+      const inlineReferences = [
+        { kind: 'skill' as const, value: '/skill:writer', label: 'Writer', start: 4 },
+        {
+          kind: 'workspace_file' as const,
+          value: '@docs/my plan.md',
+          label: 'my plan.md',
+          start: 21,
+        },
+      ];
+      await store.appendMessage(header.id, {
+        type: 'user',
+        id: 'user-1',
+        turnId: 'turn-1',
+        ts: 1,
+        text: 'Use /skill:writer on @docs/my plan.md',
+        inlineReferences,
+      });
+
+      const message = (await store.readMessages(header.id))[0];
+      assert.deepEqual(
+        message?.type === 'user' ? message.inlineReferences : undefined,
+        inlineReferences,
+      );
+    });
+  });
+
+  test('round-trips an explicit empty inline-reference projection', async () => {
+    await withStore(async (store) => {
+      const header = await store.create(makeInput({ name: 'Plain current-format message' }));
+      await store.appendMessage(header.id, {
+        type: 'user',
+        id: 'user-empty',
+        turnId: 'turn-empty',
+        ts: 1,
+        text: 'plain',
+        inlineReferences: [],
+      });
+      const message = (await store.readMessages(header.id))[0];
+      assert.deepEqual(message?.type === 'user' ? message.inlineReferences : undefined, []);
+    });
+  });
+
   test('list summary carries thinkingLevel when set and omits it when cleared', async () => {
     await withStore(async (store) => {
       // No level on create: the summary omits the field (UI shows 默认).

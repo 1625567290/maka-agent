@@ -1,5 +1,6 @@
 import type {
   CollaborationMode,
+  InlineReference,
   OrchestrationMode,
   SandboxBoundaryResponse,
   QuoteRef,
@@ -38,6 +39,11 @@ export type PendingAttachment = {
   size: number;
   source: { type: 'approval'; approvalId: string; name: string } | { type: 'file'; file: File };
 };
+
+export interface WorkspaceFileReferencePosition {
+  value: string;
+  start: number;
+}
 import {
   isNoRealConnectionError,
   noRealConnectionReasonFromError,
@@ -83,6 +89,7 @@ export interface AppShellChatActions {
     options?: {
       turnOrchestration?: TurnOrchestration;
       quotes?: readonly QuoteRef[];
+      workspaceFileReferences?: readonly WorkspaceFileReferencePosition[];
       displayText?: string;
       voiceOperationId?: string;
       onSessionResolved?: (sessionId: string) => void;
@@ -189,6 +196,7 @@ export function createAppShellChatActions(deps: {
     text: string,
     attachments: readonly import('@maka/core').AttachmentRef[] = [],
     quotes: readonly QuoteRef[] = [],
+    inlineReferences: readonly InlineReference[] = [],
   ): StoredMessage {
     return {
       type: 'user',
@@ -198,6 +206,7 @@ export function createAppShellChatActions(deps: {
       text,
       ...(attachments.length > 0 ? { attachments: [...attachments] } : {}),
       ...(quotes.length > 0 ? { quotes: [...quotes] } : {}),
+      inlineReferences: [...inlineReferences],
     };
   }
 
@@ -209,6 +218,7 @@ export function createAppShellChatActions(deps: {
     options: {
       replaceCurrentMessages?: boolean;
       quotes?: readonly QuoteRef[];
+      inlineReferences?: readonly InlineReference[];
     } = {},
   ): void {
     if (activeIdRef.current !== sessionId) return;
@@ -220,7 +230,13 @@ export function createAppShellChatActions(deps: {
     });
     setMessages((current) => {
       if (current.some((message) => message.type === 'user' && message.turnId === turnId)) return current;
-      const next = optimisticUserMessage(turnId, text, attachments, options.quotes);
+      const next = optimisticUserMessage(
+        turnId,
+        text,
+        attachments,
+        options.quotes,
+        options.inlineReferences,
+      );
       return options.replaceCurrentMessages ? [next] : [...current, next];
     });
   }
@@ -260,6 +276,7 @@ export function createAppShellChatActions(deps: {
     options: {
       turnOrchestration?: TurnOrchestration;
       quotes?: readonly QuoteRef[];
+      workspaceFileReferences?: readonly WorkspaceFileReferencePosition[];
       displayText?: string;
       voiceOperationId?: string;
       onSessionResolved?: (sessionId: string) => void;
@@ -327,6 +344,9 @@ export function createAppShellChatActions(deps: {
           ...(options.turnOrchestration ? { turnOrchestration: options.turnOrchestration } : {}),
           ...(attachmentItems ? { attachmentItems } : {}),
           ...(quotes && quotes.length > 0 ? { quotes: [...quotes] } : {}),
+          ...(options.workspaceFileReferences && options.workspaceFileReferences.length > 0
+            ? { workspaceFileReferences: [...options.workspaceFileReferences] }
+            : {}),
         });
         if (!sendResult.ok) {
           if (newChatOwner && isNewChatSendSurfaceActive(newChatOwner)) {
@@ -355,6 +375,7 @@ export function createAppShellChatActions(deps: {
             {
               replaceCurrentMessages: true,
               ...(quotes && quotes.length > 0 ? { quotes } : {}),
+              inlineReferences: sendResult.inlineReferences ?? [],
             },
           );
         }
@@ -379,6 +400,9 @@ export function createAppShellChatActions(deps: {
         ...(options.turnOrchestration ? { turnOrchestration: options.turnOrchestration } : {}),
         ...(attachmentItems ? { attachmentItems } : {}),
         ...(quotes && quotes.length > 0 ? { quotes: [...quotes] } : {}),
+        ...(options.workspaceFileReferences && options.workspaceFileReferences.length > 0
+          ? { workspaceFileReferences: [...options.workspaceFileReferences] }
+          : {}),
       });
       if (!sendResult.ok) {
         if (activeIdRef.current === sessionId) {
@@ -399,7 +423,10 @@ export function createAppShellChatActions(deps: {
         options.displayText ??
           skillInvocationDisplayText(text, sendResult.skillInvocation),
         sendResult.attachments,
-        { ...(quotes && quotes.length > 0 ? { quotes } : {}) },
+        {
+          ...(quotes && quotes.length > 0 ? { quotes } : {}),
+          inlineReferences: sendResult.inlineReferences ?? [],
+        },
       );
       await refreshMessagesUntilTurn(sessionId, turnId);
       return true;
