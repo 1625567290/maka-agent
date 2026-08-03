@@ -236,11 +236,13 @@ export type {
   BuildAgentGraphClientReadModelInput,
 } from './stream-graph-read-model.js';
 export {
+  AgentGraphClientOperationError,
   AgentGraphCoordinator,
   agentGraphIdForRootSession,
   topologyFromProvisions,
 } from './stream-graph-coordinator.js';
 export type {
+  AgentGraphClientOperationErrorCode,
   AgentGraphClientChangedEvent,
   AgentGraphClientChangedListener,
   AgentGraphClientChangedReason,
