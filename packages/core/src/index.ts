@@ -1540,7 +1540,11 @@ export {
 } from './model-catalog.js';
 
 // model-metadata.ts
-export { resolveModelVisionSupport, resolveModelVoiceMetadata } from './model-metadata.js';
+export {
+  modelMetadataIdsForProvider,
+  resolveModelVisionSupport,
+  resolveModelVoiceMetadata,
+} from './model-metadata.js';
 
 // settings.ts
 export type {
