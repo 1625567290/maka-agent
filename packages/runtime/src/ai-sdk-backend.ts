@@ -71,6 +71,7 @@ import type { AttachmentByteReader } from '@maka/core/attachments';
 import {
   MAX_PROVIDER_IMAGE_REQUEST_BYTES,
   PROVIDER_IMAGE_BUDGET_EXCEEDED_MESSAGE,
+  stripUndefinedDeep,
 } from '@maka/core';
 import type {
   LlmCallRecord,
@@ -719,6 +720,12 @@ export class AiSdkBackend implements AgentBackend {
             messageId: stepId,
             text: part.text,
             ...(part.signature !== undefined ? { signature: part.signature } : {}),
+            // No sanitiser here, unlike the tool call below: these options are
+            // not the provider's object. `translateChunk` rebuilds reasoning
+            // metadata from two named string fields, so an omitted provider
+            // field cannot arrive as an explicit `undefined` and break the
+            // canonical encoding. Passing the provider's object through
+            // instead would need the same `stripUndefinedDeep` a tool call has.
             ...(part.providerOptions !== undefined
               ? { providerOptions: part.providerOptions }
               : {}),
@@ -1561,8 +1568,14 @@ export class AiSdkBackend implements AgentBackend {
                   turnId,
                   stepId: providerStepId,
                   toolCallId: toolCall.toolCallId,
+                  // Provider metadata is persisted verbatim into an immutable
+                  // RuntimeEvent, and a field the response did not carry
+                  // arrives as an explicit `undefined` — which JSON drops, so
+                  // the event no longer reads back as it was written and the
+                  // store refuses it. One refusal took every tool-calling turn
+                  // with it.
                   ...(toolCall.providerOptions !== undefined
-                    ? { providerOptions: toolCall.providerOptions }
+                    ? { providerOptions: stripUndefinedDeep(toolCall.providerOptions) }
                     : {}),
                   input:
                     requestedTool !== undefined
