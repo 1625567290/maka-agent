@@ -31,6 +31,8 @@ _TOOLCHAIN_CHECKSUMS = _TOOLCHAIN_ROOT / "checksums.sha256"
 _OUTPUT_FILENAME = "claude-code.txt"
 _REMOTE_OUTPUT_PATH = Path("/logs/agent") / _OUTPUT_FILENAME
 _REMOTE_SESSIONS_DIR = Path("/logs/agent/sessions")
+_MANAGED_SETTINGS_PATH = Path("/etc/claude-code/managed-settings.json")
+_MANAGED_SETTINGS = {"permissions": {"deny": ["WebSearch", "WebFetch"]}}
 
 
 class MakaClaudeCodeAgent(ClaudeCode):
@@ -71,6 +73,29 @@ class MakaClaudeCodeAgent(ClaudeCode):
         await self.exec_as_root(
             environment,
             command=f"ln -sf -- {shlex.quote(str(_TOOLCHAIN_CLAUDE))} /usr/local/bin/claude",
+        )
+        await self._write_managed_settings(environment)
+
+    async def _write_managed_settings(self, environment: BaseEnvironment) -> None:
+        # Claude Code enables WebSearch and WebFetch by default, and WebSearch runs
+        # server-side behind the provider proxy, where the task container's network
+        # policy cannot stop it. Managed settings bind nested `claude` invocations
+        # too; --disallowedTools would only bind the one process the harness starts.
+        # bypassPermissions still honors explicit deny rules.
+        #
+        # This removes the tools from what the model is offered; it is not an
+        # adversarial control. CLAUDE_CODE_MANAGED_SETTINGS_PATH redirects this
+        # file, and many task images run the agent as root, so a model that set
+        # out to defeat it could. The benchmark claim is that no arm reaches the
+        # web by accident, not that the sandbox is escape-proof.
+        settings = json.dumps(_MANAGED_SETTINGS, sort_keys=True)
+        await self.exec_as_root(
+            environment,
+            command=(
+                f"mkdir -p {shlex.quote(str(_MANAGED_SETTINGS_PATH.parent))}; "
+                f"printf '%s\\n' {shlex.quote(settings)} > "
+                f"{shlex.quote(str(_MANAGED_SETTINGS_PATH))}"
+            ),
         )
 
     def _get_env(self, key: str) -> str | None:

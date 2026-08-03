@@ -76,6 +76,10 @@ import {
   CLAUDE_CODE_TOOLCHAIN_SPEC,
 } from './claude-code-toolchain.js';
 
+import { agentPhaseTimeoutSec, settlementGraceSec } from './maka-settlement.js';
+
+export { MAKA_SETTLEMENT_GRACE_SEC } from './maka-settlement.js';
+
 const execFileAsync = promisify(execFile);
 
 const CONTAINER_MAKA_REPO = '/opt/maka-agent';
@@ -647,7 +651,7 @@ function resolveHarborTimeoutMs(options: HarborTaskRunnerOptions, input: TaskRun
 }
 
 function resolveNativeHarborTimeoutMs(
-  options: Pick<HarborTaskRunnerOptions, 'timeoutMultiplier' | 'agentEnv'>,
+  options: Pick<HarborTaskRunnerOptions, 'timeoutMultiplier' | 'agentEnv' | 'agent'>,
   task: TaskRunInput['task'],
 ): number {
   const configuredCellTimeoutSec = lenientPositiveIntEnv(options.agentEnv?.MAKA_CELL_TIMEOUT_SEC);
@@ -656,7 +660,16 @@ function resolveNativeHarborTimeoutMs(
     configuredCellTimeoutSec ?? 0,
   );
   return resolveNativeTrialTimeoutMs({
-    nativePhasesSec: agentTimeoutSec + verifierPolicy(task).outerTimeoutSec,
+    // The agent phase Harbor is given is the model budget plus Maka's
+    // settlement window, so the watchdog bounds that same sum. It reads the
+    // runner-level env only, while the job config also sees per-attempt env —
+    // the shared setup/teardown grace is far wider than any window an operator
+    // would set, so the watchdog still outlasts the phase either way.
+    // Resolved through the shared rule so the two cannot drift in kind.
+    nativePhasesSec:
+      agentTimeoutSec +
+      settlementGraceSec(options.agent ?? 'maka', options.agentEnv) +
+      verifierPolicy(task).outerTimeoutSec,
     timeoutMultiplier: options.timeoutMultiplier ?? 1,
   });
 }
@@ -1088,11 +1101,22 @@ export function buildHarborJobConfig(
   Object.assign(agentEnv, attemptAgentEnv ?? {});
   // Lenient by shared contract with the Python adapter: a malformed value must
   // fall back (metadata, then the adapter's default) rather than fail the run.
-  const cellTimeoutSec =
+  const modelBudgetSec =
     lenientPositiveIntEnv(agentEnv.MAKA_CELL_TIMEOUT_SEC) ?? input.task.metadata?.agentTimeoutSec;
-  if (cellTimeoutSec !== undefined) {
-    agentEnv.MAKA_CELL_TIMEOUT_SEC = String(cellTimeoutSec);
-    const streamTimeoutMs = cellTimeoutSec * 1_000;
+  // MAKA_CELL_TIMEOUT_SEC is the model budget on every path, so it is passed
+  // through untouched. Maka's cell stops calling the model when it runs out and
+  // then settles its artifacts, so its agent phase — the deadline Harbor kills
+  // at — is one window longer. Native CLIs have nothing to settle and get the
+  // budget itself, which is how every arm ends up with the same model time.
+  const graceSec = settlementGraceSec(adapter, agentEnv);
+  let agentPhaseSec: number | undefined;
+  if (modelBudgetSec !== undefined) {
+    agentPhaseSec = agentPhaseTimeoutSec(adapter, agentEnv, modelBudgetSec);
+    agentEnv.MAKA_CELL_TIMEOUT_SEC = String(modelBudgetSec);
+    if (adapter === 'maka') {
+      agentEnv.MAKA_CELL_SETTLEMENT_GRACE_SEC = String(graceSec);
+    }
+    const streamTimeoutMs = modelBudgetSec * 1_000;
     if (adapter === 'maka' && Number.isSafeInteger(streamTimeoutMs)) {
       // Harbor already owns the task-native hard deadline. Keep the runtime's
       // first-event and between-event watchdogs from imposing a shorter,
@@ -1145,7 +1169,7 @@ export function buildHarborJobConfig(
                 }
               : {},
         env: agentEnv,
-        ...(cellTimeoutSec !== undefined ? { max_timeout_sec: cellTimeoutSec } : {}),
+        ...(agentPhaseSec !== undefined ? { max_timeout_sec: agentPhaseSec } : {}),
       },
     ],
     datasets: [],
