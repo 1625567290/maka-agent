@@ -77,6 +77,8 @@ import {
   buildHistoryCompactCheckpoint,
   type HistoryCompactCheckpoint,
 } from '../history-compact-checkpoint.js';
+import { buildLlmHistorySummarizer } from '../history-compact-summarizer.js';
+import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
 import {
   AGENT_WORKSPACE_WORKTREE,
   IMPLEMENTATION_AGENT_DEFINITION,
@@ -3755,6 +3757,115 @@ describe('SessionManager manual compaction', () => {
         (event) => event.actions?.tokenUsage?.contextBudget,
       ),
     ).toBe(true);
+    await manager.stopSession(session.id, { source: 'stop_button' });
+  });
+
+  test('manual compaction settles one canonical record for the run the kernel opened', async () => {
+    // `sessions:compact` and CLI `/compact` both land here. The call has no
+    // send to inherit a run from, so the kernel states the run it opened and
+    // the record must carry it — otherwise a real, billed summarization is
+    // silently unmetered (#1679).
+    const store = new MemorySessionStore();
+    const runStore = new MemoryAgentRunStore();
+    const backends = new BackendRegistry();
+    const modelCalls: ModelCallAttempt[] = [];
+    const summarizerModel = new MockLanguageModelV4({
+      doGenerate: {
+        content: [{ type: 'text', text: 'MANUAL_COMPACT_SUMMARY' }],
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage: {
+          inputTokens: { total: 41, noCache: 41, cacheRead: 0, cacheWrite: 0 },
+          outputTokens: { total: 9, text: 9, reasoning: 0 },
+          raw: { input_tokens: 41, output_tokens: 9 },
+        },
+        warnings: [],
+      },
+    });
+    backends.register('fake', (ctx) =>
+      createTestAiSdkBackend({
+        sessionId: ctx.sessionId,
+        header: ctx.header,
+        appendMessage: async () => {},
+        connection: {
+          slug: 'mock-main',
+          providerType: 'anthropic',
+          defaultModel: 'mock-model-id',
+        },
+        apiKey: 'sk-test',
+        modelId: 'mock-model-id',
+        modelFactory: () =>
+          new MockLanguageModelV4({
+            doStream: async () => ({
+              stream: simulateReadableStream({
+                chunks: [
+                  { type: 'stream-start', warnings: [] },
+                  { type: 'text-start', id: 'text-1' },
+                  { type: 'text-delta', id: 'text-1', delta: 'ok '.repeat(80) },
+                  { type: 'text-end', id: 'text-1' },
+                  {
+                    type: 'finish',
+                    finishReason: { unified: 'stop', raw: 'stop' },
+                    usage: {
+                      inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 },
+                      outputTokens: { total: 10, text: 10, reasoning: 0 },
+                    },
+                  },
+                ] as LanguageModelV4StreamPart[],
+                initialDelayInMs: null,
+                chunkDelayInMs: null,
+              }),
+            }),
+          }),
+        tools: [],
+        newId: nextId(),
+        now: nextNow(1),
+        contextBudget: {
+          name: 'manual-compact-accounting',
+          maxHistoryEstimatedTokens: 10_000,
+          minRecentTurns: 1,
+          charsPerToken: 1,
+        },
+        summarizeHistoryCompact: buildLlmHistorySummarizer({
+          resolveModel: () => summarizerModel,
+        }),
+        recordHistoryCompactCheckpoint: () => {},
+        recordModelCallAttempt: (attempt) => {
+          modelCalls.push(attempt);
+        },
+      }),
+    );
+    const manager = new SessionManager({
+      store,
+      runStore,
+      runtimeEventStore: runStore,
+      backends,
+      newId: nextId(),
+      now: nextNow(13_000),
+    });
+    const session = await manager.createSession(
+      makeInput({ backend: 'fake', permissionMode: 'bypass' }),
+    );
+
+    await drain(manager.sendMessage(session.id, { turnId: 'turn-1', text: 'first '.repeat(400) }));
+    await drain(manager.sendMessage(session.id, { turnId: 'turn-2', text: 'second' }));
+    await drain(manager.compactSession(session.id, { turnId: 'turn-compact' }));
+
+    const compactRun = (await runStore.listSessionRuns(session.id)).find(
+      (run) => run.turnId === 'turn-compact',
+    );
+    assert.ok(compactRun, 'the kernel opens a run for a manual compaction');
+    const compactions = modelCalls
+      .map((attempt) => decodeModelCallAttempt(attempt))
+      .filter((attempt) => attempt.callKind === 'history_compact');
+    assert.equal(compactions.length, 1, 'one manual compaction is one record');
+    assert.equal(
+      compactions[0]?.runId,
+      compactRun.runId,
+      'attributed to the run the kernel opened, not to whatever ran last',
+    );
+    assert.equal(compactions[0]?.turnId, 'turn-compact');
+    assert.equal(compactions[0]?.inputTokens, 41);
+    assert.equal(compactions[0]?.usageBasis, 'reported');
     await manager.stopSession(session.id, { source: 'stop_button' });
   });
 

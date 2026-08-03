@@ -20,7 +20,6 @@ import { projectRuntimeEventsToStoredMessages } from '../runtime-event-read-mode
 import { materializeSession } from '../materializer.js';
 import type { InvocationContext } from '../invocation-context.js';
 import type { AssistantMessage, StoredMessage, ToolResultMessage } from '@maka/core/session';
-import type { LlmCallRecord } from '@maka/core/usage-stats/types';
 import { z } from 'zod';
 import {
   AiSdkBackend,
@@ -74,6 +73,7 @@ import type {
   ProviderRequestAttemptRecord,
   ProviderRequestCaptureRecord,
 } from '../provider-request-telemetry.js';
+import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
 import { createTestAiSdkBackend } from './execution-boundary-test-helpers.js';
 
 describe('AiSdkBackend model history', () => {
@@ -3979,6 +3979,7 @@ describe('AiSdkBackend model history', () => {
     const runtimeContext = [...oldEvents, recentEvent];
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext,
     });
 
@@ -3995,6 +3996,7 @@ describe('AiSdkBackend model history', () => {
 
     await backend.compactHistory({
       turnId: 'turn-overflow-recovery',
+      runId: 'run-1',
       runtimeContext,
       minRecentTurns: 0,
     });
@@ -4040,6 +4042,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'default-policy-manual-old-1',
@@ -4097,6 +4100,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'manual-v2-old-1',
@@ -4186,6 +4190,7 @@ describe('AiSdkBackend model history', () => {
 
     await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         ...oldEvents,
         runtimeTextEvent({
@@ -4263,6 +4268,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         ...oldEvents,
         runtimeTextEvent({
@@ -4345,6 +4351,7 @@ describe('AiSdkBackend model history', () => {
 
       const result = await backend.compactHistory({
         turnId: 'turn-compact',
+        runId: 'run-1',
         runtimeContext: [
           ...oldEvents,
           runtimeTextEvent({
@@ -4391,6 +4398,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'manual-v2-envelope-old-1',
@@ -4448,6 +4456,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'manual-v2-larger-old-1',
@@ -4509,6 +4518,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'output-length-old',
@@ -4600,6 +4610,7 @@ describe('AiSdkBackend model history', () => {
 
     await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         ...covered,
         runtimeTextEvent({
@@ -4646,6 +4657,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'old-1',
@@ -4690,6 +4702,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'old-1',
@@ -4759,6 +4772,7 @@ describe('AiSdkBackend model history', () => {
 
     const result = await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: oldEvents,
     });
 
@@ -4819,6 +4833,7 @@ describe('AiSdkBackend model history', () => {
 
     const compactPromise = backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'old-1',
@@ -4904,6 +4919,7 @@ describe('AiSdkBackend model history', () => {
 
     const compactPromise = backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'old-1',
@@ -4982,6 +4998,7 @@ describe('AiSdkBackend model history', () => {
 
     await backend.compactHistory({
       turnId: 'turn-compact',
+      runId: 'run-1',
       runtimeContext: [
         runtimeTextEvent({
           id: 'old-1',
@@ -7485,7 +7502,6 @@ describe('AiSdkBackend usage telemetry', () => {
   test('records cumulative usage checkpoints across tool-loop steps and turns', async () => {
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
-    const llmRecords: LlmCallRecord[] = [];
     const usageCheckpoints: Array<{ inputTokens: number; outputTokens: number }> = [];
     const firstTurn = durableTurnHarness('turn-1', 'hi');
     const secondTurn = durableTurnHarness('turn-2', 'continue');
@@ -7570,9 +7586,6 @@ describe('AiSdkBackend usage telemetry', () => {
           : secondTurn.loadTurnRuntimeEvents(turnId),
       newId: idGenerator(),
       now: monotonicClock(),
-      recordLlmCall: (record: LlmCallRecord) => {
-        llmRecords.push(record);
-      },
       recordUsageCheckpoint: async (usage: { inputTokens: number; outputTokens: number }) => {
         usageCheckpoints.push(usage);
       },
@@ -7727,7 +7740,6 @@ describe('AiSdkBackend usage telemetry', () => {
     const durable = durableTurnHarness('turn-1', 'hi');
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
-    const llmRecords: LlmCallRecord[] = [];
     const largeBody = 'SECRET_PAYLOAD_SHOULD_BE_ARCHIVED'.repeat(200);
     let streamCalls = 0;
     const prompts: unknown[] = [];
@@ -7819,9 +7831,6 @@ describe('AiSdkBackend usage telemetry', () => {
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
-      recordLlmCall: (record) => {
-        llmRecords.push(record);
-      },
     });
 
     for await (const event of backend.send(durable.input())) {
@@ -7856,7 +7865,6 @@ describe('AiSdkBackend usage telemetry', () => {
     const durable = durableTurnHarness('turn-1', 'hi');
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
-    const llmRecords: LlmCallRecord[] = [];
     const recordedBlocks: ActiveFullCompactBlock[] = [];
     const largeBody = 'ACTIVE_FULL_COMPACT_RAW_TOOL_OUTPUT'.repeat(200);
     let streamCalls = 0;
@@ -7936,9 +7944,6 @@ describe('AiSdkBackend usage telemetry', () => {
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
-      recordLlmCall: (record) => {
-        llmRecords.push(record);
-      },
       recordActiveFullCompactBlock: (block) => {
         recordedBlocks.push(block);
       },
@@ -8043,60 +8048,18 @@ describe('AiSdkBackend usage telemetry', () => {
     assert.equal(recordedBlocks[0]?.blockId, 'afcompact-sync-test');
   });
 
-  test('does not record semantic compact usage when provider usage is unavailable', () => {
-    const llmRecords: LlmCallRecord[] = [];
-    const backend = createTestAiSdkBackend({
-      sessionId: 'session-1',
-      header: header(),
-      appendMessage: async () => {},
-      connection: connection(),
-      apiKey: 'sk-test',
-      modelId: 'mock-model-id',
-      modelFactory: () => completionModel(),
-      tools: [],
-      newId: idGenerator(),
-      now: monotonicClock(),
-      recordLlmCall: (record) => {
-        llmRecords.push(record);
-      },
-    });
-
-    (
-      backend as unknown as {
-        compaction: {
-          recordSemanticCompactSummaryCall(input: {
-            callId: string;
-            turnId: string;
-            modelId: string;
-            startedAt: number;
-            latencyMs: number;
-            status: LlmCallRecord['status'];
-          }): void;
-        };
-      }
-    ).compaction.recordSemanticCompactSummaryCall({
-      callId: 'semantic-1',
-      turnId: 'turn-1',
-      modelId: 'mock-model-id',
-      startedAt: 1,
-      latencyMs: 2,
-      status: 'error',
-    });
-
-    assert.deepEqual(llmRecords, []);
-  });
-
-  test('semantic compact records a separate no-tools summarizer LLM call', async () => {
-    const durable = durableTurnHarness('turn-1', 'hi');
-    const messages: unknown[] = [];
-    const events: SessionEvent[] = [];
-    const llmRecords: LlmCallRecord[] = [];
-    const recordedBlocks: SemanticCompactBlock[] = [];
-    const recordedActiveFullBlocks: ActiveFullCompactBlock[] = [];
-    const largeBody = 'SEMANTIC_COMPACT_RAW_TOOL_OUTPUT'.repeat(180);
+  /**
+   * One model whose stream drives a turn into semantic compaction: two tool
+   * steps, then a plain finish. Shared by the accept and dry-run cases so both
+   * exercise the same summarization, and only the policy differs.
+   */
+  function semanticCompactFixtureModel(modelId?: string): {
+    model: MockLanguageModelV4;
+    streamCalls: () => number;
+  } {
     let streamCalls = 0;
-    let archiveCalls = 0;
     const model = new MockLanguageModelV4({
+      ...(modelId ? { modelId } : {}),
       doGenerate: {
         content: [
           {
@@ -8114,6 +8077,14 @@ describe('AiSdkBackend usage telemetry', () => {
         usage: {
           inputTokens: { total: 21, noCache: 19, cacheRead: 2, cacheWrite: 0 },
           outputTokens: { total: 13, text: 13, reasoning: 0 },
+          // The provider's own payload, which is the only thing the canonical
+          // record will attribute cache tokens from.
+          raw: {
+            input_tokens: 19,
+            output_tokens: 13,
+            cache_read_input_tokens: 2,
+            cache_creation_input_tokens: 0,
+          },
         },
         warnings: [],
       },
@@ -8172,6 +8143,49 @@ describe('AiSdkBackend usage telemetry', () => {
         };
       },
     });
+    return { model, streamCalls: () => streamCalls };
+  }
+
+  function semanticCompactContextBudget(mode: 'replace' | 'validate_only') {
+    return {
+      charsPerToken: 1,
+      activeToolResultPrune: { enabled: true, maxCurrentResultEstimatedTokens: 1 },
+      semanticCompact: {
+        enabled: true,
+        mode,
+        minStepNumber: 1,
+        minRecentMessages: 0,
+        maxActiveEstimatedTokens: 1,
+        highWaterRatio: 0.1,
+        minSafePrefixEstimatedTokens: 1,
+        minNewPrefixEstimatedTokens: 1,
+        maxSummaryEstimatedTokens: 1024,
+        minSavingsTokens: 1,
+        minSavingsRatio: 0,
+      },
+      activeFullCompact: {
+        enabled: true,
+        minStepNumber: 1,
+        maxActiveEstimatedTokens: 1_000_000,
+        highWaterRatio: 0.1,
+        minRecentMessages: 0,
+        maxSummaryEstimatedTokens: 1024,
+      },
+    } as const;
+  }
+
+  const SEMANTIC_COMPACT_LARGE_BODY = 'SEMANTIC_COMPACT_RAW_TOOL_OUTPUT'.repeat(180);
+
+  test('semantic compact records a separate no-tools summarizer model call', async () => {
+    const durable = durableTurnHarness('turn-1', 'hi');
+    const messages: unknown[] = [];
+    const events: SessionEvent[] = [];
+    const modelCalls: ModelCallAttempt[] = [];
+    const recordedBlocks: SemanticCompactBlock[] = [];
+    const recordedActiveFullBlocks: ActiveFullCompactBlock[] = [];
+    const largeBody = SEMANTIC_COMPACT_LARGE_BODY;
+    let archiveCalls = 0;
+    const { model, streamCalls } = semanticCompactFixtureModel();
     const backend = createTestAiSdkBackend({
       sessionId: 'session-1',
       header: header(),
@@ -8192,31 +8206,7 @@ describe('AiSdkBackend usage telemetry', () => {
           }),
         },
       ],
-      contextBudget: {
-        charsPerToken: 1,
-        activeToolResultPrune: { enabled: true, maxCurrentResultEstimatedTokens: 1 },
-        semanticCompact: {
-          enabled: true,
-          mode: 'replace',
-          minStepNumber: 1,
-          minRecentMessages: 0,
-          maxActiveEstimatedTokens: 1,
-          highWaterRatio: 0.1,
-          minSafePrefixEstimatedTokens: 1,
-          minNewPrefixEstimatedTokens: 1,
-          maxSummaryEstimatedTokens: 1024,
-          minSavingsTokens: 1,
-          minSavingsRatio: 0,
-        },
-        activeFullCompact: {
-          enabled: true,
-          minStepNumber: 1,
-          maxActiveEstimatedTokens: 1_000_000,
-          highWaterRatio: 0.1,
-          minRecentMessages: 0,
-          maxSummaryEstimatedTokens: 1024,
-        },
-      },
+      contextBudget: semanticCompactContextBudget('replace'),
       archiveToolResult: async () => {
         archiveCalls += 1;
         return { artifactId: 'archived-covered-semantic-result' };
@@ -8224,8 +8214,9 @@ describe('AiSdkBackend usage telemetry', () => {
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
-      recordLlmCall: (record) => {
-        llmRecords.push(record);
+      recordProviderRequestCapture: async () => ({ artifactId: 'artifact-semantic-capture' }),
+      recordModelCallAttempt: (attempt) => {
+        modelCalls.push(attempt);
       },
       recordSemanticCompactBlock: (block) => {
         recordedBlocks.push(block);
@@ -8235,12 +8226,14 @@ describe('AiSdkBackend usage telemetry', () => {
       },
     });
 
-    for await (const event of backend.send(durable.input())) {
+    // A canonical record belongs to a run; the send carries the one the
+    // harness's runtime events already claim.
+    for await (const event of backend.send(durable.input({ runId: 'run-1' }))) {
       durable.record(event);
       events.push(event);
     }
 
-    assert.equal(streamCalls, 3);
+    assert.equal(streamCalls(), 3);
     assert.equal(model.doGenerateCalls.length, 1);
     assert.match(
       JSON.stringify(model.doGenerateCalls[0]?.prompt),
@@ -8304,13 +8297,33 @@ describe('AiSdkBackend usage telemetry', () => {
       'projection replay after active pruning must retain the exact single user anchor',
     );
 
-    const semanticRecord = llmRecords.find((record) => record.callKind === 'semantic_compact');
-    assert.ok(semanticRecord, 'expected semantic compact LLM record');
-    assert.match(semanticRecord.callId ?? '', /^semantic_compact_turn-1_2_/);
-    assert.equal(semanticRecord.inputTokens, 21);
-    assert.equal(semanticRecord.outputTokens, 13);
-    assert.equal(semanticRecord.cacheHitInputTokens, 2);
-    assert.equal(semanticRecord.totalTokens, 34);
+    // The summarization is one physical provider request, metered through the
+    // same canonical seam as the send it interrupts (#1679) — not a hand-built
+    // row in the frozen usage table.
+    const semanticAttempt = modelCalls
+      .map((attempt) => decodeModelCallAttempt(attempt))
+      .find((attempt) => attempt.callKind === 'semantic_compact');
+    assert.ok(semanticAttempt, 'expected a canonical semantic compact record');
+    assert.equal(semanticAttempt.sessionId, 'session-1');
+    assert.equal(semanticAttempt.runId, 'run-1');
+    assert.equal(semanticAttempt.turnId, 'turn-1');
+    assert.equal(
+      semanticAttempt.step,
+      2,
+      'the record carries the send step whose projection triggered the summarization',
+    );
+    assert.equal(semanticAttempt.status, 'completed');
+    assert.equal(semanticAttempt.inputTokens, 21);
+    assert.equal(semanticAttempt.outputTokens, 13);
+    assert.equal(semanticAttempt.usageBasis, 'reported');
+    // Cache tokens are attributed from the provider's own payload, never from
+    // the SDK's normalized view — which is what the old row copied through.
+    assert.equal(semanticAttempt.cacheReadInputTokens, 2);
+    assert.equal(
+      modelCalls.filter((attempt) => attempt.callKind === 'semantic_compact').length,
+      1,
+      'one summarization is one record',
+    );
 
     const usageEvent = events.find((event) => event.type === 'token_usage') as
       | (Extract<SessionEvent, { type: 'token_usage' }> & {
@@ -8329,6 +8342,157 @@ describe('AiSdkBackend usage telemetry', () => {
       ),
       true,
     );
+  });
+
+  test('a dry-run semantic compaction is still a real, billed model call', async () => {
+    // `validate_only` declines the *projection*, not the summarization: the
+    // summarizer runs to completion and only then is its block refused. That
+    // call reaches a provider and is charged for, so it settles a canonical
+    // record like any other. Pinned because a mode named "dry run" that bills
+    // is exactly the kind of thing a later reader would assume otherwise.
+    const durable = durableTurnHarness('turn-1', 'hi');
+    const modelCalls: ModelCallAttempt[] = [];
+    const recordedBlocks: SemanticCompactBlock[] = [];
+    const { model } = semanticCompactFixtureModel();
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [
+        {
+          name: 'Read',
+          description: 'Read description',
+          parameters: z.object({ path: z.string() }),
+          impl: async ({ path }) => ({
+            body: path === 'large.log' ? SEMANTIC_COMPACT_LARGE_BODY : 'FRESH_SEMANTIC_TAIL_RESULT',
+          }),
+        },
+      ],
+      contextBudget: semanticCompactContextBudget('validate_only'),
+      archiveToolResult: async () => ({ artifactId: 'archived-covered-semantic-result' }),
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+      recordProviderRequestCapture: async () => ({ artifactId: 'artifact-semantic-capture' }),
+      recordModelCallAttempt: (attempt) => {
+        modelCalls.push(attempt);
+      },
+      recordSemanticCompactBlock: (block) => {
+        recordedBlocks.push(block);
+      },
+    });
+
+    for await (const event of backend.send(durable.input({ runId: 'run-1' }))) {
+      durable.record(event);
+    }
+
+    assert.equal(model.doGenerateCalls.length, 1, 'the dry run still calls the summarizer');
+    assert.equal(recordedBlocks.length, 0, 'and still refuses to accept the block it produced');
+    const dryRunAttempt = modelCalls
+      .map((attempt) => decodeModelCallAttempt(attempt))
+      .find((attempt) => attempt.callKind === 'semantic_compact');
+    assert.ok(dryRunAttempt, 'a declined projection does not make the call free');
+    assert.equal(dryRunAttempt.status, 'completed');
+    assert.equal(dryRunAttempt.inputTokens, 21);
+    assert.equal(dryRunAttempt.outputTokens, 13);
+  });
+
+  test('a separate summarizer model is priced as itself, not as the session model', async () => {
+    // The record already named the model that served the request. Pricing it
+    // against a different model's rates would store an id and a `pricingRates`
+    // that contradict each other — the exact thing recording the rates is for.
+    const summarizerPricing = {
+      modelKey: 'anthropic:summarizer-model-id',
+      inputUsdPer1M: 1,
+      outputUsdPer1M: 2,
+      cacheReadUsdPer1M: 0.1,
+      cacheWriteUsdPer1M: 1,
+    };
+    const mainPricing = {
+      modelKey: 'anthropic:mock-model-id',
+      inputUsdPer1M: 1_000,
+      outputUsdPer1M: 2_000,
+      cacheReadUsdPer1M: 100,
+      cacheWriteUsdPer1M: 1_000,
+    };
+    const pricingKeysAsked: string[] = [];
+    const durable = durableTurnHarness('turn-1', 'hi');
+    const modelCalls: ModelCallAttempt[] = [];
+    const { model } = semanticCompactFixtureModel();
+    // A real `modelFactory` builds the summarizer against the configured id, so
+    // the record names it; the fixture has to do the same or it would prove
+    // nothing about which model the rates belong to.
+    const { model: summarizerOnlyModel } = semanticCompactFixtureModel('summarizer-model-id');
+    const budget = semanticCompactContextBudget('replace');
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: ({ modelId }) =>
+        modelId === 'summarizer-model-id' ? summarizerOnlyModel : model,
+      tools: [
+        {
+          name: 'Read',
+          description: 'Read description',
+          parameters: z.object({ path: z.string() }),
+          impl: async ({ path }) => ({
+            body: path === 'large.log' ? SEMANTIC_COMPACT_LARGE_BODY : 'FRESH_SEMANTIC_TAIL_RESULT',
+          }),
+        },
+      ],
+      contextBudget: {
+        ...budget,
+        semanticCompact: { ...budget.semanticCompact, summarizerModel: 'summarizer-model-id' },
+      },
+      archiveToolResult: async () => ({ artifactId: 'archived-covered-semantic-result' }),
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+      lookupPricing: (modelKey) => {
+        pricingKeysAsked.push(modelKey);
+        if (modelKey === summarizerPricing.modelKey) return summarizerPricing;
+        if (modelKey === mainPricing.modelKey) return mainPricing;
+        return null;
+      },
+      recordProviderRequestCapture: async () => ({ artifactId: 'artifact-semantic-capture' }),
+      recordModelCallAttempt: (attempt) => {
+        modelCalls.push(attempt);
+      },
+      recordSemanticCompactBlock: () => {},
+    });
+
+    for await (const event of backend.send(durable.input({ runId: 'run-1' }))) {
+      durable.record(event);
+    }
+
+    const summarization = modelCalls
+      .map((attempt) => decodeModelCallAttempt(attempt))
+      .find((attempt) => attempt.callKind === 'semantic_compact');
+    assert.ok(summarization, 'expected a canonical semantic compact record');
+    assert.equal(summarization.modelId, 'summarizer-model-id');
+    assert.equal(summarization.costBasis, 'priced');
+    assert.deepEqual(
+      summarization.pricingRates,
+      summarizerPricing,
+      'the rates stored are the ones the summarizer model actually bills at',
+    );
+    assert.equal(
+      pricingKeysAsked.includes(summarizerPricing.modelKey),
+      true,
+      'the cost lookup asks for the model that served the request',
+    );
+    // The session model is still priced as itself for its own steps.
+    const mainCall = modelCalls
+      .map((attempt) => decodeModelCallAttempt(attempt))
+      .find((attempt) => attempt.callKind === 'main');
+    assert.equal(mainCall?.pricingRates?.modelKey, mainPricing.modelKey);
   });
 
   test('active full compact keeps the accepted boundary projection across later AI SDK steps', async () => {
@@ -8456,7 +8620,6 @@ describe('AiSdkBackend usage telemetry', () => {
     const durable = durableTurnHarness('turn-1', 'hi');
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
-    const llmRecords: LlmCallRecord[] = [];
     const largeBody = 'VALIDATE_ONLY_RAW_TOOL_OUTPUT'.repeat(80);
     let streamCalls = 0;
     const model = new MockLanguageModelV4({
@@ -8530,9 +8693,6 @@ describe('AiSdkBackend usage telemetry', () => {
       loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
       newId: idGenerator(),
       now: monotonicClock(),
-      recordLlmCall: (record) => {
-        llmRecords.push(record);
-      },
     });
 
     for await (const event of backend.send(durable.input())) {
@@ -8578,7 +8738,6 @@ describe('AiSdkBackend usage telemetry', () => {
   test('normalizes cache and reasoning tokens to messages, events, and telemetry', async () => {
     const messages: unknown[] = [];
     const events: SessionEvent[] = [];
-    const llmRecords: LlmCallRecord[] = [];
     const runTraceEvents: Array<{ type: string; data?: Record<string, unknown> }> = [];
     let pricingLookupCalls = 0;
     const pricing = {
@@ -8637,9 +8796,6 @@ describe('AiSdkBackend usage telemetry', () => {
       lookupPricing: (modelKey) => {
         pricingLookupCalls += 1;
         return modelKey === pricing.modelKey ? pricing : null;
-      },
-      recordLlmCall: (record) => {
-        llmRecords.push(record);
       },
       recordRunTrace: (event) => {
         runTraceEvents.push(event);

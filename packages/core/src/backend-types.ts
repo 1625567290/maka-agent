@@ -129,6 +129,13 @@ export interface SteeringLease {
 
 export interface BackendCompactHistoryInput {
   turnId: string;
+  /**
+   * The run this compaction belongs to. Required, not optional: a manual
+   * compaction is a real model call, and a call whose run cannot be named is a
+   * call nothing can bill (#1679). Unlike `send`, this path has no turn state to
+   * infer it from, so the caller that opened the run states it.
+   */
+  runId: string;
   runtimeContext: readonly RuntimeEvent[];
   /** Override the configured recent-turn tail for an explicit recovery compaction. */
   minRecentTurns?: number;

@@ -978,6 +978,7 @@ export class RuntimeKernel implements RuntimeKernelLike {
       this.assertRunCanDispatch(run, begin.backend);
       const result = await begin.backend.compactHistory({
         turnId: run.turnId,
+        runId: run.runId,
         runtimeContext: begin.runtimeContext,
         ...(input.minRecentTurns !== undefined ? { minRecentTurns: input.minRecentTurns } : {}),
       });

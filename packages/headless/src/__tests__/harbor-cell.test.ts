@@ -17,6 +17,10 @@ import type { BackendSendInput, BackendStopMode } from '@maka/core/backend-types
 import type { SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import { createSessionStore } from '@maka/storage';
 import {
+  MODEL_CALL_ATTEMPT_SCHEMA_VERSION,
+  type ModelCallAttempt,
+} from '@maka/core/model-call-attempt';
+import {
   BackendRegistry,
   PiAgentBackend,
   type AgentBackend,
@@ -1982,6 +1986,54 @@ describe('runHarborCell', () => {
 
       assert.match(seenPrompts[0] ?? '', /Use the host prompt/);
       assert.doesNotMatch(seenPrompts[0] ?? '', /Economy-task benchmark policy/);
+    });
+  });
+
+  test('Harbor ai-sdk backend registration forwards the canonical metering sink', async () => {
+    // The controller has always exposed `recordModelCallAttempt`; this
+    // composition never passed it on, so Harbor produced diagnostic attempts
+    // with no canonical record behind them (#1679).
+    await withDirs(async ({ workspaceDir, artifactStore }) => {
+      const registry = new BackendRegistry();
+      const toolExecutor = fakeToolExecutor();
+      const register = buildAiSdkCellBackendRegistration({
+        provider: 'openai',
+        model: 'gpt-5.6-sol',
+        env: { OPENAI_API_KEY: 'test-key' },
+        now: () => 123,
+        newId: () => 'id',
+      });
+      await registerProjectedAiSdkBackend(register, registry, {
+        config: {
+          id: 'harbor-ai-sdk',
+          backend: 'ai-sdk',
+          llmConnectionSlug: 'openai',
+          model: 'gpt-5.6-sol',
+          systemPrompt: DEFAULT_HEADLESS_SYSTEM_PROMPT,
+        },
+        task: { id: 'harbor-cell', instruction: 'solve', workspaceDir },
+        storageRoot: workspaceDir,
+        workspaceDir,
+        artifactStore,
+        realBackendIsolation: { kind: 'external', label: 'Harbor task container', toolExecutor },
+        toolExecutor,
+        ...createHeadlessSessionCapabilityBridge().capabilities,
+      });
+
+      const recorded: ModelCallAttempt[] = [];
+      const backend = await registry.build('ai-sdk', {
+        ...backendContext(workspaceDir),
+        recordModelCallAttempt: (attempt: ModelCallAttempt) => {
+          recorded.push(attempt);
+          return Promise.resolve();
+        },
+      });
+      const backendInput = (backend as unknown as { input: AiSdkBackendInput }).input;
+
+      assert.equal(typeof backendInput.recordModelCallAttempt, 'function');
+      await backendInput.recordModelCallAttempt?.(harborModelCallAttemptFixture());
+      assert.equal(recorded.length, 1, 'the sink must reach the controller');
+      assert.equal(recorded[0]?.callKind, 'semantic_compact');
     });
   });
 
@@ -4778,6 +4830,29 @@ function testIdFactory(): () => string {
 
 function sha256(text: string): string {
   return createHash('sha256').update(text).digest('hex');
+}
+
+function harborModelCallAttemptFixture(): ModelCallAttempt {
+  return {
+    schemaVersion: MODEL_CALL_ATTEMPT_SCHEMA_VERSION,
+    logicalCallId: 'call-1',
+    attemptId: 'attempt-1',
+    traceId: 'trace-1',
+    sessionId: 'session-1',
+    runId: 'run-1',
+    turnId: 'turn-1',
+    step: 0,
+    attempt: 0,
+    callKind: 'semantic_compact',
+    providerId: 'openai',
+    modelId: 'gpt-5.6-sol',
+    startedAt: 1,
+    completedAt: 2,
+    latencyMs: 1,
+    status: 'completed',
+    usageBasis: 'missing',
+    costBasis: 'unpriced',
+  };
 }
 
 function backendContext(workspaceDir: string): BackendFactoryContext {

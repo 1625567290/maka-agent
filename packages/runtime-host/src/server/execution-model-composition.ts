@@ -501,14 +501,9 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
     }
   };
   const telemetry = {
-    insertLlmCall: (record: Parameters<typeof input.usage.telemetry.recordLlmCall>[0]) =>
-      persistTelemetry(() => input.usage.telemetry.recordLlmCall(record)),
     insertToolInvocation: (
       record: Parameters<typeof input.usage.telemetry.recordToolInvocation>[0],
     ) => persistTelemetry(() => input.usage.telemetry.recordToolInvocation(record)),
-  };
-  const recordLlmUsage = (event: Parameters<typeof recordLlmCall>[1]) => {
-    void recordLlmCall({ repo: telemetry, lookupPricing: pricing }, event);
   };
   /**
    * One canonical record, one commit point (#1679).
@@ -637,24 +632,6 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
               modelId: target.model,
             }),
           providerOptions,
-          ...(providerRequestCapture
-            ? {
-                providerRequestTracking: {
-                  now: Date.now,
-                  newId: randomUUID,
-                  persistCapture: providerRequestCapture,
-                  recordAttempt: recordProviderRequestAttempt,
-                },
-              }
-            : {}),
-          telemetry: {
-            connectionSlug: target.connection.slug,
-            providerId: target.connection.providerType,
-            modelId: target.model,
-            newId: randomUUID,
-            now: Date.now,
-            recordLlmCall: recordLlmUsage,
-          },
         }),
         recordHistoryCompactCheckpoint: input.context.recordHistoryCompactCheckpoint,
         loadTurnRuntimeEvents: input.context.loadTurnRuntimeEvents,
@@ -666,7 +643,6 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
         turnTailPrompt: modelComposition.turnTailPrompt,
         shellRunContextSummary: input.context.shellRunContextSummary,
         lookupPricing: pricing,
-        recordLlmCall: recordLlmUsage,
         recordModelCallAttempt,
         assertModelCallAccountingReady,
         recordToolInvocation: (event) => recordToolInvocation({ repo: telemetry }, event),

@@ -744,6 +744,10 @@ export async function createMakaCliRuntimeContext(
           }),
         providerOptions: buildProviderOptions(ready.connection, ready.model, header.thinkingLevel),
       }),
+      // The canonical metering sink (#1679). Without it this composition root
+      // produces diagnostics and no accounting at all — for `/compact` and for
+      // ordinary sends alike.
+      ...(ctx.recordModelCallAttempt ? { recordModelCallAttempt: ctx.recordModelCallAttempt } : {}),
       recordHistoryCompactCheckpoint: ctx.recordHistoryCompactCheckpoint,
       loadTurnRuntimeEvents: ctx.loadTurnRuntimeEvents,
       allowMidTurnHistoryCompaction: ctx.allowMidTurnHistoryCompaction,
