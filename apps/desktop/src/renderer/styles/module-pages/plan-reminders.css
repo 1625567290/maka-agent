@@ -167,41 +167,68 @@
   border: 0;
   border-radius: 0;
   background: var(--background);
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5) var(--space-4);
+  gap: var(--space-5);
+  padding: var(--space-2) var(--space-5) var(--space-4);
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
 }
 
-/* Right-side sheet (reference layout): pinned to the window edge full-height,
-   rounded on the exposed edge only, with a whisper backdrop so the task list
-   stays readable behind it. */
-.maka-plan-dialog {
-  margin: 0;
-  height: 100dvh;
-  max-height: 100dvh;
-  border-radius: var(--radius-modal) 0 0 var(--radius-modal);
+/* Split view (reference layout): with the form open the page becomes two
+   columns — the list keeps flowing in the first, the form panel sits FLUSH
+   against it in the second, separated by one hairline. No overlay, no dead
+   band between list and panel. */
+.maka-plan-panel[data-form-open="true"] {
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 460px);
+  align-items: start;
 }
 
-.maka-plan-dialog::backdrop {
-  background: oklch(from var(--foreground) l c h / 0.08);
+@keyframes maka-plan-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
 
-/* The reference wraps each group's rows in an inset rounded container. */
+.maka-plan-form-aside {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: calc(100dvh - var(--h-titlebar));
+  border-inline-start: var(--border-width-hairline) solid var(--border);
+  background: var(--background);
+  animation: maka-plan-sheet-in var(--duration-base) var(--ease-out-strong);
+}
+
+/* The reference wraps each group's rows in an inset rounded container.
+   Deep-review: the fill makes it genuinely inset — a border on the same
+   surface color read as a bare outlined rectangle. */
 .maka-plan-rows {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   border: var(--border-width-hairline) solid var(--border);
   border-radius: var(--radius-surface);
-  background: var(--background);
+  background: var(--muted);
   padding-inline: var(--space-3);
   overflow: hidden;
 }
 
 .maka-plan-form-footer {
   justify-content: flex-end;
+  width: 100%;
+  padding: var(--space-2) var(--space-5) var(--space-4);
 }
 
 .maka-plan-form-header {
-  align-items: flex-start;
-  padding-bottom: var(--space-0-5);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-3) var(--space-5) var(--space-1);
 }
 
 .maka-plan-form-header-actions {
@@ -231,26 +258,30 @@
 }
 
 .maka-plan-title-input::placeholder {
-  color: var(--muted-foreground);
+  color: var(--color-text-secondary, var(--foreground-secondary));
+}
+
+/* Deep-review: a chrome-free control still owes a focus cue (DESIGN §5).
+   Keyboard focus draws the ring; mouse focus stays quiet. */
+.maka-plan-title-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 4px;
+  border-radius: var(--radius-control);
 }
 
 /* One labeled group: quiet label over hairline-divided label/control rows —
    the settings open-row idiom, scoped to the dialog. */
 .maka-plan-group {
   display: grid;
-  gap: var(--space-1);
+  gap: var(--space-1-5);
 }
 
 .maka-plan-group-label {
-  font: var(--maka-text-supporting);
+  font: var(--maka-text-label);
   margin: 0;
-  color: var(--muted-foreground);
+  color: var(--foreground-secondary);
 }
 
-.maka-plan-rows {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-}
 
 .maka-plan-rows > * + * {
   border-block-start: var(--border-width-hairline) solid var(--border);
@@ -275,6 +306,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
+  padding-block: var(--space-1-5);
 }
 
 .maka-plan-preset {
