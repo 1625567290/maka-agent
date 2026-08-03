@@ -110,18 +110,6 @@ export class ExecutionFixture {
     readonly sessionId: string,
   ) {}
 
-  sessionPath(): string {
-    return join(this.root, 'sessions', this.sessionId, 'session.jsonl');
-  }
-
-  runtimeEventsPath(runId: string): string {
-    return join(this.root, 'sessions', this.sessionId, 'runs', runId, 'runtime-events.jsonl');
-  }
-
-  eventsPath(runId: string): string {
-    return join(this.root, 'sessions', this.sessionId, 'runs', runId, 'events.jsonl');
-  }
-
   async seedSession(): Promise<string> {
     const owner = await tryAcquireInteractiveRootOwner(this.capability);
     assert.ok(owner);

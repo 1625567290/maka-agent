@@ -49,7 +49,7 @@ import {
 import {
   openRuntimeEventPersistence,
   openRuntimeEventReadPersistence,
-} from './runtime-event-transfer.js';
+} from './runtime-event-persistence.js';
 import type {
   CommitToolOutcomeInput,
   CommitToolPreparedInput,
@@ -381,8 +381,6 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => sessionStore.reconcileOrphanedAgentGraphRetirements()),
       listPendingSessionRetirementCleanupIds: (sessionId) =>
         run(() => sessionStore.listPendingSessionRetirementCleanupIds(sessionId)),
-      purgeRemovedSessionTranscript: (sessionId) =>
-        run(() => sessionStore.purgeRemovedSessionTranscript(sessionId)),
       completeSessionRetirementCleanup: (sessionId) =>
         run(() => sessionStore.completeSessionRetirementCleanup(sessionId)),
       close: () =>
