@@ -169,6 +169,7 @@ import {
   type BackendActivationBoundary,
   type RuntimeExecutionClaim,
   type RuntimeKernelLike,
+  type ResumeContinuationOptions,
   type TurnStartOptions,
 } from './runtime-kernel.js';
 import { fallbackSessionTitle, sessionTitleSource } from './session-title.js';
@@ -1977,10 +1978,24 @@ export class SessionManager {
       this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
       return plan;
     }
-    const [header, observation] = await Promise.all([
-      this.deps.store.readHeader(sessionId),
-      this.deps.inspectContinuationSafety(sessionId),
-    ]);
+    const header = await this.deps.store.readHeader(sessionId);
+    let observation: RuntimeContinuationSafetyObservation;
+    try {
+      observation = await this.deps.inspectContinuationSafety(sessionId);
+    } catch {
+      const plan: SafeBoundaryContinuationPlan = {
+        disposition: 'park',
+        rejectionReasons: ['safety_observation_unavailable'],
+        diagnostics: [
+          {
+            code: 'safety_observation_unavailable',
+            message: 'authoritative continuation safety inspection failed',
+          },
+        ],
+      };
+      this.recordContinuationPlan(sessionId, input.sourceRunId, plan);
+      return plan;
+    }
     return this.planSafeBoundaryContinuation(sessionId, {
       sourceRunId: input.sourceRunId,
       currentCwd: header.cwd,
@@ -2047,6 +2062,7 @@ export class SessionManager {
 
   async *resumeSafeBoundaryContinuation(
     continuation: RuntimeContinuation,
+    options: ResumeContinuationOptions = {},
   ): AsyncIterable<SessionEvent> {
     const resume = this.runtimeKernel.resumeContinuation;
     if (!resume) throw new Error('RuntimeKernel does not support safe-boundary continuation');
@@ -2057,7 +2073,7 @@ export class SessionManager {
       targetRunId: continuation.runId,
     });
     try {
-      yield* resume.call(this.runtimeKernel, continuation);
+      yield* resume.call(this.runtimeKernel, continuation, options);
       this.recordContinuationLifecycleEvent({
         type: 'execution_completed',
         sessionId: continuation.sessionId,
@@ -4398,7 +4414,7 @@ export class SessionManager {
     admittedAt: number;
     execution: Exclude<
       RootExecutionDescriptor,
-      { kind: 'external_message' } | { kind: 'automation' }
+      { kind: 'external_message' } | { kind: 'automation' } | { kind: 'safe_boundary_continuation' }
     >;
   }): Promise<void> {
     if (!this.deps.runStore || !this.deps.runtimeEventStore) {
