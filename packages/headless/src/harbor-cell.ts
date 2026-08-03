@@ -31,6 +31,7 @@ import {
   type SynthesisCacheArtifactStore,
   type SynthesisCacheLoader,
   type SynthesisCacheWriter,
+  type ToolResultArchiveResourceReader,
   type TurnStartOptions,
 } from '@maka/runtime';
 import {
@@ -88,6 +89,7 @@ import {
   buildHarborCellContextBudgetBackendOptions,
   buildHarborCellContextBudgetPolicySnapshot,
   buildHarborCellTaskLedgerExperimentPolicy,
+  buildHarborCellToolResultArchiveResourceReader,
 } from './harbor-cell-context-budget-env.js';
 import {
   buildHarborCellAiSdkTools,
@@ -105,6 +107,7 @@ export {
   buildHarborCellContextBudgetBackendOptions,
   buildHarborCellContextBudgetPolicySnapshot,
   buildHarborCellTaskLedgerExperimentPolicy,
+  buildHarborCellToolResultArchiveResourceReader,
   type HarborCellContextEnvKey,
   type HarborCellContextBudgetBackendOptions,
   type HarborCellTaskLedgerExperimentPolicy,
@@ -143,6 +146,12 @@ export interface RunHarborCellInput {
     context: HeadlessBackendContext,
   ) => void | Promise<void>;
   realBackendIsolation?: RealBackendIsolation;
+  /**
+   * Ref-addressed archive reader backing `ArchiveRead`. Must be supplied whenever
+   * the backend also archives tool results, since pruned results are replaced by
+   * placeholders that tell the model to call `ArchiveRead`.
+   */
+  archiveResources?: ToolResultArchiveResourceReader;
   contextBudgetPolicy?: HarborCellContextBudgetPolicySnapshot;
   continuationPolicy?: HarborCellContinuationPolicy;
   taskToolSummaryEnabled?: boolean;
@@ -350,6 +359,7 @@ export async function runHarborCellWithStorage(
     {
       agentTools: config.agentTools,
       snapshotImage: createReadImageSnapshotter(storage.artifactStore),
+      ...(input.archiveResources ? { archiveResources: input.archiveResources } : {}),
     },
   );
   const registerBackends =
@@ -757,6 +767,7 @@ export async function runHarborCellFromEnv(
   const continuationPolicy = buildHarborCellContinuationPolicy(resolvedEnv);
   const economyTaskMode = economyTaskModeFromEnv(resolvedEnv.MAKA_ECONOMY_TASK_MODE);
   const taskLedgerExperimentPolicy = buildHarborCellTaskLedgerExperimentPolicy(resolvedEnv);
+  const archiveResources = buildHarborCellToolResultArchiveResourceReader(resolvedEnv);
   const maxSteps = harborCellMaxStepsFromEnv(resolvedEnv);
   const settleAfterMs = harborCellSoftTimeoutMsFromEnv(resolvedEnv);
   const reasoningEffort = reasoningEffortFromEnv(resolvedEnv.MAKA_REASONING_EFFORT);
@@ -854,6 +865,9 @@ export async function runHarborCellFromEnv(
       ...(contextBudgetPolicy ? { contextBudgetPolicy } : {}),
       ...(continuationPolicy ? { continuationPolicy } : {}),
       ...(taskLedgerExperimentPolicy ? { taskToolSummaryEnabled: true } : {}),
+      // Gated on the same resolved archive dir as the writer wired into the backend,
+      // so a cell can never archive a result it cannot read back.
+      ...(archiveResources ? { archiveResources } : {}),
       ...(settleAfterMs !== undefined ? { settleAfterMs } : {}),
       ...(registerBackends ? { registerBackends } : {}),
       ...(backendNeedsIsolation(backend)
