@@ -10,7 +10,12 @@ import type {
   ThemePreference,
   UiLocale,
 } from '@maka/core';
-import { ShellRunUpdateBuffer, generalizedErrorMessageChinese, type ShellRunUpdate } from '@maka/core';
+import {
+  ShellRunUpdateBuffer,
+  generalizedErrorMessageChinese,
+  sessionExpectsEventStream,
+  type ShellRunUpdate,
+} from '@maka/core';
 import type { LiveTurnProjection, NavSelection } from '@maka/ui';
 import { messageReadErrorMessage } from './app-shell-copy';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
@@ -556,6 +561,13 @@ export function useSessionEventHealthPolling(options: {
         void refreshMessages(activeId);
       }
     };
+    // #1979: a stream nobody expects has nothing to observe — `evaluate` can only
+    // derive `closed` and can never ask for a refresh, and no one renders either
+    // field. So an idle session gets no probe at all, not merely a cheaper one.
+    // Both inputs to `expected` are deps of this effect, so a session that starts
+    // running re-arms on its own; `markSessionEventStreamClosed` still records the
+    // closed stream when the subscription itself goes away.
+    if (!sessionExpectsEventStream(activeSession?.status, hasLiveActivity)) return;
     evaluate();
     const interval = window.setInterval(evaluate, 5_000);
     const onVisibilityChange = () => {
