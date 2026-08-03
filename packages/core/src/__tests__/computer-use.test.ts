@@ -149,6 +149,44 @@ describe('Computer Use foundation contract', () => {
     assert.equal(summary.observationId?.includes('sk-test-observation'), false);
   });
 
+  /**
+   * The identifier shape `[A-Za-z0-9._:-]{1,256}` is also the shape of an API
+   * key, so admitting an element id by shape is not on its own a privacy
+   * boundary. `computerUseModelCallArgs` is what `ToolRuntime` persists as the
+   * Computer Use call's arguments, what the model reads back as its own history
+   * and what both renderers turn into a row; arguments are not validated before
+   * it runs, so a model that put a key under `element_id` reaches it. Remove
+   * the redaction and this test goes red.
+   */
+  test('a secret-shaped element id is redacted on the same terms as an app name', () => {
+    for (const secret of [
+      'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz01',
+      'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
+    ]) {
+      const asElement = computerUseModelCallArgs({
+        action: 'click_element',
+        app: 'Example',
+        window_id: 42,
+        observation_id: 'frame-7',
+        element_id: secret,
+      });
+      const asApp = computerUseModelCallArgs({
+        action: 'click_element',
+        window_id: 42,
+        observation_id: 'frame-7',
+        app: secret,
+      });
+      assert.equal(asElement.element_id?.includes(secret), false);
+      assert.equal(asElement.element_id, asApp.app);
+    }
+    // An ordinary element id is untouched: redaction must not cost the row the
+    // one field that tells two clicks in a turn apart.
+    assert.equal(
+      computerUseModelCallArgs({ action: 'click_element', element_id: 'e12' }).element_id,
+      'e12',
+    );
+  });
+
   test('approval scope separates read, screenshot, and mutation classes', () => {
     const metadata = computerUseApprovalScopeKey({
       action: 'observe',
