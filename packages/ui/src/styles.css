@@ -112,6 +112,112 @@
 @keyframes maka-spin { to { transform: rotate(360deg); } }
 .maka-spin { animation: maka-spin 1s linear infinite; }
 
+/* Markdown code renderers are custom components so Mermaid can be loaded only
+   for settled Mermaid fences. Preserve Astryx's document/compact rhythm here. */
+.maka-markdown-code { min-width: 0; }
+.maka-markdown-code-default { margin-block: var(--space-3) var(--space-4); }
+.maka-markdown-code-compact { margin-block: var(--space-1) var(--space-2); }
+[role="document"] > .maka-markdown-code:first-child { margin-block-start: 0; }
+[role="document"] > .maka-markdown-code:last-child { margin-block-end: 0; }
+.maka-mermaid-diagram {
+  display: flex;
+  max-width: 100%;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  container-type: inline-size;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-surface);
+  background: var(--background);
+}
+.maka-mermaid-toolbar {
+  min-height: 40px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--foreground-3);
+}
+.maka-mermaid-title { font: var(--maka-text-supporting); color: var(--muted-foreground); }
+.maka-mermaid-actions { display: flex; align-items: center; gap: 2px; }
+.maka-mermaid-zoom-actions { display: flex; align-items: center; gap: 2px; }
+.maka-mermaid-zoom-level {
+  font: var(--maka-text-code);
+  min-width: 4.5ch;
+  color: var(--muted-foreground);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.maka-mermaid-viewport {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  overflow: auto;
+  padding: var(--space-3);
+  cursor: default;
+  outline: none;
+  overscroll-behavior: auto;
+  touch-action: pan-y;
+}
+.maka-mermaid-viewport:focus-visible { box-shadow: inset 0 0 0 2px var(--focus-ring); }
+.maka-mermaid-viewport[data-maka-mermaid-pannable="horizontal"] { cursor: grab; overscroll-behavior-x: contain; }
+.maka-mermaid-viewport[data-maka-mermaid-pannable="vertical"],
+.maka-mermaid-viewport[data-maka-mermaid-pannable="both"] {
+  cursor: grab;
+  overscroll-behavior: contain;
+  touch-action: none;
+}
+.maka-mermaid-viewport[data-maka-mermaid-panning="true"] { cursor: grabbing; user-select: none; }
+.maka-mermaid-canvas { min-width: 0; margin-inline: auto; }
+.maka-mermaid-svg { display: flex; width: 100%; height: 100%; min-width: 0; justify-content: center; }
+.maka-mermaid-svg > svg {
+  display: block;
+  width: 100%;
+  max-width: none !important;
+  height: 100%;
+  overflow: visible;
+}
+.maka-mermaid-diagram-expanded {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  margin: 0 !important;
+  border: 0;
+  border-radius: 0;
+}
+.maka-mermaid-diagram-expanded .maka-mermaid-toolbar {
+  padding-left: max(var(--space-3), var(--maka-titlebar-area-x, 0px));
+  padding-right: calc(var(--space-1) + var(--maka-titlebar-overlay-right-width, 0px));
+}
+.maka-mermaid-diagram-expanded .maka-mermaid-actions { -webkit-app-region: no-drag; }
+.maka-mermaid-diagram-expanded .maka-mermaid-viewport { min-height: 0; flex: 1 1 auto; }
+.maka-mermaid-dialog { -webkit-app-region: no-drag; }
+.maka-mermaid-source {
+  max-height: min(40%, 320px);
+  flex: 0 1 auto;
+  overflow: auto;
+  padding: var(--space-1) var(--space-3) var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.maka-mermaid-fallback { display: grid; gap: var(--space-1-5); }
+.maka-mermaid-fallback-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.maka-mermaid-status {
+  font: var(--maka-text-supporting);
+  color: var(--muted-foreground);
+}
+
+@container (max-width: 520px) {
+  .maka-mermaid-title { display: none; }
+}
+
+@container (max-width: 360px) {
+  .maka-mermaid-diagram:not(.maka-mermaid-diagram-expanded) .maka-mermaid-zoom-actions { display: none; }
+}
+
 .maka-tool-output-panel { display: grid; gap: 8px; margin-top: 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-surface); background: var(--foreground-3); }
 .maka-tool-output-command {
   font: var(--maka-text-code);
