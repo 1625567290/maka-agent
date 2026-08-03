@@ -898,6 +898,7 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
     );
     const interactions = new HostInteractionCoordinator({
       store: stores.interactionStore,
+      sandboxBoundaries: stores.sessionStore,
       sessionAdmission,
       sessions: stores.sessionStore,
       preflightSessionSnapshot: (sessionId, interactionProjection) =>
@@ -909,6 +910,7 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
       onPoison: () => {
         drainRequested = true;
       },
+      onSandboxBoundarySettled: async () => {},
     });
     const interactionAuthority: RuntimeInteractionAuthority = {
       bindRun: (identity) => {
@@ -1376,6 +1378,7 @@ test('hosted linked child roots share admission, message, terminal, and stop aut
 
     const answered = await interactions.handlers['interaction.answer'](
       {
+        sessionId: pendingQuestion.sessionId,
         interactionId: pendingQuestion.interactionId,
         answer: { kind: 'question', answers: ['Yes'] },
       },
@@ -2935,6 +2938,7 @@ test('public turn.stop wins the Session lane before a wire answer for the same R
     await stopQueued;
     const answered = fixture.interactions.handlers['interaction.answer'](
       {
+        sessionId: fixture.sessionId,
         interactionId: requestId,
         answer: { kind: 'question', answers: ['Yes'] },
       },
@@ -3193,6 +3197,7 @@ async function createFailureFixture(options: {
   interactions = options.withInteractions
     ? new HostInteractionCoordinator({
         store: stores.interactionStore,
+        sandboxBoundaries: stores.sessionStore,
         sessionAdmission,
         sessions: stores.sessionStore,
         preflightSessionSnapshot: async (sessionId, interactionProjection) => {
@@ -3204,6 +3209,7 @@ async function createFailureFixture(options: {
         refreshCanonicalContinuity: (sessionId, admission) =>
           requireContinuity(continuity).refreshCanonical(sessionId, admission),
         onPoison: requestDrain,
+        onSandboxBoundarySettled: async () => {},
       })
     : undefined;
   const backends = new BackendRegistry();
