@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { decodeRuntimeEvent } from '@maka/core';
 import { HARBOR_CELL_CONTEXT_ENV_KEYS } from '../harbor-cell.js';
-import { buildHarborJobConfig, isBudgetExhaustedTrialException } from '../harbor-task-runner.js';
+import { buildHarborJobConfig, classifyTrialTermination } from '../harbor-task-runner.js';
 import { agentPhaseTimeoutSec, MAKA_SETTLEMENT_GRACE_SEC } from '../maka-settlement.js';
 import { DEFAULT_HEADLESS_SYSTEM_PROMPT } from '../system-prompts.js';
 
@@ -106,7 +106,10 @@ describe('Harbor adapter contract', () => {
     assert.ok(template, 'host-cell timeout message template');
     const message = template.replace('{self._agent_phase_timeout_sec()}', '1800');
 
-    assert.equal(isBudgetExhaustedTrialException(`RuntimeError: ${message}`), true);
+    // The host cell's deadline arrives as a generic RuntimeError, so this is the
+    // one termination still identified by its message. That is only sound while
+    // the raiser lives in this repo, which is exactly what this test pins.
+    assert.equal(classifyTrialTermination({ type: 'RuntimeError', message }), 'agent_budget');
   });
 
   test('run-host-cell.mjs resolves package-local harbor-cell internals at runtime', (t: TestContext) => {
@@ -4083,6 +4086,9 @@ class ClaudeCode:
             "auth_token": self._get_env("ANTHROPIC_AUTH_TOKEN"),
             "oauth_token": self._get_env("CLAUDE_CODE_OAUTH_TOKEN"),
         })
+        if instruction == "cancel":
+            environment.started.set()
+            await asyncio.Event().wait()
         if instruction == "pipeline-fail":
             result = await self.exec_as_agent(
                 environment,
@@ -4229,6 +4235,48 @@ with tempfile.TemporaryDirectory() as tmp:
     assert json.loads(written_payload(managed_command, "permissions")) == {
         "permissions": {"deny": ["WebSearch", "WebFetch"]}
     }, managed_command
+
+    # Arm symmetry with the Codex adapter's cancel_codex() case below: a
+    # benchmark deadline is the harness cancelling the agent phase, and the arm
+    # that observed it is the only one that can report it. An arm whose cell
+    # output omits deadlineSettlement has its timeouts read as ordinary runtime
+    # failures, which silently changes what that arm's score means.
+    class CancelEnvironment(RecordingEnvironment):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+
+    cancel_environment = CancelEnvironment()
+    cancel_agent = agent(logs)
+
+    async def cancel_claude():
+        task = asyncio.create_task(cancel_agent.run("cancel", cancel_environment, context))
+        await asyncio.wait_for(cancel_environment.started.wait(), timeout=2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("expected Claude Code cancellation")
+
+    asyncio.run(cancel_claude())
+    cancel_agent.populate_context_post_run(context)
+    cancel_cell = json.loads((logs / "maka-cell-output.json").read_text(encoding="utf-8"))
+    assert cancel_cell["status"] == "failed", cancel_cell
+    assert cancel_cell["errorClass"] == "budget_exhausted", cancel_cell
+    assert cancel_cell["deadlineSettlement"] == {
+        "source": "benchmark.deadline",
+        "mode": "immediate",
+    }, cancel_cell
+
+    # A normal run must NOT claim the deadline settled it — the assertion above
+    # passes just as well if the field is written unconditionally.
+    settled_free = agent(logs)
+    asyncio.run(settled_free.run("success", Environment(), context))
+    settled_free.populate_context_post_run(context)
+    success_cell = json.loads((logs / "maka-cell-output.json").read_text(encoding="utf-8"))
+    assert "deadlineSettlement" not in success_cell, success_cell
 
 print("claude-code adapter ok")
 `;

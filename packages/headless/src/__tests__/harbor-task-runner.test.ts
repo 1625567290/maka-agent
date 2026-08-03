@@ -13,6 +13,7 @@ import {
   createHarborOracleQualifier,
   createHarborTaskRunner,
   HarborInfraError,
+  incompleteTerminalProviderRequest,
   MAKA_SETTLEMENT_GRACE_SEC,
   type HarborProcessRunner,
   type HarborRunRequest,
@@ -24,6 +25,7 @@ import {
   providerProxyUpstreamAuthMode,
   providerProxyUsageProtocol,
 } from '../harness-agent-registry.js';
+import type { ProviderRequestTelemetry } from '../provider-auth-proxy.js';
 import { HARBOR_ORACLE_EXECUTION_POLICY } from '../harness-oracle-policy.js';
 import {
   CLAUDE_CODE_TOOLCHAIN_FINGERPRINT,
@@ -1699,6 +1701,129 @@ describe('createHarborTaskRunner', () => {
     });
   });
 
+  test('settles a timeout by its exception type when the harness rewords the message', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          exitCodeAfterArtifacts: 1,
+          reward: '1\n',
+          cell: cellOutput({ status: 'failed', errorClass: 'aborted' }),
+          trialResult: {
+            exception_info: {
+              // AgentTimeoutError is Harbor's own class, so the type settles it.
+              // The message is upstream prose and may be reworded at any time.
+              exception_type: 'AgentTimeoutError',
+              exception_message: 'Agent execution exceeded its 900s deadline',
+            },
+          },
+        }),
+      });
+
+      const output = await runner(runInput());
+      assert.equal(output.harbor.reward, 1);
+      assert.equal(output.cell.deadlineSettlement?.source, 'benchmark.deadline');
+    });
+  });
+
+  test('scores a graded trial the agent ended by exiting non-zero', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          exitCodeAfterArtifacts: 1,
+          reward: '1\n',
+          cell: cellOutput({ status: 'failed', errorClass: 'aborted' }),
+          trialResult: {
+            exception_info: {
+              exception_type: 'NonZeroAgentExitCodeError',
+              exception_message: 'agent exited 1',
+            },
+          },
+        }),
+      });
+
+      const output = await runner(runInput());
+      assert.equal(output.harbor.reward, 1);
+      assert.equal(output.harbor.verifier?.outcome, 'passed');
+      // No deadline ended this run, so nothing may claim one — the structured
+      // verifier grade is what makes the trial scoreable.
+      assert.equal(output.cell.deadlineSettlement, undefined);
+      assert.equal(output.cell.errorClass, 'aborted');
+    });
+  });
+
+  test('scores a graded-failed agent exit, not just a graded-passed one', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          exitCodeAfterArtifacts: 1,
+          reward: '0\n',
+          cell: cellOutput({ status: 'failed', errorClass: 'aborted' }),
+          trialResult: {
+            exception_info: {
+              exception_type: 'NonZeroAgentExitCodeError',
+              exception_message: 'agent exited 1',
+            },
+          },
+        }),
+      });
+
+      // A verdict settles the trial whichever way it went; scoring only the
+      // passes would quietly drop every graded failure from the denominator.
+      const output = await runner(runInput());
+      assert.equal(output.harbor.reward, 0);
+      assert.equal(output.harbor.verifier?.outcome, 'failed');
+    });
+  });
+
+  test('keeps an externally ended run that exited non-zero infra despite full artifacts', async () => {
+    await withRun(async ({ jobsDir, repo }) => {
+      const runner = createHarborTaskRunner({
+        makaRepoPath: repo,
+        jobsDir,
+        model: 'deepseek/deepseek-v4-flash',
+        runHarbor: fakeRunner({
+          exitCodeAfterArtifacts: 1,
+          // Every artifact present and the verdict conclusive: the container
+          // died after the verifier ran. The agent still never got the run it
+          // was given, so this is not a fair sample at any reward.
+          //
+          // Scoped deliberately to the non-zero exit. Both harnesses swallow a
+          // recorded agent-phase exception and exit 0 (trial.py run()), and on
+          // that path an external termination with a full verdict still falls
+          // through and scores. That is defensible — the verifier did grade it,
+          // and the verifier only ever runs for an agent-owned termination in
+          // the first place — but it is not what this test pins.
+          reward: '0\n',
+          cell: cellOutput({ status: 'failed', errorClass: 'aborted' }),
+          trialResult: {
+            exception_info: {
+              exception_type: 'DockerExecError',
+              exception_message: 'container exec failed',
+            },
+          },
+        }),
+      });
+
+      await assert.rejects(runner(runInput()), (error: unknown) => {
+        assert.ok(error instanceof HarborInfraError);
+        assert.match(error.message, /harbor run exited 1/);
+        // The infra message has to name the trial exception: the WAL keeps only
+        // the message, so anything dropped here is unfindable after the run.
+        assert.match(error.message, /trial exception: DockerExecError: container exec failed/);
+        return true;
+      });
+    });
+  });
+
   test('returns the official verifier result after a non-zero Harbor timeout exit', async () => {
     await withRun(async ({ jobsDir, repo }) => {
       const timedCell = cellOutput({
@@ -2976,5 +3101,57 @@ describe('createHarborTaskRunner timeout', () => {
 
       await assert.rejects(runner(runInput()), HarborInfraError);
     });
+  });
+});
+
+describe('incompleteTerminalProviderRequest', () => {
+  const request = (outcome: ProviderRequestTelemetry['outcome']): ProviderRequestTelemetry => ({
+    requestId: 1,
+    method: 'POST',
+    path: '/v1/messages',
+    outcome,
+    durationMs: 10,
+    bodyChunks: 1,
+    responseBytes: 10,
+    terminalEvent: outcome === 'completed',
+  });
+
+  test('accepts a completed tail request whether or not the trial settled', () => {
+    assert.equal(incompleteTerminalProviderRequest([request('completed')], false), undefined);
+    assert.equal(incompleteTerminalProviderRequest([request('completed')], true), undefined);
+  });
+
+  test('exempts a settled trial whose tail request the client tore down', () => {
+    // `aborted` is set from `signal.aborted` — it is what killing the agent
+    // looks like from the proxy, so a settled trial explains it.
+    assert.equal(incompleteTerminalProviderRequest([request('aborted')], true), undefined);
+  });
+
+  test('keeps a provider-side truncation infra even on a settled trial', () => {
+    // This is the boundary that keeps a provider outage out of the denominator
+    // instead of recording it as the agent's zero. `interrupted` (200 stream
+    // with no terminal event) and `failed` are the upstream's doing, and the
+    // agent phase ending does not explain either.
+    for (const outcome of ['interrupted', 'failed'] as const) {
+      assert.equal(
+        incompleteTerminalProviderRequest([request(outcome)], true)?.outcome,
+        outcome,
+        `${outcome} must stay infra`,
+      );
+    }
+  });
+
+  test('keeps every non-completing tail request infra on an unsettled trial', () => {
+    for (const outcome of ['interrupted', 'failed', 'aborted'] as const) {
+      assert.equal(incompleteTerminalProviderRequest([request(outcome)], false)?.outcome, outcome);
+    }
+  });
+
+  test('reads only the last request', () => {
+    assert.equal(
+      incompleteTerminalProviderRequest([request('failed'), request('completed')], false),
+      undefined,
+    );
+    assert.equal(incompleteTerminalProviderRequest([], false), undefined);
   });
 });
