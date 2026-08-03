@@ -97,13 +97,9 @@
    and content were visibly misaligned. Drop the mainpane padding to
    thin top/bottom so the header + content can both share the centered
    column. */
-/* PR-SETTINGS-RESTORE-SURFACE-0 (WAWQAQ msg `32ed9490` correction):
-   previous PR over-corrected — I read "no seam" as "no plate", but
-   reference's content surface is still a lighter-bg plate vs the
-   sidebar. The seam-between rule is: no visible BORDER line between
-   sidebar and content, but the content does have its own background
-   plate + rounded corners + small floating margin. Restore the
-   surface; just no border. */
+/* The settings content column is the same rounded floating plate as the
+   chat shell's content column: flush to the settings sidebar, gap on the
+   other three sides. */
 .settingsMainPane {
   position: relative;
   min-width: 0;
@@ -115,7 +111,6 @@
   border: 0;
   border-radius: var(--radius-modal);
   background: var(--agents-content-area-bg);
-  box-shadow: none;
   overflow: hidden;
 }
 
@@ -187,7 +182,12 @@
      minmax(0, 1fr) the track is the content column, and the .settingsRows
      query containers below actually see narrow widths. */
   grid-template-columns: minmax(0, 1fr);
-  gap: var(--space-4);
+  /* Sections carry titles now (see settings-section.tsx), so the between-group
+     gap has to out-measure the title-to-body gap inside a section or the two
+     rhythms read as one flat stack. The open row idiom (no card chrome) needs
+     the larger step: 32px outside / 8px inside — the Astryx settings-dialog
+     template's own section rhythm. */
+  gap: var(--space-8);
   background: transparent;
 }
 
@@ -195,5 +195,28 @@
    sub-pages, each wrapping in their own `.settingsStructuredPage`):
    the inner one just passes through. */
 .settingsStructuredPage .settingsStructuredPage {
-  gap: var(--space-4);
+  gap: var(--space-8);
+}
+
+/* ---- The section unit (settings-section.tsx) ---------------------------
+   One labeled group: header, then either the `.settingsRows` card or a bare
+   body. Every settings page is a flat list of these. */
+.settingsSection {
+  display: grid;
+  align-content: start;
+  /* Same explicit column as the page above, for the same reason: a wide row
+     (a long mono path, a scrollable pre) must not widen the section. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+}
+
+.settingsSectionBodyHidden {
+  display: none;
+}
+
+.settingsSectionBody {
+  display: grid;
+  align-content: start;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-3);
 }

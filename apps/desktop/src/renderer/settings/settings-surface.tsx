@@ -313,7 +313,7 @@ export function SettingsSurface(props: {
             <Layout
               height="fill"
               padding={0}
-              contentWidth={640}
+              contentWidth={section === 'usage' ? 920 : 640}
               header={(
                 <LayoutHeader padding={6}>
                   <div className="settingsPageHeader">
@@ -432,6 +432,7 @@ function SettingsPage(props: {
           connections={props.connections}
           defaultSlug={props.defaultSlug}
           onUpdate={props.onUpdateSettings}
+          onReloadSettings={props.onReloadSettings}
           onRefreshConnections={props.onRefreshConnections}
         />
       );

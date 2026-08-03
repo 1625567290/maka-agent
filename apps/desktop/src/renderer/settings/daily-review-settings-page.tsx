@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Banner, Divider, Heading, HStack, Text, VStack } from '@astryxdesign/core';
+import { Banner, VStack } from '@astryxdesign/core';
 import type { DailyReviewConfig, LlmConnection } from '@maka/core';
-import { FormLayout, Selector, Switch, TextInput, useMountedRef, useToast, useUiLocale } from '@maka/ui';
+import { Selector, Switch, TextInput, useMountedRef, useToast, useUiLocale } from '@maka/ui';
 import { buildCatalogDailyReviewModelOptions } from '../model-catalog-choices';
 import { getDailyReviewSettingsCopy, type DailyReviewSettingsCopy } from '../locales/settings-daily-review-copy';
 import { settingsActionErrorMessage } from './settings-error-copy';
+import { SettingsRow, SettingsSection } from './settings-section';
 import { useActionGuard } from './use-action-guard';
 
 const DAILY_REVIEW_DEFAULT_MODEL_VALUE = '__maka_daily_review_default_model__';
@@ -22,22 +23,6 @@ function buildDailyReviewModelOptions(
       label,
     })),
   ];
-}
-
-function SettingsSection(props: {
-  title: string;
-  description: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <VStack gap={5}>
-      <VStack gap={1}>
-        <Heading level={2}>{props.title}</Heading>
-        <Text type="supporting" color="secondary">{props.description}</Text>
-      </VStack>
-      {props.children}
-    </VStack>
-  );
 }
 
 export function DailyReviewSettingsPage(props: { connections: readonly LlmConnection[] }) {
@@ -108,17 +93,15 @@ export function DailyReviewSettingsPage(props: { connections: readonly LlmConnec
   const selectedModelValue = config?.modelKey.trim() || DAILY_REVIEW_DEFAULT_MODEL_VALUE;
 
   return (
-    <VStack className="settingsFormPage" gap={8} aria-label={copy.aria}>
+    <VStack className="settingsFormPage settingsStructuredPage" gap={6} aria-label={copy.aria}>
       {!hasConfigIpc ? <Banner status="info" title={copy.unavailable} /> : null}
       {loadError ? <Banner status="error" title={copy.loadFailed(loadError)} /> : null}
 
       <SettingsSection title={copy.scheduleTitle} description={copy.scheduleDescription}>
-        <FormLayout className="settingsFormLayout">
-          <HStack justify="between" align="center" gap={6}>
-            <VStack gap={1}>
-              <Text type="body">{copy.enabled}</Text>
-              <Text type="supporting" color="secondary">{copy.enabledHelp}</Text>
-            </VStack>
+        <SettingsRow
+          label={copy.enabled}
+          description={copy.enabledHelp}
+          end={
             <Switch
               label={copy.enabled}
               isLabelHidden
@@ -126,14 +109,18 @@ export function DailyReviewSettingsPage(props: { connections: readonly LlmConnec
               isDisabled={formDisabled}
               onChange={(enabled) => void patchConfig('enabled', { enabled })}
             />
-          </HStack>
-          <TextInput
+          }
+        />
+        <SettingsRow
+          label={copy.executeTime}
+          description={copy.executeTimeHelp}
+          end={<TextInput
             label={copy.executeTime}
-            description={copy.executeTimeHelp}
+            isLabelHidden
             value={executeTimeDraft}
             isDisabled={scheduleDisabled}
             placeholder={copy.executeTimePlaceholder}
-            width="100%"
+            width={110}
             status={executeTimeInvalid ? { type: 'error', message: copy.executeTimeInvalid } : undefined}
             onChange={(executeTime) => {
               setExecuteTimeDraft(executeTime);
@@ -146,26 +133,25 @@ export function DailyReviewSettingsPage(props: { connections: readonly LlmConnec
                 void patchConfig('executeTime', { executeTime: executeTimeDraft });
               }
             }}
-          />
-        </FormLayout>
+          />}
+        />
       </SettingsSection>
 
-      <Divider />
-
       <SettingsSection title={copy.analysisTitle} description={copy.analysisDescription}>
-        <FormLayout className="settingsFormLayout">
-          <Selector
+        <SettingsRow
+          label={copy.model}
+          description={copy.modelHelp}
+          end={<Selector
             value={selectedModelValue}
             label={copy.model}
-            description={copy.modelHelp}
+            isLabelHidden
             options={modelOptions}
             isDisabled={formDisabled || modelOptions.length === 0}
-            width="100%"
             onChange={(value) => void patchConfig('modelKey', {
               modelKey: value === DAILY_REVIEW_DEFAULT_MODEL_VALUE ? '' : value,
             })}
-          />
-        </FormLayout>
+          />}
+        />
       </SettingsSection>
     </VStack>
   );
