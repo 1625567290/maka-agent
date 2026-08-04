@@ -783,6 +783,7 @@ interface SessionManagerBaseDeps {
   newId: () => string;
   now: () => number;
   childTools?: readonly MakaTool[];
+  resolveChildTools?: (sessionId: string) => Promise<readonly MakaTool[]>;
   /** Host-owned user catalog. Runtime receives ids from models, never raw model targets. */
   subagentCatalog?: {
     list(): Promise<SubagentPresetListItem[]>;
@@ -2435,7 +2436,7 @@ export class SessionManager {
     const definition = requireBuiltinAgentDefinition(input.agentId);
     assertAgentDefinitionRunnable({
       definition,
-      tools: this.deps.childTools ?? [],
+      tools: await this.childToolsForSession(input.source.sessionId),
       worktreeChildExecutorAvailable: this.hasWorktreeChildExecutor(),
     });
     const childPermissionMode =
@@ -3002,7 +3003,7 @@ export class SessionManager {
     this.assertActiveParentRun(parentSessionId, parentRun, input.spawnedBy.parentTurnId);
 
     const definition = requireBuiltinAgentDefinitionByProfile(input.agentProfile);
-    const availableChildTools = this.deps.childTools ?? [];
+    const availableChildTools = await this.childToolsForSession(parentSessionId);
     assertAgentDefinitionRunnable({
       definition,
       tools: availableChildTools,
@@ -3341,7 +3342,7 @@ export class SessionManager {
     await this.ensureChildWorkspace(sessionHeader);
     assertAgentDefinitionRunnable({
       definition,
-      tools: this.deps.childTools ?? [],
+      tools: await this.childToolsForSession(sessionId),
       worktreeChildExecutorAvailable: this.hasWorktreeChildExecutor(),
     });
     const visited = new Set<string>();
@@ -3467,7 +3468,7 @@ export class SessionManager {
     }
     await this.ensureChildWorkspace(child);
     await this.assertLinkedChildBoundaryMatchesParent(parentSessionId, child.id);
-    const runnableTools = buildToolsForAgentDefinition(this.deps.childTools ?? [], {
+    const runnableTools = buildToolsForAgentDefinition(await this.childToolsForSession(child.id), {
       id: snapshot.agentId,
       permissionMode: child.permissionMode,
       tools: snapshot.toolNames,
@@ -3972,9 +3973,10 @@ export class SessionManager {
       const resolved = requireBuiltinAgentDefinition(sourceRun.agentId);
       definition = {
         ...resolved,
-        toolNames: buildToolsForAgentDefinition(this.deps.childTools ?? [], resolved).map(
-          (tool) => tool.name,
-        ),
+        toolNames: buildToolsForAgentDefinition(
+          await this.childToolsForSession(sessionId),
+          resolved,
+        ).map((tool) => tool.name),
       };
     }
     const authority = runtimeContinuationAuthority(this.deps.runtimeEventStore);
@@ -4317,7 +4319,7 @@ export class SessionManager {
 
   async listChildAgents(sessionId: string): Promise<AgentListResult> {
     const definitions = listBuiltinAgentDefinitions({
-      tools: this.deps.childTools ?? [],
+      tools: await this.childToolsForSession(sessionId),
       worktreeChildExecutorAvailable: this.hasWorktreeChildExecutor(),
     });
     const presets = this.deps.subagentCatalog ? await this.deps.subagentCatalog.list() : [];
@@ -4423,6 +4425,12 @@ export class SessionManager {
       ],
       runs: legacyRuns,
     };
+  }
+
+  private async childToolsForSession(sessionId: string): Promise<readonly MakaTool[]> {
+    return this.deps.resolveChildTools
+      ? await this.deps.resolveChildTools(sessionId)
+      : (this.deps.childTools ?? []);
   }
 
   async readChildAgentOutput(

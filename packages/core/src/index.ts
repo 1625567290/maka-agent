@@ -1557,6 +1557,11 @@ export {
   resolveModelVisionSupport,
   resolveModelVoiceMetadata,
 } from './model-metadata.js';
+export type {
+  HostedWebSearchAdapter,
+  HostedWebSearchCapability,
+} from './model-web-search.js';
+export { resolveHostedWebSearchCapability } from './model-web-search.js';
 
 // settings.ts
 export type {
@@ -1790,6 +1795,7 @@ export type {
   WebSearchErrorReason,
   WebSearchCredentialStatus,
   WebSearchCredentialSource,
+  WebSearchCredentialProvider,
   WebSearchProvider,
   WebSearchProviderSettings,
   WebSearchResponse,
@@ -1801,6 +1807,7 @@ export {
   WEB_SEARCH_DEFAULT_LIMIT,
   WEB_SEARCH_CREDENTIAL_STATUSES,
   WEB_SEARCH_CREDENTIAL_SOURCES,
+  WEB_SEARCH_CREDENTIAL_PROVIDERS,
   WEB_SEARCH_MAX_LIMIT,
   WEB_SEARCH_PROVIDERS,
   WEB_SEARCH_QUERY_MAX_CHARS,

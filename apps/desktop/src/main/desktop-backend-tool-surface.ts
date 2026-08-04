@@ -1,10 +1,16 @@
 import {
   activePlanExecution,
   DEFAULT_SESSION_NAME,
+  defaultWebSearchSettings,
   isDeepResearchSession,
   resolveModelVisionSupport,
 } from '@maka/core';
-import type { CollaborationMode, LlmConnection, SessionHeader } from '@maka/core';
+import type {
+  AppSettings,
+  CollaborationMode,
+  LlmConnection,
+  SessionHeader,
+} from '@maka/core';
 import {
   emptyPlanSessionState,
   type PlanExecution,
@@ -12,6 +18,7 @@ import {
   type PlanStore,
 } from '@maka/core/plan';
 import {
+  AGENT_TOOL_NAMES,
   AGENT_TOOL_GROUP_ID,
   buildCancelPlanTool,
   isDeepResearchToolAllowed,
@@ -20,6 +27,7 @@ import {
   buildToolsForAgentDefinition,
   buildUpdatePlanTool,
   projectEffectiveProductToolSurface,
+  routeWebSearchTools,
   selectCollaborationTools,
 } from '@maka/runtime';
 import type {
@@ -48,6 +56,12 @@ export interface DesktopBackendToolSurfaceDeps {
     sessionId: string,
     header: SessionHeader,
   ) => Promise<readonly MakaTool[]>;
+  getWebSearchSettings?: () => Promise<AppSettings['webSearch']>;
+  getPrivacySettings?: () => Promise<AppSettings['privacy']>;
+  /** Complete child catalog before per-session search routing. */
+  childTools?: readonly MakaTool[];
+  /** Rebuilds parent agent tools from the routed child capability surface. */
+  buildParentAgentToolsForChildSurface?: (childTools: readonly MakaTool[]) => readonly MakaTool[];
 }
 
 export interface DesktopBackendToolSurfaceInput {
@@ -80,6 +94,33 @@ export interface DesktopBackendToolSurface {
 
 export interface DesktopNewSessionSkillContext {
   collaborationMode?: CollaborationMode;
+}
+
+/**
+ * Resolve the child capability surface from the same connection, search policy,
+ * and privacy authority used by backend creation.
+ */
+export async function resolveDesktopChildToolSurface(
+  deps: DesktopBackendToolSurfaceDeps,
+  input: {
+    header: SessionHeader;
+    tools: readonly MakaTool[];
+    readyConnection?: ReadyConnection;
+  },
+): Promise<MakaTool[]> {
+  const { connection, model } =
+    input.readyConnection ??
+    (await deps.getReadyConnection(input.header.llmConnectionSlug, input.header.model));
+  const webSearchSettings = await (deps.getWebSearchSettings?.() ??
+    Promise.resolve(defaultWebSearchSettings()));
+  const privacySettings = await deps.getPrivacySettings?.();
+  return routeWebSearchTools({
+    tools: input.tools,
+    settings: webSearchSettings,
+    connection,
+    model,
+    ...(privacySettings ? { privacy: privacySettings } : {}),
+  });
 }
 
 /**
@@ -206,6 +247,32 @@ export async function resolveDesktopBackendToolSurface(
     !input.tools && isDeepResearchSession(input.header.labels)
       ? unscopedCandidateTools.filter(isDeepResearchToolAllowed)
       : unscopedCandidateTools;
+  const webSearchSettings = await (deps.getWebSearchSettings?.() ??
+    Promise.resolve(defaultWebSearchSettings()));
+  const privacySettings = await deps.getPrivacySettings?.();
+  const routedCandidateTools = routeWebSearchTools({
+    tools: candidateTools,
+    settings: webSearchSettings,
+    connection,
+    model,
+    ...(privacySettings ? { privacy: privacySettings } : {}),
+  });
+  const routedChildTools = deps.childTools
+    ? routeWebSearchTools({
+        tools: deps.childTools,
+        settings: webSearchSettings,
+        connection,
+        model,
+        ...(privacySettings ? { privacy: privacySettings } : {}),
+      })
+    : undefined;
+  const effectiveCandidateTools =
+    !input.tools && routedChildTools && deps.buildParentAgentToolsForChildSurface
+      ? replaceParentAgentTools(
+          routedCandidateTools,
+          deps.buildParentAgentToolsForChildSurface(routedChildTools),
+        )
+      : routedCandidateTools;
   const toolEconomy = deps.isComputerUseRealModelE2e ? false : deps.toolEconomy;
 
   const planControlTools = input.tools
@@ -219,7 +286,7 @@ export async function resolveDesktopBackendToolSurface(
           ]
         : [];
   const backendTools = computerUseToolsForModel(
-    [...candidateTools, ...planControlTools],
+    [...effectiveCandidateTools, ...planControlTools],
     deps.computerUseTools,
     supportsVision,
   );
@@ -248,6 +315,26 @@ export async function resolveDesktopBackendToolSurface(
     skillHost: productToolSurface.hostCapabilities,
     admitsAgentChildren: productToolSurface.boundSurfaceIds.includes(AGENT_TOOL_GROUP_ID),
   };
+}
+
+function replaceParentAgentTools(
+  tools: readonly MakaTool[],
+  replacements: readonly MakaTool[],
+): MakaTool[] {
+  const parentToolNames = new Set<string>(AGENT_TOOL_NAMES);
+  const result: MakaTool[] = [];
+  let replaced = false;
+  for (const tool of tools) {
+    if (!parentToolNames.has(tool.name)) {
+      result.push(tool);
+      continue;
+    }
+    if (!replaced) {
+      result.push(...replacements);
+      replaced = true;
+    }
+  }
+  return result;
 }
 
 function modelSupportsVision(connection: LlmConnection, model: string): boolean {
