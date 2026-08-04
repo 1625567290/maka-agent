@@ -250,16 +250,41 @@ describe('file tools follow the execution boundary', () => {
       // atomic, so the survivor is whole even with no lock at all. Only an
       // overlap counter distinguishes a held lock from the kernel's own
       // serialisation, and only two spellings of one path prove the key
-      // canonicalises.
+      // canonicalises. Ordering is enforced with causal barriers instead of
+      // timers (#2132): submission order cannot promise acquisition order,
+      // because the lock key derivation is itself async. The first read waits
+      // for the second key to resolve. A working lock keeps that second read
+      // queued; a lockless implementation necessarily overlaps it with the
+      // first read, which is still active at that exact boundary.
       const host = createLocalWorkspaceExecutor();
       let active = 0;
       let overlapped = false;
+      let reads = 0;
+      let keys = 0;
+      let firstReadStarted!: () => void;
+      const firstReadStartedPromise = new Promise<void>((resolve) => {
+        firstReadStarted = resolve;
+      });
+      let secondKeyResolved!: () => void;
+      const secondKeyResolvedPromise = new Promise<void>((resolve) => {
+        secondKeyResolved = resolve;
+      });
       const tools = toolsFor({
         executor: Object.assign(Object.create(host) as typeof host, {
+          writeLockKey: async (input: Parameters<typeof host.writeLockKey>[0]) => {
+            const result = await host.writeLockKey(input);
+            keys += 1;
+            if (keys === 2) secondKeyResolved();
+            return result;
+          },
           readFile: async (input: Parameters<typeof host.readFile>[0]) => {
             active += 1;
             overlapped ||= active > 1;
-            await new Promise((resolve) => setTimeout(resolve, 20));
+            reads += 1;
+            if (reads === 1) {
+              firstReadStarted();
+              await secondKeyResolvedPromise;
+            }
             try {
               return await host.readFile(input);
             } finally {
@@ -270,15 +295,15 @@ describe('file tools follow the execution boundary', () => {
       });
       const edit = toolNamed(tools, 'Edit');
 
-      await Promise.all([
-        runTool(edit, { path: target, old_string: 'a', new_string: 'b' }, cwd, BYPASS),
-        runTool(
-          edit,
-          { path: join('..', 'outside', 'note.md'), old_string: 'b', new_string: 'c' },
-          cwd,
-          BYPASS,
-        ),
-      ]);
+      const first = runTool(edit, { path: target, old_string: 'a', new_string: 'b' }, cwd, BYPASS);
+      await firstReadStartedPromise;
+      const second = runTool(
+        edit,
+        { path: join('..', 'outside', 'note.md'), old_string: 'b', new_string: 'c' },
+        cwd,
+        BYPASS,
+      );
+      await Promise.all([first, second]);
 
       expect(overlapped).toBe(false);
       // The second edit saw the first one's output, so they ran in sequence
