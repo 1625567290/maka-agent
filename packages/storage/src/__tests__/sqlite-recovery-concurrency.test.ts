@@ -12,6 +12,7 @@ import {
   SQLITE_RUNTIME_SCHEMA_VERSION,
   createSqliteRuntimeStore,
 } from '../sqlite-runtime-store.js';
+import { bindWorkspaceBaselineAuthorityStoreRootInternal } from '../workspace-version-authority-internal.js';
 
 const WORKER_READY_TIMEOUT_MS = 15_000;
 const WORKER_EXECUTION_TIMEOUT_MS = 30_000;
@@ -254,7 +255,7 @@ describe('SQLite recovery authority multi-process races', () => {
       const db = new DatabaseSync(dbPath);
       try {
         db.exec(
-          "DROP TABLE runtime_workspace_heads; DROP TABLE runtime_workspace_versions; DROP TABLE runtime_workspace_epochs; DROP TABLE headless_task_run_events; DELETE FROM runtime_capabilities WHERE capability = 'runtime_workspace_version_authority'; PRAGMA user_version = 6;",
+          "DROP TABLE runtime_storage_root_binding; DROP TABLE runtime_workspace_heads; DROP TABLE runtime_workspace_versions; DROP TABLE runtime_workspace_epochs; DROP TABLE headless_task_run_events; DELETE FROM runtime_capabilities WHERE capability = 'runtime_workspace_version_authority'; PRAGMA user_version = 6;",
         );
       } finally {
         db.close();
@@ -295,6 +296,7 @@ async function withPreparedDatabase(
   const startPath = join(root, 'start');
   const store = createSqliteRuntimeStore(dbPath);
   try {
+    bindWorkspaceBaselineAuthorityStoreRootInternal(store, 'a'.repeat(64));
     await store.commitToolPrepared(preparedCommit());
     await store.appendRuntimeEvent('session-1', 'continuation-source-run', {
       id: 'continuation-source-user',
