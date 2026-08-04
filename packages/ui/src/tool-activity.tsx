@@ -383,7 +383,7 @@ function ToolOutputStream(props: {
           >
             {chunk.text}
             {chunk.redacted && (
-              <span className="maka-tool-output-redacted" aria-label={copy.redactedAriaLabel}>
+              <span className="maka-tool-output-redacted">
                 {' '}{copy.redacted}
               </span>
             )}
