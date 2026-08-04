@@ -62,6 +62,47 @@ test('archived tool-result copy preflight detects conversation-owned references'
     ),
     true,
   );
+  const linkedChildReferences = new Map([
+    [
+      'child-session',
+      {
+        runIds: new Set(['child-run']),
+        artifactIds: new Set(['child-artifact']),
+      },
+    ],
+  ]);
+  const linkedResult = serialized({
+    kind: 'subagent',
+    childSessionId: 'child-session',
+    agentName: 'Researcher',
+    turnId: 'child-turn',
+    runId: 'child-run',
+    status: 'completed',
+    permissionMode: 'ask',
+    summary: 'done',
+    artifactIds: ['child-artifact'],
+  });
+  assert.equal(
+    archivedToolResultContainsConversationOwnedReferences(
+      linkedResult,
+      'session-source',
+      linkedChildReferences,
+    ),
+    false,
+  );
+  assert.equal(
+    archivedToolResultContainsConversationOwnedReferences(
+      linkedResult,
+      'session-source',
+      new Map([
+        [
+          'child-session',
+          { runIds: new Set(['other-run']), artifactIds: new Set(['child-artifact']) },
+        ],
+      ]),
+    ),
+    true,
+  );
   assert.equal(
     archivedToolResultContainsConversationOwnedReferences(
       serialized({
@@ -229,6 +270,7 @@ test('conversation copy rewrites owned references without changing opaque tool p
   ];
   const references = {
     mode: 'exact' as const,
+    linkedChildren: { mode: 'reject' as const },
     sourceSessionId: 'session-source',
     targetSessionId: 'session-target',
     artifactIds: new Map([['artifact-source', 'artifact-target']]),
@@ -341,6 +383,74 @@ test('conversation copy rewrites owned references without changing opaque tool p
         runIds: new Map(),
       }),
     /missing AgentRun run-source/,
+  );
+
+  const linked = rewriteConversationCopyMessage(
+    {
+      type: 'tool_result',
+      id: 'linked-result',
+      turnId: 'turn-1',
+      ts: 6,
+      toolUseId: 'linked-call',
+      isError: false,
+      content: {
+        kind: 'subagent',
+        childSessionId: 'child-session',
+        agentName: 'Researcher',
+        turnId: 'child-turn',
+        runId: 'child-run',
+        status: 'completed',
+        permissionMode: 'ask',
+        summary: 'done',
+        artifactIds: ['child-artifact'],
+      },
+    },
+    {
+      ...references,
+      linkedChildren: {
+        mode: 'preserve_validated',
+        references: new Map([
+          [
+            'child-session',
+            {
+              runIds: new Set(['child-run']),
+              artifactIds: new Set(['child-artifact']),
+            },
+          ],
+        ]),
+      },
+    },
+  );
+  assert.equal(
+    linked.type === 'tool_result' && linked.content.kind === 'subagent'
+      ? linked.content.runId
+      : undefined,
+    'child-run',
+  );
+  assert.deepEqual(
+    linked.type === 'tool_result' && linked.content.kind === 'subagent'
+      ? linked.content.artifactIds
+      : undefined,
+    ['child-artifact'],
+  );
+  assert.deepEqual(
+    rewriteConversationCopyMessage(linked, {
+      mode: 'preserve_external',
+      sourceSessionId: 'session-source',
+      targetSessionId: 'session-target',
+      runIds: new Map(),
+      runtimeEventIds: new Map(),
+      providerTraceIds: new Map(),
+    }),
+    linked,
+  );
+  assert.throws(
+    () =>
+      rewriteConversationCopyMessage(linked, {
+        ...references,
+        linkedChildren: { mode: 'preserve_validated', references: new Map() },
+      }),
+    /missing linked child Session child-session/,
   );
 });
 
@@ -465,6 +575,7 @@ test('conversation copy rejects a retained AgentRun without RuntimeEvent facts',
           copiedMessages: source.messages,
           referenceMap: {
             mode: 'exact',
+            linkedChildren: { mode: 'reject' },
             sourceSessionId: 'session-source',
             targetSessionId: 'session-target',
             artifactIds: new Map(),
@@ -615,6 +726,7 @@ test('conversation copy rewrites a complete tool recovery bundle atomically', as
       copiedMessages: source.messages,
       referenceMap: {
         mode: 'exact',
+        linkedChildren: { mode: 'reject' },
         sourceSessionId: 'session-source',
         targetSessionId: 'session-target',
         artifactIds: new Map(),
@@ -743,6 +855,7 @@ test('conversation copy validates operational events before persisting target le
           copiedMessages: source.messages,
           referenceMap: {
             mode: 'exact',
+            linkedChildren: { mode: 'reject' },
             sourceSessionId: 'session-source',
             targetSessionId: 'session-target',
             artifactIds: new Map([['artifact-source', 'artifact-target']]),
@@ -1000,6 +1113,7 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
           copiedMessages: source.messages,
           referenceMap: {
             mode: 'exact',
+            linkedChildren: { mode: 'reject' },
             sourceSessionId: 'session-source',
             targetSessionId: 'session-missing-artifact',
             artifactIds: new Map([['artifact-source', 'artifact-target']]),
@@ -1029,6 +1143,7 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
       copiedMessages: source.messages,
       referenceMap: {
         mode: 'exact',
+        linkedChildren: { mode: 'reject' },
         sourceSessionId: 'session-source',
         targetSessionId: 'session-target',
         artifactIds: new Map([
@@ -1279,6 +1394,7 @@ test('conversation copy rebuilds an inline checkpoint without legacy child event
       copiedMessages: source.messages,
       referenceMap: {
         mode: 'exact',
+        linkedChildren: { mode: 'reject' },
         sourceSessionId: 'session-source',
         targetSessionId: 'session-target',
         artifactIds: new Map(),
@@ -1456,6 +1572,7 @@ test('conversation copy rebuilds a resumed child checkpoint over its child run c
       copiedMessages: source.messages,
       referenceMap: {
         mode: 'exact',
+        linkedChildren: { mode: 'reject' },
         sourceSessionId: 'session-source',
         targetSessionId: 'session-target',
         artifactIds: new Map(),
