@@ -77,6 +77,12 @@ export interface DesktopConversationCopy {
     turnsShort: string;
     recovered: string;
     turnFailed: string;
+    filterLabel: string;
+    filterPlaceholder: string;
+    filterFailedOnly: string;
+    filterClear: string;
+    noMatches: string;
+    hiddenByFilter: string;
   };
   quoteCompanion: {
     /** Read-only exploration hint shown in the empty companion panel. */
@@ -172,6 +178,12 @@ const COPY = {
       turnsShort: '轮记录数少于步数',
       recovered: '已恢复',
       turnFailed: '本轮失败',
+      filterLabel: '筛选追踪',
+      filterPlaceholder: '按工具、模型或轮次筛选',
+      filterFailedOnly: '仅失败',
+      filterClear: '清除筛选',
+      noMatches: '没有匹配的步骤——这个会话本身是有内容的',
+      hiddenByFilter: '项被筛选隐藏',
     },
     quoteCompanion: {
       hint: '这里的追问会带上主对话的完整上下文：只做解释和只读探索，不会改动文件，也不写回主对话。在主对话里继续选中文本追问，会加进这个侧栏。',
@@ -252,6 +264,12 @@ const COPY = {
       turnsShort: 'turns short of their step count',
       recovered: 'recovered',
       turnFailed: 'Turn failed',
+      filterLabel: 'Filter the trace',
+      filterPlaceholder: 'Filter by tool, model or turn',
+      filterFailedOnly: 'Failed only',
+      filterClear: 'Clear filter',
+      noMatches: 'Nothing matches this filter — the session itself is not empty',
+      hiddenByFilter: 'hidden by the filter',
     },
     quoteCompanion: {
       hint: 'Questions here carry the full context of the main conversation: read-only exploration and explanation, no file changes, and nothing is written back to the main conversation. Select more text in the main transcript to add it to this side panel.',

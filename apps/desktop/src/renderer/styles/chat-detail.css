@@ -109,6 +109,24 @@
   color: var(--maka-color-text-warning, inherit);
 }
 
+.maka-inspector-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--maka-space-2, 8px);
+  flex-wrap: wrap;
+}
+
+/* The live region is a wrapper only; its children carry their own spacing. */
+.maka-inspector-status:empty {
+  display: none;
+}
+
+.maka-inspector-hidden {
+  margin: 0;
+  color: var(--maka-color-text-secondary, inherit);
+  font-variant-numeric: tabular-nums;
+}
+
 .maka-inspector-error {
   display: flex;
   align-items: center;

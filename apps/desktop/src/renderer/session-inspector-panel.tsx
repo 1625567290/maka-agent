@@ -1,5 +1,13 @@
+import { useMemo, useState } from 'react';
+import { Button } from '@astryxdesign/core/Button';
+import { Switch } from '@astryxdesign/core/Switch';
+import { TextInput } from '@astryxdesign/core/TextInput';
 import { useUiLocale } from '@maka/ui';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
+import {
+  applyInspectorFilter,
+  type InspectorFilter,
+} from './session-inspector-filter.js';
 import {
   deriveInspectorPanelModel,
   type InspectorStepRow,
@@ -21,7 +29,12 @@ export function SessionInspectorPanel(props: { sessionId: string; active: boolea
     loadFailed: copy.loadFailed,
     locale,
   });
-  const model = deriveInspectorPanelModel(snapshot.trace);
+  const [filter, setFilter] = useState<InspectorFilter>({});
+  const model = useMemo(
+    () => applyInspectorFilter(deriveInspectorPanelModel(snapshot.trace), filter),
+    [snapshot.trace, filter],
+  );
+  const hidden = model.hiddenTurns + model.hiddenSteps;
 
   return (
     <section
@@ -72,11 +85,54 @@ export function SessionInspectorPanel(props: { sessionId: string; active: boolea
         </header>
       )}
 
-      {/* "Nothing to trace" is a claim about the session; a failed read cannot
-          make it, so the error stands alone. */}
-      {model.empty && !snapshot.loading && !snapshot.error && (
-        <p className="maka-inspector-empty">{copy.empty}</p>
+      {!model.empty && (
+        <div className="maka-inspector-filter">
+          <TextInput
+            size="sm"
+            label={copy.filterLabel}
+            isLabelHidden
+            hasClear
+            value={filter.query ?? ''}
+            placeholder={copy.filterPlaceholder}
+            onChange={(value) => setFilter({ ...filter, query: value })}
+          />
+          <Switch
+            label={copy.filterFailedOnly}
+            value={filter.failedOnly ?? false}
+            onChange={(checked) => setFilter({ ...filter, failedOnly: checked })}
+          />
+          {model.filtered && (
+            <Button
+              variant="ghost"
+              size="sm"
+              label={copy.filterClear}
+              onClick={() => setFilter({})}
+            />
+          )}
+        </div>
       )}
+
+      {/* Three different silences, kept apart: a read that failed, a filter
+          that matches nothing, and a session that did nothing. Only the last
+          one is "nothing to trace".
+          One persistent live region rather than three conditional ones: a
+          container that mounts and unmounts is not announced, and these
+          messages change as the reader types. */}
+      <div role="status" aria-live="polite" className="maka-inspector-status">
+        {model.empty && !snapshot.loading && !snapshot.error && (
+          <p className="maka-inspector-empty">{copy.empty}</p>
+        )}
+        {!model.empty && model.turns.length === 0 && model.filtered && (
+          <p className="maka-inspector-empty" data-maka-contract="session-inspector-no-matches">
+            {copy.noMatches}
+          </p>
+        )}
+        {model.filtered && hidden > 0 && model.turns.length > 0 && (
+          <p className="maka-inspector-hidden" data-maka-contract="session-inspector-hidden">
+            {hidden} {copy.hiddenByFilter}
+          </p>
+        )}
+      </div>
 
       <ol className="maka-inspector-turns">
         {model.turns.map((turn) => (
