@@ -374,12 +374,33 @@ const configuredMcpConfig: McpConfigFile = {
       command: 'npx',
       args: ['-y', '@modelcontextprotocol/server-filesystem', '/Users/yuhan/workspace'],
     },
-    'team-tools': {
-      enabled: true,
-      url: 'https://mcp.example.com/team/tools',
-      transport: 'streamable-http',
+    'linear-remote': {
+      enabled: false,
+      url: 'https://mcp.linear.app/sse',
+      transport: 'sse',
     },
   },
+};
+
+const editorMcpConfig: McpConfigFile = {
+  version: 1,
+  mcpServers: {
+    slack: {
+      enabled: false,
+      command: 'npx',
+      args: ['-y', '@modelcontextprotocol/server-slack@2025.4.25'],
+      env: { SLACK_BOT_TOKEN: '', SLACK_TEAM_ID: '', SLACK_CHANNEL_IDS: '' },
+    },
+  },
+};
+
+const editorMcpStatus: McpServerStatus = {
+  serverId: 'slack',
+  state: 'disabled',
+  transport: 'stdio',
+  toolCount: 0,
+  tools: [],
+  updatedAt: NOW,
 };
 
 const configuredMcpStatuses: McpServerStatus[] = [
@@ -394,6 +415,28 @@ const configuredMcpStatuses: McpServerStatus[] = [
     ],
     updatedAt: NOW,
   },
+  {
+    serverId: 'linear-remote',
+    state: 'disabled',
+    transport: 'sse',
+    toolCount: 0,
+    tools: [],
+    updatedAt: NOW,
+  },
+];
+
+const failedMcpConfig: McpConfigFile = {
+  version: 1,
+  mcpServers: {
+    'team-tools': {
+      enabled: true,
+      url: 'https://mcp.example.com/team/tools',
+      transport: 'streamable-http',
+    },
+  },
+};
+
+const failedMcpStatuses: McpServerStatus[] = [
   {
     serverId: 'team-tools',
     state: 'error',
@@ -417,6 +460,51 @@ const withConfiguredMcpBridge = withScopedMakaBridge({
     cancelInstall: async () => configuredMcpConfig,
     test: async () => ({ ok: true, status: configuredMcpStatuses[0], latencyMs: 42 }),
     reconnect: async () => configuredMcpStatuses[0],
+    subscribeChanges: () => () => {},
+  },
+});
+
+const withEditorMcpBridge = withScopedMakaBridge({
+  mcp: {
+    getConfig: async () => editorMcpConfig,
+    listStatuses: async () => [editorMcpStatus],
+    setConfig: async () => editorMcpConfig,
+    upsert: async () => editorMcpConfig,
+    install: async () => editorMcpConfig,
+    remove: async () => editorMcpConfig,
+    cancelInstall: async () => editorMcpConfig,
+    test: async () => ({ ok: false, status: editorMcpStatus, latencyMs: 0 }),
+    reconnect: async () => editorMcpStatus,
+    subscribeChanges: () => () => {},
+  },
+});
+
+const withEmptyMcpBridge = withScopedMakaBridge({
+  mcp: {
+    getConfig: async () => ({ version: 1, mcpServers: {} }),
+    listStatuses: async () => [],
+    setConfig: async () => ({ version: 1, mcpServers: {} }),
+    upsert: async () => ({ version: 1, mcpServers: {} }),
+    install: async () => ({ version: 1, mcpServers: {} }),
+    remove: async () => ({ version: 1, mcpServers: {} }),
+    cancelInstall: async () => ({ version: 1, mcpServers: {} }),
+    test: async () => ({ ok: true, status: configuredMcpStatuses[0], latencyMs: 42 }),
+    reconnect: async () => configuredMcpStatuses[0],
+    subscribeChanges: () => () => {},
+  },
+});
+
+const withFailedMcpBridge = withScopedMakaBridge({
+  mcp: {
+    getConfig: async () => failedMcpConfig,
+    listStatuses: async () => failedMcpStatuses,
+    setConfig: async () => failedMcpConfig,
+    upsert: async () => failedMcpConfig,
+    install: async () => failedMcpConfig,
+    remove: async () => failedMcpConfig,
+    cancelInstall: async () => failedMcpConfig,
+    test: async () => ({ ok: false, status: failedMcpStatuses[0], latencyMs: 30_000 }),
+    reconnect: async () => failedMcpStatuses[0],
     subscribeChanges: () => () => {},
   },
 });
@@ -683,7 +771,27 @@ export const ExtensionsSkillsNarrow: Story = {
   parameters: { viewport: { defaultViewport: 'mobile2' } },
 };
 
-// Real path: sidebar → 扩展 → MCP, with one healthy server and one actionable failure.
+// Real path: sidebar → 扩展 → MCP, before any server has been configured.
+export const ExtensionsMcpSetupRequired: Story = {
+  decorators: [withEmptyMcpBridge],
+  render: () => <ExtensionsMcpSurface />,
+  play: async ({ canvasElement }) => {
+    const installed = await waitForStorySelector<HTMLButtonElement>(
+      canvasElement,
+      '[data-tab-value="installed"]',
+    );
+    installed.click();
+    await waitForStoryText(canvasElement, '还没有安装 MCP');
+  },
+};
+
+// Real path: sidebar → 扩展 → MCP, browsing catalog entries with existing configuration.
+export const ExtensionsMcpMarketplace: Story = {
+  decorators: [withConfiguredMcpBridge],
+  render: () => <ExtensionsMcpSurface />,
+};
+
+// Real path: sidebar → 扩展 → MCP, with connected and disabled servers.
 export const ExtensionsMcpConfigured: Story = {
   decorators: [withConfiguredMcpBridge],
   render: () => <ExtensionsMcpSurface />,
@@ -693,6 +801,40 @@ export const ExtensionsMcpConfigured: Story = {
     installed.click();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
   },
+};
+
+// Real path: sidebar → 扩展 → MCP → Slack 管理, with credential fields visible.
+export const ExtensionsMcpEditor: Story = {
+  decorators: [withEditorMcpBridge],
+  render: () => <ExtensionsMcpSurface />,
+  play: async ({ canvasElement }) => {
+    const manage = await waitForStoryButton(
+      canvasElement,
+      (button) => button.textContent?.trim() === '管理',
+    );
+    manage.click();
+    await waitForStoryText(canvasElement.ownerDocument.body, '编辑 slack');
+  },
+};
+
+// Real path: sidebar → 扩展 → MCP, after an enabled remote server fails to connect.
+export const ExtensionsMcpConnectionFailed: Story = {
+  decorators: [withFailedMcpBridge],
+  render: () => <ExtensionsMcpSurface />,
+  play: async ({ canvasElement }) => {
+    const installed = await waitForStorySelector<HTMLButtonElement>(
+      canvasElement,
+      '[data-tab-value="installed"]',
+    );
+    installed.click();
+    await waitForStoryText(canvasElement, '连接超时，请检查服务器地址或网络代理。');
+  },
+};
+
+// Real path: sidebar → 扩展 → MCP at the narrow desktop viewport floor.
+export const ExtensionsMcpNarrow: Story = {
+  ...ExtensionsMcpConfigured,
+  parameters: { viewport: { defaultViewport: 'mobile2' } },
 };
 
 // Real path: sidebar → 定时任务 → 计划提醒, before any reminder exists.
