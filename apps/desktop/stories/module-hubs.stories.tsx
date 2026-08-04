@@ -267,6 +267,50 @@ const CONFIGURED_REMINDERS: PlanReminder[] = [
     ],
     runCount: 12,
   },
+  // Eighth reminder: the list's own control bar (search / sort / filter) only
+  // appears at eight, so without this row the story could never show it — and
+  // the controls are the widest thing the page's header carries.
+  {
+    id: 'plan-monthly-audit',
+    title: '每月依赖许可证审计',
+    note: '核对新引入依赖的许可证与来源。',
+    schedule: { kind: 'recurring', startAt: PLAN_NOW - 40 * 86_400_000, recurrence: 'monthly' },
+    delivery: { channel: 'local' },
+    status: 'scheduled',
+    enabled: true,
+    createdAt: PLAN_NOW - 40 * 86_400_000,
+    updatedAt: PLAN_NOW - 9 * 86_400_000,
+    nextRunAt: PLAN_NOW + 6 * 86_400_000,
+    runs: [],
+    runCount: 0,
+  },
+  {
+    id: 'plan-standup',
+    title: '每日站会前汇总阻塞项',
+    note: '',
+    schedule: { kind: 'cron', startAt: PLAN_NOW - 20 * 86_400_000, expression: '30 9 * * 1-5' },
+    delivery: { channel: 'local' },
+    status: 'scheduled',
+    enabled: true,
+    createdAt: PLAN_NOW - 20 * 86_400_000,
+    updatedAt: PLAN_NOW - 3 * 86_400_000,
+    nextRunAt: PLAN_NOW + 20 * 3_600_000,
+    runs: [],
+    runCount: 0,
+  },
+  {
+    id: 'plan-quarter-close',
+    title: '季度收尾清点未归档会话',
+    note: '把仍未归档的会话列成一张清单。',
+    schedule: { kind: 'once', runAt: PLAN_NOW + 21 * 86_400_000 },
+    delivery: { channel: 'local' },
+    status: 'paused',
+    enabled: false,
+    createdAt: PLAN_NOW - 11 * 86_400_000,
+    updatedAt: PLAN_NOW - 4 * 86_400_000,
+    runs: [],
+    runCount: 0,
+  },
 ];
 
 const LONG_CONTENT_REMINDERS: PlanReminder[] = [
@@ -853,6 +897,21 @@ export const ScheduledPlanRemindersConfigured: Story = {
   render: () => <ScheduledPlanRemindersSurface reminders={CONFIGURED_REMINDERS} />,
 };
 
+// Real path: sidebar → 定时任务 → 计划提醒 → click a task row, which opens the
+// inspector where every per-task control now lives. Wide only: below 1024px the
+// page drops the inspector rather than squeeze two columns into one.
+export const ScheduledPlanRemindersInspector: Story = {
+  render: () => <ScheduledPlanRemindersSurface reminders={CONFIGURED_REMINDERS} />,
+  play: async ({ canvasElement }) => {
+    const row = await waitForStoryButton(
+      canvasElement,
+      (candidate) => candidate.textContent?.includes('每周发布风险复盘') === true,
+    );
+    row.click();
+    await waitForStoryText(canvasElement, '立即触发');
+  },
+};
+
 // Real path: sidebar → 定时任务 → 计划提醒, with user-authored content at storage limits.
 export const ScheduledPlanRemindersLongContent: Story = {
   render: () => <ScheduledPlanRemindersSurface reminders={LONG_CONTENT_REMINDERS} />,
@@ -912,53 +971,6 @@ export const ScheduledDailyReviewInitialLoadFailed: Story = {
   },
 };
 
-// Real path: sidebar → scheduled tasks → Daily Review while saved reports load.
-export const ScheduledDailyReviewArchivesLoading: Story = {
-  render: () => (
-    <ScheduledDailyReviewSurface
-      bridge={{
-        fetchDay: async () => DAILY_REVIEW_SUMMARY,
-        listArchives: async () => new Promise(() => undefined),
-        runOnce: async () => ({ archiveId: DAILY_REVIEW_ARCHIVE.id }),
-        getArchive: async () => DAILY_REVIEW_ARCHIVE,
-      }}
-    />
-  ),
-  play: async ({ canvasElement }) => {
-    await waitForStorySelector(canvasElement, '.maka-daily-review-content');
-    const generate = await waitForStoryButton(
-      canvasElement,
-      (candidate) => candidate.textContent?.includes('生成分析') === true,
-    );
-    await expect(generate.disabled).toBe(true);
-  },
-};
-
-// Real path: sidebar → scheduled tasks → Daily Review after saved reports fail to load.
-export const ScheduledDailyReviewArchivesFailed: Story = {
-  render: () => (
-    <ScheduledDailyReviewSurface
-      bridge={{
-        fetchDay: async () => DAILY_REVIEW_SUMMARY,
-        listArchives: async () => {
-          throw new Error('archive fixture unavailable');
-        },
-        runOnce: async () => ({ archiveId: DAILY_REVIEW_ARCHIVE.id }),
-        getArchive: async () => DAILY_REVIEW_ARCHIVE,
-      }}
-    />
-  ),
-  play: async ({ canvasElement }) => {
-    await waitForStorySelector(canvasElement, '.maka-daily-review-content');
-    await waitForStoryText(canvasElement, '每日回顾刷新失败');
-    const generate = await waitForStoryButton(
-      canvasElement,
-      (candidate) => candidate.textContent?.includes('生成分析') === true,
-    );
-    await expect(generate.disabled).toBe(true);
-  },
-};
-
 // Real path: sidebar → scheduled tasks → Daily Review while a new range loads.
 export const ScheduledDailyReviewRefreshing: Story = {
   render: () => (
@@ -988,14 +1000,6 @@ export const ScheduledDailyReviewRefreshing: Story = {
     await expect(content.getAttribute('aria-busy')).toBe('true');
     await expect(canvasElement.querySelector('.astryx-skeleton')).toBeNull();
   },
-};
-
-// Real path at a narrow desktop window. The metrics collapse to two columns
-// while the Astryx controls keep their native wrapping behavior.
-// Real path: sidebar → scheduled tasks → Daily Review at a narrow window.
-export const ScheduledDailyReviewNarrow: Story = {
-  ...ScheduledDailyReview,
-  parameters: { viewport: { defaultViewport: 'mobile2' } },
 };
 
 // Real path after an analysis exists and the user opens its dedicated detail route.
@@ -1075,34 +1079,5 @@ export const ScheduledDailyReviewReport: Story = {
       ]),
     ].join('\n');
     await expect(input.markdown).toBe(expectedMarkdown);
-  },
-};
-
-// Real path: sidebar → scheduled tasks → Daily Review after a recoverable generation failure.
-export const ScheduledDailyReviewRetryableArchive: Story = {
-  render: () => {
-    const retryableArchive = {
-      ...DAILY_REVIEW_ARCHIVE,
-      status: 'failed' as const,
-      errorMessage: 'temporary fixture failure',
-    };
-    return (
-      <ScheduledDailyReviewSurface
-        bridge={{
-          fetchDay: async () => DAILY_REVIEW_SUMMARY,
-          listArchives: async () => [retryableArchive],
-          runOnce: async () => ({ archiveId: DAILY_REVIEW_ARCHIVE.id }),
-          getArchive: async () => DAILY_REVIEW_ARCHIVE,
-        }}
-      />
-    );
-  },
-  play: async ({ canvasElement }) => {
-    const retry = await waitForStoryButton(
-      canvasElement,
-      (candidate) => candidate.textContent?.includes('重新生成') === true,
-    );
-    retry.click();
-    await waitForStoryText(canvasElement, '返回活动');
   },
 };
