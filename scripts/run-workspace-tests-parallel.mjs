@@ -27,7 +27,27 @@ const defaultRepoRoot = dirname(dirname(scriptPath));
 // handled inside scripts/run-headless-tests.mjs; serial scheduling is extra
 // conservatism for root orchestration, not a claim that its suite shares FS
 // state with other packages.
-export const SERIAL_WORKSPACE_DIRS = ['packages/headless'];
+//
+// runtime and runtime-host join it as a TEMPORARY mitigation for #2132, and
+// the reason is worth stating precisely so this list does not become a
+// dumping ground: they do NOT contend over a shared resource. Measured, at
+// --concurrency 3 some run fails 3 times out of 3; at --concurrency 1 across
+// every workspace, 0 out of 2; and each package alone passes repeatedly. Two
+// tempting explanations were tested and are false — /tmp does not fill up
+// (331 -> 339 entries under load, readdir in 1ms) and leftover child
+// processes are not the cause (running them back to back passes 3 of 3).
+// What is left is saturation: three tests with fixed waits miss their window
+// when the machine is busy.
+//
+// So this buys a quiet review pipeline at the cost of wall clock, and it is
+// the wrong permanent answer — the fix is in those tests' timing assumptions
+// (#2132). Remove these two entries when that lands. The unrelated /tmp
+// isolation gap found during the same investigation is #2133.
+export const SERIAL_WORKSPACE_DIRS = [
+  'packages/headless',
+  'packages/runtime',
+  'packages/runtime-host',
+];
 export const DEFAULT_WORKSPACE_TIMEOUT_MS = 15 * 60_000;
 
 const PROCESS_TERMINATION_GRACE_MS = 1_000;
@@ -216,8 +236,34 @@ export async function runWorkspaceTests(options = {}) {
     await runSerial(workspaceDirs, runOptions);
   } else {
     const { parallel, serial } = partitionWorkspaces(workspaceDirs, serialDirs);
-    await runParallel(parallel, runOptions, concurrency);
-    await runSerial(serial, runOptions);
+    // The serial batch runs even when the parallel batch failed, and both
+    // results are reported together.
+    //
+    // It used to be a plain `await` pair, so one failing parallel workspace
+    // threw before the serial batch started and those suites silently did not
+    // run — the summary looked shorter and finished sooner, which reads as
+    // "faster and greener" rather than "three packages were skipped". That is
+    // the wrong direction for a runner whose entire job is to say what passed.
+    //
+    // Cancellation still stops everything at once: an aborted signal skips the
+    // serial batch, because there the caller has asked for no further work.
+    let parallelError;
+    try {
+      await runParallel(parallel, runOptions, concurrency);
+    } catch (error) {
+      parallelError = error;
+    }
+    if (runOptions.signal?.aborted) throw parallelError ?? workspaceRunCancelledError();
+    let serialError;
+    try {
+      await runSerial(serial, runOptions);
+    } catch (error) {
+      serialError = error;
+    }
+    const errors = [parallelError, serialError].filter(Boolean);
+    if (errors.length > 0) {
+      throw new Error(errors.map((error) => error?.message ?? String(error)).join('\n'));
+    }
   }
 }
 
