@@ -2089,10 +2089,6 @@ function AppShellContent({
             workbarAvailable={navSelection.section === 'sessions' && Boolean(activeId)}
             workbarCollapsed={workbarCollapsed}
             onToggleWorkbar={() => setWorkbarCollapsed((current) => !current)}
-            onOpenFeedback={() => openSettingsSection('about')}
-            onOpenPalette={openPalette}
-            onOpenHelp={openHelp}
-            onOpenHealth={() => openSettingsSection('health')}
           />
         )}
       </header>
@@ -2620,6 +2616,7 @@ function AppShellContent({
           closeSettings();
           setNavSelection({ section: 'automations', module: 'daily-review' });
         }}
+        onOpenKeyboardHelp={openHelp}
         onOpenSettingsSession={(sessionId) => {
           closeSettings();
           openSessionInChat(sessionId);
