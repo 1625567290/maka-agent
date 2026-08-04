@@ -25,6 +25,7 @@ import {
 import { planReminderStatusDotVariant, planRunStatusDotVariant } from './plan-reminder-status.js';
 import { PlanReminderFormDialog } from './plan-reminder-form-dialog.js';
 import { PlanReminderInspector } from './plan-reminder-inspector.js';
+import { useRovingRowFocus } from './use-roving-row-focus.js';
 import {
   Button as UiButton,
   EmptyState,
@@ -100,6 +101,10 @@ export function PlanReminderPanel(props: {
   // — which only happens when the main process pushes the new set back.
   const rowsContainerRef = useRef<HTMLDivElement | null>(null);
   const focusRowAfterRemovalRef = useRef<number | null>(null);
+  // One tab stop for the whole task list: without it, reaching the inspector
+  // from row k of N costs N−k presses, because the inspector renders after the
+  // list and every row is its own stop.
+  const rovingRows = useRovingRowFocus(rowsContainerRef);
   const [planView, setPlanView] = useState<PlanReminderView>('tasks');
   const [runRange, setRunRange] = useState<PlanReminderRunRange>('week');
   const [listFilter, setListFilter] = useState<PlanReminderListFilter>('all');
@@ -418,7 +423,16 @@ export function PlanReminderPanel(props: {
         )}
       >
         {planView === 'tasks' ? (
-          <div className="maka-module-page-panel" ref={rowsContainerRef}>
+          <div className="maka-module-page-panel" ref={rowsContainerRef} {...rovingRows}>
+            {/* Selecting a row moves no focus — a mouse user did not ask to
+                leave the list — so nothing else would tell a screen reader
+                that the details opened. This says so, politely, after
+                whatever the activation itself announced. Placement is left
+                unnamed: below the breakpoint the same content is a sheet
+                that announces itself, and this must not contradict it. */}
+            <p className="maka-visually-hidden" role="status" aria-live="polite">
+              {selectedReminder ? copy.page.inspectorOpened(selectedReminder.title) : ''}
+            </p>
             {normalizedListQuery && (
               <div className="maka-plan-search-summary" role="status" aria-live="polite">
                 <span>{copy.page.searchMatches(searchMatchedReminders.length)}</span>

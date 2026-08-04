@@ -70,6 +70,64 @@ test('acts on a reminder through the inspector and keeps deletion reversible', a
   await expect(page.locator('.maka-module-page-rows > li button:focus')).toHaveCount(1);
 });
 
+// Inert rows put every action behind the inspector, and the inspector renders
+// after the whole list. Without a roving tabindex, reaching it from row k of N
+// costs N−k tab presses through rows that do nothing — the cheap part of the
+// journey charged for the expensive one. One stop for the list is the contract.
+test('reaches the inspector two tab stops from a row with rows after it', async ({
+  planRemindersWindow: page,
+}) => {
+  const rows = page.locator('.maka-module-page-rows > li button');
+  await expect(rows).toHaveCount(8);
+  const inspector = page.getByRole('complementary', { name: '任务详情' });
+
+  // The first row under 创建时间倒序, so seven rows follow it — seven presses
+  // that reaching the inspector used to cost, one per row that does nothing.
+  const firstRow = page.getByRole('button', { name: /已触发的本地提醒/ });
+  const secondRow = page.getByRole('button', { name: /每周竞品动态追踪/ });
+  const lastRow = page.getByRole('button', { name: /每日站会前汇总阻塞项/ });
+  await firstRow.click();
+  await expect(firstRow).toBeFocused();
+  await expect(inspector).toBeVisible();
+
+  // Stop 1: the inspector's own resize handle, a real keyboard control
+  // (arrows resize the panel), so it keeps its place in the tab order.
+  await page.keyboard.press('Tab');
+  await expect(page.locator('[role="separator"]:focus')).toHaveCount(1);
+  // Stop 2: the inspector's first control. None of the seven rows below the
+  // selected one was visited — the list holds one tab stop, not eight.
+  await page.keyboard.press('Tab');
+  await expect(inspector.locator(':focus')).toHaveCount(1);
+  await expect(firstRow).toHaveAttribute('tabindex', '0');
+  await expect(secondRow).toHaveAttribute('tabindex', '-1');
+  await expect(lastRow).toHaveAttribute('tabindex', '-1');
+
+  // Arrows are what the list gives back in exchange for its N−1 tab stops.
+  await firstRow.focus();
+  await page.keyboard.press('ArrowDown');
+  await expect(secondRow).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(lastRow).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(firstRow).toBeFocused();
+
+  // The stop has to MOVE with the arrows, not just be written once on mount:
+  // the whole point of one tab stop is that Tab out and back returns you to
+  // the row you were on, not to the row you started at.
+  await page.keyboard.press('ArrowDown');
+  await expect(secondRow).toHaveAttribute('tabindex', '0');
+  await expect(firstRow).toHaveAttribute('tabindex', '-1');
+  await page.keyboard.press('Tab');
+  await expect(page.locator('[role="separator"]:focus')).toHaveCount(1);
+  await page.keyboard.press('Shift+Tab');
+  await expect(secondRow).toBeFocused();
+  // Arrows moved focus only: selection is the inspector's trigger, and firing
+  // it on every arrow press would make browsing the list an action.
+  await expect(inspector).toBeVisible();
+  await expect(page.locator('.maka-module-page-rows > li[aria-current]')).toHaveCount(1);
+  await expect(page.locator('.maka-module-page-rows > li').first()).toHaveAttribute('aria-current', 'true');
+});
+
 test('opens the edit dialog from the inspector and restores focus on Escape', async ({
   planRemindersWindow: page,
 }) => {
