@@ -17947,7 +17947,7 @@ describe('SessionManager permission mode updates', () => {
     expect((await store.readHeader(child.id)).projectId).toBe(null);
   });
 
-  test('fails before creating branch or revision sessions that need typed authority-fact rewriting', async () => {
+  test('branch and revision sessions rewrite tool operation authority facts', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const backends = new BackendRegistry();
@@ -18055,29 +18055,33 @@ describe('SessionManager permission mode updates', () => {
       ],
     );
 
-    const attempts = [
-      () =>
-        manager.branchFromTurn(session.id, {
-          sourceTurnId: 'authority-source-turn',
-          name: 'Blocked branch',
-        }),
-      () =>
-        manager.branchBeforeTurn(session.id, {
-          sourceTurnId: 'authority-later-turn',
-          name: 'Blocked before branch',
-        }),
-      () =>
-        manager.reviseBeforeTurn(session.id, {
-          sourceTurnId: 'authority-later-turn',
-        }),
+    const copies = [
+      await manager.branchFromTurn(session.id, {
+        sourceTurnId: 'authority-source-turn',
+        name: 'Tool branch',
+      }),
+      await manager.branchBeforeTurn(session.id, {
+        sourceTurnId: 'authority-later-turn',
+        name: 'Tool branch before later turn',
+      }),
+      await manager.reviseBeforeTurn(session.id, {
+        sourceTurnId: 'authority-later-turn',
+      }),
     ];
-    for (const attempt of attempts) {
-      await expectRejects(attempt(), /typed identity rewriting/i);
-      expect((await store.list()).map((candidate) => candidate.id)).toEqual([session.id]);
+    for (const copy of copies) {
+      const [targetRun] = await runStore.listSessionRuns(copy.id);
+      assert.ok(targetRun);
+      const targetEvents = await runStore.readRuntimeEvents(copy.id, targetRun.runId);
+      const dispatch = targetEvents.find((event) => event.actions?.toolDispatch);
+      const targetOperationId = dispatch?.actions?.toolDispatch?.operationId;
+      assert.ok(targetOperationId);
+      assert.notEqual(targetOperationId, 'authority-operation');
+      assert.equal(dispatch?.refs?.operationId, targetOperationId);
+      assert.equal(targetRun.sessionId, copy.id);
     }
   });
 
-  test('fails before cloning a legacy v1 continuation source until typed rewriting exists', async () => {
+  test('fails before creating branch or revision sessions for child continuation authority', async () => {
     const store = new MemorySessionStore();
     const runStore = new MemoryAgentRunStore();
     const manager = new SessionManager({
@@ -18094,8 +18098,46 @@ describe('SessionManager permission mode updates', () => {
       runStore,
       makeRunHeader({
         sessionId: session.id,
+        runId: 'continuation-parent-run',
+        turnId: 'continuation-parent-turn',
+        status: 'completed',
+        cwd: header.cwd,
+        createdAt: 1,
+        updatedAt: 2,
+        completedAt: 2,
+      }),
+      [
+        runtimeEvent({
+          id: 'continuation-parent-user',
+          sessionId: session.id,
+          invocationId: 'continuation-parent-invocation',
+          runId: 'continuation-parent-run',
+          turnId: 'continuation-parent-turn',
+          ts: 1,
+          role: 'user',
+          author: 'user',
+          content: { kind: 'text', text: 'retain parent and child closure' },
+        }),
+        runtimeEvent({
+          id: 'continuation-parent-terminal',
+          sessionId: session.id,
+          invocationId: 'continuation-parent-invocation',
+          runId: 'continuation-parent-run',
+          turnId: 'continuation-parent-turn',
+          ts: 2,
+          status: 'completed',
+          actions: { endInvocation: true },
+        }),
+      ],
+    );
+    await seedRuntimeRun(
+      runStore,
+      makeRunHeader({
+        sessionId: session.id,
         runId: 'legacy-continuation-run',
-        turnId: 'legacy-continuation-turn',
+        turnId: 'legacy-child-turn',
+        parentRunId: 'continuation-parent-run',
+        agentId: 'child-agent',
         status: 'completed',
         cwd: header.cwd,
         continuationSource: {
@@ -18104,9 +18146,9 @@ describe('SessionManager permission mode updates', () => {
           sourceTurnId: 'legacy-source-turn',
           sourceRuntimeEventHighWater: 1,
         },
-        createdAt: 1,
-        updatedAt: 2,
-        completedAt: 2,
+        createdAt: 3,
+        updatedAt: 4,
+        completedAt: 4,
       }),
       [
         runtimeEvent({
@@ -18114,8 +18156,8 @@ describe('SessionManager permission mode updates', () => {
           sessionId: session.id,
           invocationId: 'legacy-continuation-run',
           runId: 'legacy-continuation-run',
-          turnId: 'legacy-continuation-turn',
-          ts: 1,
+          turnId: 'legacy-child-turn',
+          ts: 3,
           role: 'user',
           author: 'user',
           content: { kind: 'text', text: 'legacy continuation history' },
@@ -18125,21 +18167,69 @@ describe('SessionManager permission mode updates', () => {
           sessionId: session.id,
           invocationId: 'legacy-continuation-run',
           runId: 'legacy-continuation-run',
-          turnId: 'legacy-continuation-turn',
-          ts: 2,
+          turnId: 'legacy-child-turn',
+          ts: 4,
+          status: 'completed',
+          actions: { endInvocation: true },
+        }),
+      ],
+    );
+    await seedRuntimeRun(
+      runStore,
+      makeRunHeader({
+        sessionId: session.id,
+        runId: 'continuation-later-run',
+        turnId: 'continuation-later-turn',
+        status: 'completed',
+        cwd: header.cwd,
+        createdAt: 5,
+        updatedAt: 6,
+        completedAt: 6,
+      }),
+      [
+        runtimeEvent({
+          id: 'continuation-later-user',
+          sessionId: session.id,
+          invocationId: 'continuation-later-invocation',
+          runId: 'continuation-later-run',
+          turnId: 'continuation-later-turn',
+          ts: 5,
+          role: 'user',
+          author: 'user',
+          content: { kind: 'text', text: 'later boundary' },
+        }),
+        runtimeEvent({
+          id: 'continuation-later-terminal',
+          sessionId: session.id,
+          invocationId: 'continuation-later-invocation',
+          runId: 'continuation-later-run',
+          turnId: 'continuation-later-turn',
+          ts: 6,
           status: 'completed',
           actions: { endInvocation: true },
         }),
       ],
     );
 
-    await expectRejects(
-      manager.branchFromTurn(session.id, {
-        sourceTurnId: 'legacy-continuation-turn',
-        name: 'Blocked legacy branch',
-      }),
-      /typed identity rewriting/i,
-    );
+    const attempts = [
+      () =>
+        manager.branchFromTurn(session.id, {
+          sourceTurnId: 'continuation-parent-turn',
+          name: 'Blocked child continuation branch',
+        }),
+      () =>
+        manager.branchBeforeTurn(session.id, {
+          sourceTurnId: 'continuation-later-turn',
+          name: 'Blocked child continuation branch before',
+        }),
+      () =>
+        manager.reviseBeforeTurn(session.id, {
+          sourceTurnId: 'continuation-later-turn',
+        }),
+    ];
+    for (const attempt of attempts) {
+      await expectRejects(attempt(), /typed identity rewriting/i);
+    }
     expect((await store.list()).map((candidate) => candidate.id)).toEqual([session.id]);
   });
 
