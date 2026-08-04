@@ -26,7 +26,11 @@ import {
   type TaskRunOutput,
   type TaskRunner,
 } from './fixed-prompt-controller.js';
-import type { HarborVerifierAttempt, HarborVerifierOutcome } from './fixed-prompt-wal-types.js';
+import type {
+  HarborTrialGrade,
+  HarborVerifierAttempt,
+  HarborVerifierOutcome,
+} from './fixed-prompt-wal-types.js';
 import {
   HARBOR_ORACLE_EXECUTION_POLICY,
   HARBOR_ORACLE_MAX_ATTEMPTS,
@@ -192,6 +196,20 @@ export function incompleteTerminalProviderRequest(
   if (!terminal || terminal.outcome === 'completed') return undefined;
   if (agentPhaseSettled && terminal.outcome === 'aborted') return undefined;
   return terminal;
+}
+
+/** Shared across runners: a verdict is this arm's evidence only if the agent got
+ * the run it was given. A tail request the upstream cut short says it did not,
+ * so the grade does not travel — the same boundary that makes a settled trial
+ * infra, applied where the trial ends as a budget exhaustion instead. Without
+ * it, a provider outage that a verifier happened to pass would be recorded as a
+ * pass on the one path that skips the infra check. `aborted` stays exempt: the
+ * agent phase ended, and tearing the request down is what that looks like. */
+export function trialGradeSurvivingProviderOutage<T>(
+  grade: T | undefined,
+  providerTelemetry: readonly ProviderRequestTelemetry[],
+): T | undefined {
+  return incompleteTerminalProviderRequest(providerTelemetry, true) ? undefined : grade;
 }
 
 export class HarborInfraError extends Error {
@@ -481,15 +499,22 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): TaskRu
               runnerOptions.agent,
               harborTraceMode(runnerOptions.agentEnv),
             );
+            // The exhaustion is the agent's fact; the verifier's verdict is the
+            // harness's. Both are true at once, so both travel — dropping the
+            // verdict because the agent never filed its self-report threw away a
+            // pass Harbor had already awarded.
+            const harbor = trialGradeSurvivingProviderOutage(
+              trialVerifierArtifacts(rewardArtifact, verifierArtifact, input.task.id),
+              providerTelemetry,
+            );
             throw new FixedPromptBudgetExhaustedError(
               `agent budget exhausted for task ${input.task.id}`,
               formatTrialException(trialException),
-              artifactRefs || providerTelemetry.length > 0
-                ? {
-                    ...(artifactRefs ?? {}),
-                    ...(providerTelemetry.length > 0 ? { providerTelemetryPath } : {}),
-                  }
-                : undefined,
+              {
+                ...(artifactRefs ?? {}),
+                ...(harbor ? { harbor } : {}),
+                ...(providerTelemetry.length > 0 ? { providerTelemetryPath } : {}),
+              },
             );
           }
           completeTimedOutTrial = true;
@@ -498,6 +523,13 @@ export function createHarborTaskRunner(options: HarborTaskRunnerOptions): TaskRu
           // workspace it left: a real result. Keep the cell's own status and
           // errorClass — nothing here is a deadline, so nothing may claim one —
           // and let the structured verifier grade score it.
+          //
+          // The cell requirement is a known exclusion, not the veto fixed above:
+          // a graded agent-exit trial with no self-report has no truthful event
+          // to land in. It claims no deadline, so task_budget_exhausted would
+          // lie, and task_completed needs the runtimeRefs/steps only the cell
+          // attests. Until such a shape exists it stays infra. Widening it is a
+          // WAL taxonomy decision, tracked separately.
           verifierSettledTrial =
             rewardArtifact !== null &&
             cellArtifact !== null &&
@@ -946,6 +978,10 @@ async function readVerifierOutcome(
       errorText(error),
     );
   }
+  return parseVerifierOutcome(value, taskId);
+}
+
+function parseVerifierOutcome(value: unknown, taskId: string): HarborVerifierOutcome {
   if (!isRecord(value) || value.schemaVersion !== 1) {
     throw new HarborInfraError(`verifier outcome is malformed for task ${taskId}`);
   }
@@ -1671,6 +1707,29 @@ export function classifyTrialTermination(
     return 'agent_budget';
   if (exception.type === 'NonZeroAgentExitCodeError') return 'agent_exit';
   return 'external';
+}
+
+/** What the verifier wrote about the trial, read straight from its own
+ * artifacts. It exists independently of `maka-cell-output.json`: that file is
+ * the agent's self-report, and an agent that ran out of budget mid-write never
+ * gets to file one, so a budget exhaustion can still carry the verdict Harbor
+ * reached. This only transports what is on disk — whether the two artifacts
+ * agree, and so whether they amount to a grade, is decided once by the
+ * controller's structuredVerifierGrade, the same judge the completed path uses.
+ * Artifacts that do not parse are not evidence and travel as nothing. */
+function trialVerifierArtifacts(
+  rewardArtifact: string | null,
+  verifierArtifact: string | null,
+  taskId: string,
+): HarborTrialGrade | undefined {
+  if (rewardArtifact === null || verifierArtifact === null) return undefined;
+  const reward = Number(rewardArtifact.trim());
+  if (rewardArtifact.trim().length === 0 || !Number.isFinite(reward)) return undefined;
+  try {
+    return { reward, verifier: parseVerifierOutcome(JSON.parse(verifierArtifact), taskId) };
+  } catch {
+    return undefined;
+  }
 }
 
 /** A verifier outcome is authoritative evidence that the trial was graded only
