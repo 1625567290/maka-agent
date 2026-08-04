@@ -46,7 +46,7 @@ export interface HostGoalEvaluatorInput {
   readonly newId?: () => string;
 }
 
-export type HostSessionEffectModelFailureClass =
+export type HostAuxiliaryModelFailureClass =
   | 'aborted'
   | 'timeout'
   | 'configuration'
@@ -65,7 +65,7 @@ export type HostSessionRecapModelResult =
       readonly ok: false;
       readonly modelId?: string;
       readonly messages?: readonly ModelMessage[];
-      readonly errorClass: Exclude<HostSessionEffectModelFailureClass, 'persistence'>;
+      readonly errorClass: Exclude<HostAuxiliaryModelFailureClass, 'persistence'>;
     }
   | {
       readonly ok: false;
@@ -92,6 +92,60 @@ export interface HostSessionEffectModel {
 
 export type HostSessionEffectModelInput = Omit<HostGoalEvaluatorInput, 'readSessionHeader'>;
 
+export type HostDailyReviewModelResult =
+  | { readonly ok: true; readonly text: string; readonly modelKey: string }
+  | {
+      readonly ok: false;
+      readonly errorClass: HostAuxiliaryModelFailureClass;
+    };
+
+export interface HostDailyReviewModel {
+  generate(input: {
+    readonly modelKey: string;
+    readonly prompt: string;
+    readonly abortSignal: AbortSignal;
+  }): Promise<HostDailyReviewModelResult>;
+}
+
+/** Creates root-scoped Daily Review calls on the canonical Host model authority. */
+export function createHostDailyReviewModel(
+  input: HostSessionEffectModelInput,
+): HostDailyReviewModel {
+  const authority = createAuxiliaryModelCallAuthority(input);
+  return Object.freeze({
+    generate: async ({
+      modelKey,
+      prompt,
+      abortSignal,
+    }: Parameters<HostDailyReviewModel['generate']>[0]) => {
+      const effectiveAbortSignal = AbortSignal.any([abortSignal, AbortSignal.timeout(60_000)]);
+      try {
+        const header = await readAuxiliaryPreflight(authority, effectiveAbortSignal, () =>
+          resolveDailyReviewHeader(authority.runtimePolicy, modelKey),
+        );
+        const result = await runHostAuxiliaryModelCall(authority, {
+          transportContextId: 'daily-review',
+          header,
+          callKind: 'daily_review',
+          callId: `daily_review_${authority.newId()}`,
+          abortSignal: effectiveAbortSignal,
+          buildRequest: () => ({ prompt, maxOutputTokens: 2_048 }),
+        });
+        return {
+          ok: true as const,
+          text: result.text,
+          modelKey: `${header.llmConnectionSlug}::${result.modelId}`,
+        };
+      } catch (error) {
+        return {
+          ok: false as const,
+          errorClass: auxiliaryModelErrorClass(error, effectiveAbortSignal),
+        };
+      }
+    },
+  });
+}
+
 /** Creates tool-free Session title and recap calls on canonical Host model authority. */
 export function createHostSessionEffectModel(
   input: HostSessionEffectModelInput,
@@ -111,7 +165,8 @@ export function createHostSessionEffectModel(
       ]);
       try {
         const result = await runHostAuxiliaryModelCall(authority, {
-          sessionId,
+          transportContextId: sessionId,
+          telemetrySessionId: sessionId,
           header,
           callKind: 'session_title',
           callId: `session_title_${sessionId}_${authority.newId()}`,
@@ -140,7 +195,8 @@ export function createHostSessionEffectModel(
       let messages: readonly ModelMessage[] | undefined;
       try {
         const result = await runHostAuxiliaryModelCall(authority, {
-          sessionId,
+          transportContextId: sessionId,
+          telemetrySessionId: sessionId,
           header,
           callKind: 'session_recap',
           callId: `session_recap_${sessionId}_${effectId}`,
@@ -166,7 +222,7 @@ export function createHostSessionEffectModel(
           ok: false as const,
           ...(modelId ? { modelId } : {}),
           ...(messages ? { messages } : {}),
-          errorClass: sessionEffectModelErrorClass(error, abortSignal),
+          errorClass: auxiliaryModelErrorClass(error, abortSignal),
         };
       }
     },
@@ -184,7 +240,8 @@ export function createHostGoalEvaluator(input: HostGoalEvaluatorInput): GoalEval
       );
       return (
         await runHostAuxiliaryModelCall(authority, {
-          sessionId,
+          transportContextId: sessionId,
+          telemetrySessionId: sessionId,
           header,
           callKind: 'goal_evaluation',
           callId: `goal_evaluation_${sessionId}_${authority.newId()}`,
@@ -229,8 +286,9 @@ type AuxiliaryModelRequest = ToolFreeModelCallContent & {
 };
 
 interface HostAuxiliaryModelCallInput {
-  readonly sessionId: string;
-  readonly header: SessionHeader;
+  readonly transportContextId: string;
+  readonly telemetrySessionId?: string;
+  readonly header: Pick<SessionHeader, 'llmConnectionSlug' | 'model' | 'thinkingLevel'>;
   readonly callKind: Exclude<ModelCallKind, 'main'>;
   readonly callId: string;
   readonly abortSignal: AbortSignal;
@@ -312,7 +370,7 @@ async function runHostAuxiliaryModelCall(
         binding: oauth.binding,
         initialTokens: initialOAuthTokens,
         connection: target.connection,
-        sessionId: input.sessionId,
+        sessionId: input.transportContextId,
         modelId: target.model,
         claudeDeviceId: authority.claudeDeviceId,
         fetchFn: transport.fetch,
@@ -320,7 +378,7 @@ async function runHostAuxiliaryModelCall(
     }
     const startedAt = authority.now();
     const baseRecord = {
-      sessionId: input.sessionId,
+      ...(input.telemetrySessionId ? { sessionId: input.telemetrySessionId } : {}),
       callKind: input.callKind,
       callId: input.callId,
       connectionSlug: target.connection.slug,
@@ -522,10 +580,10 @@ function evaluatorErrorClass(error: unknown): string {
   return error instanceof Error ? error.name : 'UnknownError';
 }
 
-function sessionEffectModelErrorClass(
+function auxiliaryModelErrorClass(
   error: unknown,
   abortSignal: AbortSignal,
-): HostSessionEffectModelFailureClass {
+): HostAuxiliaryModelFailureClass {
   if (error instanceof AuxiliaryModelCallLocalError) return 'persistence';
   if (abortSignal.aborted) {
     const reason = abortSignal.reason;
@@ -552,8 +610,52 @@ interface ResolvedExecutionTarget {
   readonly proxySecret?: string;
 }
 
+async function resolveDailyReviewHeader(
+  runtimePolicy: RuntimePolicyStoresWriter,
+  modelKey: string,
+): Promise<Pick<SessionHeader, 'llmConnectionSlug' | 'model' | 'thinkingLevel'>> {
+  const explicit = parseDailyReviewModelKey(modelKey);
+  if (modelKey.trim() && !explicit) {
+    throw new AuxiliaryModelCallConfigurationError('Daily Review model key is invalid');
+  }
+  if (explicit) {
+    return {
+      llmConnectionSlug: explicit.connectionSlug,
+      model: explicit.modelId,
+      thinkingLevel: 'off',
+    };
+  }
+  const catalog = await runtimePolicy.connectionCatalog.getSnapshot();
+  const target = catalog.defaultTarget;
+  const connection = target
+    ? catalog.connections.find((candidate) => candidate.connectionId === target.connectionId)
+    : undefined;
+  if (!target || !connection) {
+    throw new AuxiliaryModelCallConfigurationError(
+      'Daily Review has no canonical default model target',
+    );
+  }
+  return {
+    llmConnectionSlug: connection.slug,
+    model: target.modelId,
+    thinkingLevel: 'off',
+  };
+}
+
+function parseDailyReviewModelKey(
+  modelKey: string,
+): { readonly connectionSlug: string; readonly modelId: string } | undefined {
+  const trimmed = modelKey.trim();
+  if (!trimmed) return undefined;
+  const separator = trimmed.indexOf('::');
+  if (separator <= 0 || separator >= trimmed.length - 2) return undefined;
+  const connectionSlug = trimmed.slice(0, separator).trim();
+  const modelId = trimmed.slice(separator + 2).trim();
+  return connectionSlug && modelId ? { connectionSlug, modelId } : undefined;
+}
+
 export async function resolveExecutionTarget(
-  header: BackendFactoryContext['header'],
+  header: Pick<BackendFactoryContext['header'], 'llmConnectionSlug' | 'model' | 'thinkingLevel'>,
   runtimePolicy: RuntimePolicyStoresWriter,
   oauthCredentials: HostOAuthExecutionAuthority,
   createFetchTransport: (proxy: ProxiedFetchProxy | null) => ProxiedFetchTransport,
