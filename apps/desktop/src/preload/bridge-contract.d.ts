@@ -173,7 +173,24 @@ export type AppUpdateStatus =
       releaseName?: string;
       downloadedFile?: string;
     }
-  | { state: 'error'; currentVersion: string; message: string; latestVersion?: string };
+  | { state: 'installing'; currentVersion: string; latestVersion: string }
+  | {
+      state: 'error';
+      currentVersion: string;
+      message: string;
+      operation: 'check' | 'download' | 'install';
+      latestVersion?: string;
+    };
+
+export type AppUpdateInstallRequest = {
+  /** User consent from the trusted desktop renderer; this is a UX boundary, not a security boundary. */
+  allowInterruptActiveTasks: boolean;
+};
+
+export type AppUpdateInstallResult =
+  | { ok: true }
+  | { ok: false; reason: 'active_tasks' }
+  | { ok: false; reason: 'not_downloaded' | 'install_failed' };
 
 /**
  * Commands dispatched by the native application menu (see
@@ -637,9 +654,8 @@ export interface MakaBridge {
     }>;
     subscribeUpdateStatus(handler: (status: AppUpdateStatus) => void): () => void;
     updateStatus(): Promise<AppUpdateStatus>;
-    checkForUpdates(): Promise<AppUpdateStatus>;
-    downloadUpdate(): Promise<AppUpdateStatus>;
-    installUpdate(): Promise<{ ok: true } | { ok: false; reason: 'not_downloaded' | 'install_failed' }>;
+    retryUpdateDownload(): Promise<AppUpdateStatus>;
+    installUpdate(input: AppUpdateInstallRequest): Promise<AppUpdateInstallResult>;
     openUpdateDownload(): Promise<{ ok: true } | { ok: false; reason: 'not_available' | 'open_failed' }>;
     sessionProjectInfo(sessionId: string): Promise<{
       projectPath: string;

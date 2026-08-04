@@ -75,6 +75,10 @@ import {
 import { McpPage } from './mcp-page';
 import { getOnboardingActivationCandidate, useOnboardingSnapshot } from './use-onboarding-snapshot';
 import type { AppUpdateStatus, OnboardingSnapshot } from '../preload/bridge-contract.js';
+import {
+  isAppUpdateInstallFailure,
+  requestDownloadedAppUpdate,
+} from './app-update-install';
 import { ProviderLogo } from './settings/provider-display';
 import { ProviderBrandMark } from './settings/provider-brand-marks';
 import { getShellCopy, localizedShellErrorMessage } from './locales/shell-copy';
@@ -181,8 +185,6 @@ type ComposerImportOwner = {
  * assistant stream slot when the primary post-commit signal is missed.
  */
 const SETTLE_FALLBACK_GRACE_MS = 1000;
-const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
 /**
  * Module surfaces that own their whole column and render no workspace toolbar.
  * This used to be a `display: none` rule keyed on the detail panel's
@@ -240,6 +242,8 @@ function AppShellContent({
 }) {
   const toastApi = useToast();
   const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const updateInstallInFlightRef = useRef(false);
+  const notifiedInstallErrorRef = useRef<string | null>(null);
   const {
     sessions,
     authoritativeSessionIds,
@@ -281,6 +285,7 @@ function AppShellContent({
     const epochs = interactionHydrationEpochRef.current;
     epochs.set(sessionId, (epochs.get(sessionId) ?? 0) + 1);
   }, []);
+
   const attachmentDraftKey = activeId ?? 'new-session';
   const {
     pendingAttachments,
@@ -378,33 +383,33 @@ function AppShellContent({
   const shellCopy = getShellCopy(uiLocale).app;
   const voiceCopy = getDesktopConversationCopy(uiLocale).voice;
   useEffect(() => {
+    if (!isAppUpdateInstallFailure(appUpdateStatus)) {
+      notifiedInstallErrorRef.current = null;
+      return;
+    }
+    if (notifiedInstallErrorRef.current === appUpdateStatus.message) return;
+    notifiedInstallErrorRef.current = appUpdateStatus.message;
+    toastApi.error(
+      shellCopy.updateInstallFailedTitle,
+      shellCopy.updateInstallManualFallback,
+    );
+  }, [appUpdateStatus, shellCopy, toastApi]);
+  useEffect(() => {
     let cancelled = false;
-    const refreshUpdateStatus = () => {
-      void window.maka.app
-        .checkForUpdates()
-        .then((next) => {
-          if (!cancelled) setAppUpdateStatus(next);
-        })
-        .catch(() => {
-          if (!cancelled) setAppUpdateStatus(null);
-        });
-    };
-
+    let receivedPush = false;
+    const unsubscribeUpdateStatus = window.maka.app.subscribeUpdateStatus((next) => {
+      receivedPush = true;
+      if (!cancelled) setAppUpdateStatus(next);
+    });
     void window.maka.app
       .updateStatus()
       .then((next) => {
-        if (!cancelled) setAppUpdateStatus(next);
+        if (!cancelled && !receivedPush) setAppUpdateStatus(next);
       })
       .catch(() => {});
-    const unsubscribeUpdateStatus = window.maka.app.subscribeUpdateStatus((next) => {
-      if (!cancelled) setAppUpdateStatus(next);
-    });
-    refreshUpdateStatus();
-    const interval = window.setInterval(refreshUpdateStatus, UPDATE_CHECK_INTERVAL_MS);
     return () => {
       cancelled = true;
       unsubscribeUpdateStatus();
-      window.clearInterval(interval);
     };
   }, []);
 
@@ -421,10 +426,21 @@ function AppShellContent({
     : undefined;
   const openUpdateDownload = useCallback(() => {
     if (appUpdateStatus?.state === 'downloaded') {
-      void window.maka.app
-        .installUpdate()
-        .then((result) => {
-          if (result.ok) return;
+      if (updateInstallInFlightRef.current) return;
+      updateInstallInFlightRef.current = true;
+      void requestDownloadedAppUpdate({
+        installUpdate: (input) => window.maka.app.installUpdate(input),
+        confirmActiveTasks: () => toastApi.confirm({
+          title: shellCopy.updateActiveTasksTitle,
+          description: shellCopy.updateActiveTasksDescription,
+          confirmLabel: shellCopy.updateActiveTasksConfirm,
+          cancelLabel: shellCopy.updateActiveTasksCancel,
+          destructive: true,
+        }),
+      })
+        .then((outcome) => {
+          if (outcome.kind !== 'failed') return;
+          if (outcome.reason === 'install_failed') return;
           toastApi.error(
             shellCopy.updateInstallFailedTitle,
             shellCopy.updateInstallManualFallback,
@@ -435,17 +451,30 @@ function AppShellContent({
             shellCopy.updateInstallFailedTitle,
             localizedShellErrorMessage(error, shellCopy.updateInstallFailedFallback, uiLocale),
           );
+        })
+        .finally(() => {
+          updateInstallInFlightRef.current = false;
         });
       return;
     }
-    if (appUpdateStatus?.state === 'available' || appUpdateStatus?.state === 'error') {
+    if (
+      appUpdateStatus?.state === 'available' ||
+      appUpdateStatus?.state === 'downloading' ||
+      appUpdateStatus?.state === 'error'
+    ) {
       void window.maka.app
-        .downloadUpdate()
-        .then((next) => setAppUpdateStatus(next))
+        .retryUpdateDownload()
+        .then((next) => {
+          if (next.state !== 'error') return;
+          toastApi.error(
+            shellCopy.updateRetryFailedTitle,
+            shellCopy.updateRetryFailedFallback,
+          );
+        })
         .catch((error) => {
           toastApi.error(
-            shellCopy.updateDownloadFailedTitle,
-            localizedShellErrorMessage(error, shellCopy.tryAgainLater, uiLocale),
+            shellCopy.updateRetryFailedTitle,
+            localizedShellErrorMessage(error, shellCopy.updateRetryFailedFallback, uiLocale),
           );
         });
       return;

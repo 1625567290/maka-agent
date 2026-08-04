@@ -37,6 +37,7 @@ import type { DesktopExecutionStoreWiring } from './execution-store-wiring.js';
 import type { assembleDesktopTools } from './tool-assembly.js';
 import type { StreamEvents } from './session-stream.js';
 import type { SettingsIpcHandle } from './settings-ipc-main.js';
+import type { AppUpdateService } from './app-update-service.js';
 import { createAppQuitCoordinator } from './app-quit-coordinator.js';
 import { installApplicationMenu } from './application-menu.js';
 import { resolveDockPresentation } from './dock-presentation.js';
@@ -68,6 +69,7 @@ export interface AppLifecycleDeps {
   botRegistry: BotRegistry;
   planReminders: ReturnType<typeof createPlanReminderMainService>;
   dailyReview: ReturnType<typeof createDailyReviewMainService>;
+  updateService: AppUpdateService;
   automationWiring: ReturnType<typeof createMainAutomationWiring>;
   goalWiring: ReturnType<typeof createMainGoalWiring>;
   computerUse: AssembledTools['computerUse'];
@@ -141,6 +143,7 @@ export function wireAppLifecycle(deps: AppLifecycleDeps): void {
     botRegistry,
     planReminders,
     dailyReview,
+    updateService,
     automationWiring,
     goalWiring,
     computerUse,
@@ -255,6 +258,7 @@ export function wireAppLifecycle(deps: AppLifecycleDeps): void {
         }
       }
     }
+    updateService.start();
 
     // The renderer's first IPC calls (session enumeration, settings read,
     // connection listing)
@@ -384,6 +388,7 @@ export function wireAppLifecycle(deps: AppLifecycleDeps): void {
   app.on('before-quit', quitCoordinator.handleBeforeQuit);
 
   async function runBeforeQuitCleanup(): Promise<void> {
+    updateService.dispose();
     try {
       await backgroundStartup;
     } catch (error) {

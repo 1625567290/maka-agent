@@ -120,6 +120,8 @@ import { registerUsageIpc } from './usage-ipc-main.js';
 import { registerWebSearchIpc } from './web-search-ipc-main.js';
 import { registerNotificationsIpc } from './notifications-ipc-main.js';
 import { registerAppIpc } from './app-ipc-main.js';
+import { createAppUpdateService } from './app-update-service.js';
+import { hasInterruptibleUpdateWork } from './app-update-activity.js';
 import { registerGitIpc } from './git-ipc-main.js';
 import { registerWorkspaceSearchIpc } from './workspace-search-ipc-main.js';
 import { registerOnboardingIpc } from './onboarding-ipc-main.js';
@@ -647,6 +649,11 @@ function focusOrCreateMainWindow(signal: AbortSignal): void {
   }
 }
 const safeSendToRenderer = mainWindowController.send;
+const updateMockState = process.env.MAKA_UPDATE_MOCK_STATE === 'available' ||
+  process.env.MAKA_UPDATE_MOCK_STATE === 'downloading' ||
+  process.env.MAKA_UPDATE_MOCK_STATE === 'downloaded'
+  ? process.env.MAKA_UPDATE_MOCK_STATE
+  : undefined;
 taskLedgerStore.subscribe((event) => safeSendToRenderer('tasks:changed', event));
 deepResearchStore.subscribe((event) => safeSendToRenderer('deepResearch:changed', event));
 const deepResearchTools = buildDeepResearchTools({
@@ -662,6 +669,19 @@ const shellRuns = new ShellRunProcessManager({
   onShellRunUpdate: (update) => {
     safeSendToRenderer('shell-runs:update', update);
   },
+});
+const updateService = createAppUpdateService({
+  currentVersion: app.getVersion(),
+  isPackaged: app.isPackaged,
+  openExternal: (url) => shell.openExternal(url),
+  mockLatestVersion: process.env.MAKA_UPDATE_MOCK_VERSION,
+  mockState: updateMockState,
+  onStatusChange: (status) => safeSendToRenderer('app:updateStatusChanged', status),
+  hasActiveTasks: () => hasInterruptibleUpdateWork({
+    sessionActivities,
+    automationScheduler: automationWiring.scheduler,
+    shellRuns,
+  }),
 });
 const {
   persistToolArtifacts,
@@ -1073,6 +1093,7 @@ function registerIpc(): void {
     buildInfo,
     e2eFixture,
     projectManagement,
+    updateService,
   });
   registerMemoryIpc({ localMemory });
   registerConfigIpc({ connectionStore, settingsStore, credentialStore, workspaceRoot });
@@ -1458,6 +1479,7 @@ wireAppLifecycle({
   botRegistry,
   planReminders,
   dailyReview,
+  updateService,
   automationWiring,
   goalWiring,
   computerUse,

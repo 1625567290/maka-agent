@@ -6,6 +6,8 @@ import type {
   PermissionActionResult,
   PermissionOverlayStartResult,
   RendererIngestInput,
+  AppUpdateInstallRequest,
+  AppUpdateInstallResult,
   AppUpdateStatus,
   WindowCommand,
 } from './bridge-contract.js';
@@ -1010,14 +1012,11 @@ const makaBridge = {
     updateStatus(): Promise<AppUpdateStatus> {
       return ipcRenderer.invoke('app:updateStatus');
     },
-    checkForUpdates(): Promise<AppUpdateStatus> {
-      return ipcRenderer.invoke('app:checkForUpdates');
+    retryUpdateDownload(): Promise<AppUpdateStatus> {
+      return ipcRenderer.invoke('app:retryUpdateDownload');
     },
-    downloadUpdate(): Promise<AppUpdateStatus> {
-      return ipcRenderer.invoke('app:downloadUpdate');
-    },
-    installUpdate(): Promise<{ ok: true } | { ok: false; reason: 'not_downloaded' | 'install_failed' }> {
-      return ipcRenderer.invoke('app:installUpdate');
+    installUpdate(input: AppUpdateInstallRequest): Promise<AppUpdateInstallResult> {
+      return ipcRenderer.invoke('app:installUpdate', input);
     },
     openUpdateDownload(): Promise<{ ok: true } | { ok: false; reason: 'not_available' | 'open_failed' }> {
       return ipcRenderer.invoke('app:openUpdateDownload');
