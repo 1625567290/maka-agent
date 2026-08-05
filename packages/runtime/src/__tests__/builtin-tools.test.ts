@@ -1967,7 +1967,7 @@ describe('builtin write tools path containment', () => {
         content: 'from-executor',
       },
     ]);
-    expect(result).toMatchObject({ ok: true, path: '/workspace/created.txt', bytes: 13 });
+    expect(result).toMatchObject({ kind: 'file_diff', paths: ['/workspace/created.txt'] });
   });
 
   test('Write delegates file writing to the injected workspace executor', async () => {
@@ -1988,7 +1988,7 @@ describe('builtin write tools path containment', () => {
     expect(writes).toHaveLength(1);
     expect(writes[0]?.path.endsWith('created.txt')).toBe(true);
     expect(writes[0]?.content).toBe('from-executor');
-    expect(result).toMatchObject({ ok: true, bytes: 13 });
+    expect(result).toMatchObject({ kind: 'file_diff' });
   });
 
   test('Edit reads and writes through the injected workspace executor', async () => {
@@ -2019,10 +2019,9 @@ describe('builtin write tools path containment', () => {
     expect(reads).toHaveLength(1);
     expect(writes).toHaveLength(1);
     expect(writes[0]?.content).toBe('hello Maka\n');
-    expect(result).toMatchObject({
-      ok: true,
-      replacements: 1,
-    });
+    expect(result).toMatchObject({ kind: 'file_diff' });
+    expect((result as { diff: string }).diff).toContain('-hello world');
+    expect((result as { diff: string }).diff).toContain('+hello Maka');
   });
 
   test('Edit rejects image results from the workspace executor', async () => {
@@ -2195,13 +2194,7 @@ describe('builtin write tools path containment', () => {
         ),
       ),
     );
-    expect(
-      results.every(
-        (r) =>
-          (r as { ok: boolean; replacements: number }).ok === true &&
-          (r as { replacements: number }).replacements === 1,
-      ),
-    ).toBe(true);
+    expect(results.every((r) => (r as { kind: string }).kind === 'file_diff')).toBe(true);
     const expected = `${Array.from({ length: n }, (_, i) => `done-${String(i).padStart(2, '0')}`).join('\n')}\n`;
     expect(await readFile(join(root, 'data.txt'), 'utf8')).toBe(expected);
   });
@@ -2228,7 +2221,7 @@ describe('builtin write tools path containment', () => {
         ),
       ),
     );
-    expect(results.every((r) => (r as { ok: boolean }).ok === true)).toBe(true);
+    expect(results.every((r) => (r as { kind: string }).kind === 'file_diff')).toBe(true);
     const expected = `${Array.from({ length: n }, (_, i) => `done-${String(i).padStart(2, '0')}`).join('\n')}\n`;
     expect(await readFile(join(root, 'data.txt'), 'utf8')).toBe(expected);
   });
@@ -2259,7 +2252,7 @@ describe('builtin write tools path containment', () => {
         ),
       ),
     );
-    expect(results.every((r) => (r as { ok: boolean }).ok === true)).toBe(true);
+    expect(results.every((r) => (r as { kind: string }).kind === 'file_diff')).toBe(true);
     const expected = `${Array.from({ length: n }, (_, i) => `done-${String(i).padStart(2, '0')}`).join('\n')}\n`;
     expect(await readFile(join(workspace, 'data.txt'), 'utf8')).toBe(expected);
   });
@@ -2321,12 +2314,9 @@ describe('builtin FormatJson (file in place)', () => {
 
     const onDisk = await readFile(join(root, name), 'utf8');
     expect(onDisk).toBe(JSON.stringify(JSON.parse(input), null, 2));
-    expect(result.ok).toBe(true);
-    expect(result.valid).toBe(true);
-    expect(result.changed).toBe(true);
-    expect(result.bytesBefore).toBe(Buffer.byteLength(input, 'utf8'));
-    expect(result.bytesAfter).toBe(Buffer.byteLength(onDisk, 'utf8'));
-    expect(result.byteDelta).toBe((result.bytesAfter ?? 0) - result.bytesBefore);
+    expect(result).toMatchObject({ kind: 'file_diff' });
+    expect((result as unknown as { paths: string[] }).paths[0]?.endsWith('data.json')).toBe(true);
+    expect((result as unknown as { diff: string }).diff).toContain(`-${input}`);
   });
 
   test('rejects image results from the workspace executor', async () => {
@@ -2352,7 +2342,7 @@ describe('builtin FormatJson (file in place)', () => {
 
     const onDisk = await readFile(join(root, name), 'utf8');
     expect(onDisk).toBe('{\n  "a": 2,\n  "m": 3,\n  "z": 1\n}');
-    expect(result.changed).toBe(true);
+    expect((result as unknown as { kind: string }).kind).toBe('file_diff');
   });
 
   test('sort_keys: true preserves __proto__ as a data property', async () => {
@@ -2415,7 +2405,7 @@ describe('builtin FormatJson (file in place)', () => {
     const result = await runFormatJson({ path: name }, root);
 
     const onDisk = await readFile(join(root, name), 'utf8');
-    expect(result.valid).toBe(true);
+    expect((result as unknown as { kind: string }).kind).toBe('file_diff');
     expect(onDisk).toContain('🎉');
     expect(onDisk).toContain('你好');
   });
