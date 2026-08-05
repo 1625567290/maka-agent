@@ -443,10 +443,8 @@ describe('tool activity presentation', () => {
     }
   });
 
-  // Expansion is Astryx's call, not the product's: a settled group stays
-  // collapsed even when an earlier row failed, and the collapsed header shows
-  // the last call alone. Accepting that density trade-off is what "one visual
-  // language" costs — a bespoke group summary is exactly what this PR removed.
+  // Expansion is Astryx's call, not the product's, and its default is collapsed
+  // whatever the rows are doing.
   describe('group expansion follows Astryx', () => {
     const trailingSuccess = {
       toolUseId: 'ok-1',
@@ -471,9 +469,9 @@ describe('tool activity presentation', () => {
       assert.match(markup, /aria-expanded="false"/);
     });
 
-    // Two items on purpose: Astryx renders a lone call as a bare row that owns
-    // its own expansion, so defaultIsExpanded only reaches a real group.
-    it('opens while any call in the group is still running', () => {
+    // Two items on purpose: a lone call is a bare row that owns its own
+    // expansion, so group expansion is only observable from two up.
+    it('stays collapsed while a call in the group is still running', () => {
       const markup = renderGroup({
         toolUseId: 'live-1',
         toolName: 'Bash',
@@ -481,15 +479,12 @@ describe('tool activity presentation', () => {
         status: 'running',
         args: { command: 'npm test' },
       });
-      assert.match(markup, /aria-expanded="true"/);
+      assert.doesNotMatch(markup, /aria-expanded="true"/);
     });
 
-    // `pending` is in flight too: tool_start opens a call there and it only
-    // reaches `running` once output arrives, so a tool that never streams stays
-    // pending for its whole life. With parallel calls the last one can settle
-    // first, and the collapsed header would then show a green check for a group
-    // whose sibling is still working.
-    it('opens when a parallel call is still pending behind a settled one', () => {
+    // `pending` is in flight too: a tool that never streams stays pending for
+    // its whole life, and gets no special treatment either.
+    it('stays collapsed when a parallel call is still pending behind a settled one', () => {
       const markup = renderGroup({
         toolUseId: 'quiet-1',
         toolName: 'Bash',
@@ -497,7 +492,7 @@ describe('tool activity presentation', () => {
         status: 'pending',
         args: { command: 'sleep 600' },
       });
-      assert.match(markup, /aria-expanded="true"/);
+      assert.doesNotMatch(markup, /aria-expanded="true"/);
     });
   });
 });
