@@ -54,7 +54,7 @@ test('Windows baseline workflow keeps its non-blocking evidence contract', async
     /--workspaces=packages\/storage \*> "\$env:WINDOWS_BASELINE_LOG_DIR\/storage\.log"/u,
   );
   assert.match(workflow, /Get-Content "\$env:WINDOWS_BASELINE_LOG_DIR\/storage\.log"/u);
-  assert.match(workflow, /actions\/upload-artifact@v4/u);
+  assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40} # v4\.\d+\.\d+/u);
   assert.match(workflow, /name: windows-baseline/u);
   assert.match(workflow, /retention-days: 14/u);
 });

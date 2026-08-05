@@ -26,13 +26,13 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       has_misses: ${{ steps.plan.outputs.has_misses }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           cache: npm
-      - uses: astral-sh/setup-uv@v6
-      - uses: docker/setup-buildx-action@v3
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - run: npm ci
       - run: npm run build:test
       - name: Install pinned Harbor
@@ -74,7 +74,7 @@ jobs:
           count="$(jq '.include | length' "$RUNNER_TEMP/oracle-plan/matrix.json")"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           [[ "$count" -gt 0 ]] && echo "has_misses=true" >> "$GITHUB_OUTPUT" || echo "has_misses=false" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oracle-audit-plan
           path: ${{ runner.temp }}/oracle-plan/plan.json
@@ -89,13 +89,13 @@ jobs:
       max-parallel: 6
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           cache: npm
-      - uses: astral-sh/setup-uv@v6
-      - uses: docker/setup-buildx-action@v3
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - run: npm ci
       - run: npm run build:test
       - name: Install pinned Harbor
@@ -106,7 +106,7 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/harbor-framework/terminal-bench-2-1.git "$RUNNER_TEMP/terminal-bench-2-1"
           git -C "$RUNNER_TEMP/terminal-bench-2-1" checkout "$TERMINAL_BENCH_REVISION"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: oracle-audit-plan
           path: ${{ runner.temp }}/oracle-plan
@@ -118,7 +118,7 @@ jobs:
             --task-id "${{ matrix.task_id }}" \
             --jobs-dir "$RUNNER_TEMP/oracle-jobs" \
             --out "$RUNNER_TEMP/oracle-entry/${{ matrix.task_id }}.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: oracle-entry-${{ matrix.task_id }}
           path: ${{ runner.temp }}/oracle-entry/${{ matrix.task_id }}.json
@@ -131,18 +131,18 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
           cache: npm
       - run: npm ci
       - run: npm run build:test
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: oracle-audit-plan
           path: ${{ runner.temp }}/oracle-plan
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         if: needs.prepare.outputs.has_misses == 'true'
         with:
           pattern: oracle-entry-*
