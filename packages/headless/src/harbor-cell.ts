@@ -64,7 +64,7 @@ import {
   type HeadlessStorageWriter,
 } from './headless-storage.js';
 import type { HeadlessBackendContext, RealBackendIsolation } from './isolation.js';
-import { validateRealBackendIsolation } from './isolation.js';
+import { endManagedShellSessions, validateRealBackendIsolation } from './isolation.js';
 import { PiCliJsonTransport } from './pi-cli-json-transport.js';
 import { providerFromEnv, resolveHarborCellAiSdkEnv } from './provider-env.js';
 import { backendNeedsIsolation } from './runner.js';
@@ -489,6 +489,14 @@ export async function runHarborCellWithStorage(
     sendMessageError = error;
   } finally {
     if (settlementTimer) clearTimeout(settlementTimer);
+    // The agent phase is over here, and grading runs after this process exits.
+    // Anything the model left managed — a background build, a PTY it never
+    // closed — has to die now: it cannot influence verification, and a PTY
+    // child outliving this process would be an orphan nobody can reap.
+    // Processes the model deliberately detached (`nohup … &`) are NOT managed
+    // and deliberately survive, because some tasks are graded against a
+    // service the agent was asked to leave running.
+    await endManagedShellSessions(input.realBackendIsolation);
     try {
       if (settlementAttempt) {
         await settlementAttempt;
