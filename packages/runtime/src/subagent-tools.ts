@@ -153,6 +153,7 @@ export function buildSubagentSpawnTool(
         }
       }),
     categoryHint: 'subagent',
+    nesting: 'direct_only',
     impl: async (input, ctx) => {
       const definition = input.profile
         ? requireAgentDefinitionByProfile(definitions, input.profile)
@@ -356,6 +357,7 @@ export function buildSubagentListTool(): MakaTool<Record<string, never>, unknown
       'List user-approved subagent presets (including task descriptions, model routes, and availability), capability definitions, and child runs for this session.',
     parameters: z.object({}),
     categoryHint: 'read',
+    nesting: 'direct_only',
     impl: async (_input, ctx) => {
       // Not reachable from the desktop app or the CLI: both pass
       // `listChildAgents` to ToolRuntime unconditionally
@@ -451,6 +453,7 @@ export function buildSubagentOutputTool(): MakaTool<
         }
       }),
     categoryHint: 'read',
+    nesting: 'direct_only',
     impl: async (input, ctx) => {
       if (!ctx.readChildAgentOutput) {
         // Same reachability as `agent_list` above.

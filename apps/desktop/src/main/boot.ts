@@ -930,7 +930,10 @@ const runtime = new SessionManager({
   runStore,
   runtimeEventStore,
   ...(runtimePersistence.runtimeCommitStore
-    ? { toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol }
+    ? {
+        runtimeCommitSink: runtimePersistence.runtimeCommitStore,
+        toolBoundaryProtocol: runtimePersistence.runtimeCommitStore.toolBoundaryProtocol,
+      }
     : {}),
   shellRuns,
   backends,
