@@ -10,6 +10,14 @@ import { getConversationCopy } from './conversation-copy.js';
  */
 const SCROLL_END_EPSILON_PX = 2;
 
+/**
+ * How far the dock-style hover falloff reaches, in ticks. The hovered tick is
+ * at 0 and grows most; each neighbour out to this distance grows less. Ticks
+ * beyond it — and every tick while the pointer is away — sit at rest width,
+ * which is why this doubles as the resting proximity.
+ */
+const HOVER_FALLOFF_TICKS = 3;
+
 export interface PromptAnchorRailTurn {
   turnId: string;
   /** The user prompt text for this turn; used as the hover preview + a11y label. */
@@ -49,6 +57,10 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
   // the panels docked above it.
   const [safeArea, setSafeArea] = useState<{ scrollport: number; dock: number } | null>(null);
   const railRef = useRef<HTMLElement | null>(null);
+  // Which tick the pointer is on, so its neighbours can grow with it. Sibling
+  // selectors cannot express this: Astryx's HoverCard wraps each tick in its
+  // own `display: contents` element, so the ticks are not DOM siblings.
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   // Rebuilding this observer costs one querySelector + observe per turn over
   // the whole transcript, so it must not run per streamed token (#2030). What
   // keeps it from running is the caller: ChatView hands back the same array
@@ -186,11 +198,20 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
           : undefined
       }
     >
-      <nav className="maka-prompt-rail" aria-label={copy.promptRailAriaLabel} ref={railRef}>
-        {turns.map((turn) => {
+      <nav
+        className="maka-prompt-rail"
+        aria-label={copy.promptRailAriaLabel}
+        ref={railRef}
+        onPointerLeave={() => setHoveredIndex(null)}
+      >
+        {turns.map((turn, index) => {
           const isActive = turn.turnId === activeTurnId;
           const preview = turn.label.trim() || copy.emptyPrompt;
           const replyPreview = (turn.reply ?? '').replace(/\s+/g, ' ').trim().slice(0, 140);
+          const proximity =
+            hoveredIndex === null
+              ? HOVER_FALLOFF_TICKS
+              : Math.min(Math.abs(index - hoveredIndex), HOVER_FALLOFF_TICKS);
           return (
             // HoverCard, not a hand-positioned popover: it is portalled, so the
             // topmost and bottommost ticks no longer push their preview off the
@@ -216,10 +237,29 @@ export const PromptAnchorRail = memo(function PromptAnchorRail({ turns, scrollRe
                 aria-current={isActive ? 'true' : undefined}
                 aria-label={copy.jumpToPrompt(preview)}
                 onClick={() => jumpTo(turn.turnId)}
-              />
+                onPointerEnter={() => setHoveredIndex(index)}
+                style={
+                  {
+                    '--maka-prompt-rail-index': index,
+                    '--maka-prompt-rail-proximity': proximity,
+                  } as CSSProperties
+                }
+              >
+                {/* The bar is its own element, not a `::after`, because the
+                    travelling highlight anchors to it — and a pseudo-element
+                    cannot be an anchor. It cannot anchor to the button either:
+                    the HoverCard puts its own `anchor-name` there, inline,
+                    which wins over any rule of ours. */}
+                <span className="maka-prompt-rail-tick-bar" />
+              </button>
             </HoverCard>
           );
         })}
+        {/* The travelling highlight. It is one element anchored to whichever
+            tick is active rather than a state on the tick itself, so changing
+            the active prompt moves a bar the reader can follow instead of
+            swapping two static ones. */}
+        <span className="maka-prompt-rail-indicator" aria-hidden="true" />
       </nav>
     </div>
   );
