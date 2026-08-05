@@ -3,7 +3,7 @@ import { describe, it } from 'node:test';
 import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup as renderReactToStaticMarkup } from 'react-dom/server';
 import { ToolCallDetail, ToolTrow } from '../tool-activity.js';
-import { ToolResultPreview } from '../tool-activity/tool-result-preview.js';
+import { diffLineKind, ToolResultPreview } from '../tool-activity/tool-result-preview.js';
 import type { ToolActivityItem } from '../materialize.js';
 import { LocaleProvider } from '../locale-context.js';
 
@@ -424,6 +424,162 @@ describe('tool activity presentation', () => {
     }));
     assert.match(truncated, /tail only/);
     assert.match(truncated, /输出已截断/);
+  });
+
+  // Astryx's tokenizer has no `diff` language, so `language="diff"` was a
+  // no-op and every line painted `--color-syntax-variable`. The tints are the
+  // product's own; what has to hold is the classification, above all that the
+  // `---`/`+++` file markers are not read as a deletion and an addition.
+  it('tints a diff by line kind instead of painting it one colour', () => {
+    const markup = renderToStaticMarkup(createElement(ToolResultPreview, {
+      content: {
+        kind: 'file_diff',
+        paths: ['packages/ui/src/tool-activity.tsx'],
+        diff: [
+          'diff --git a/packages/ui/src/tool-activity.tsx b/packages/ui/src/tool-activity.tsx',
+          'index 1111111..2222222 100644',
+          '--- a/packages/ui/src/tool-activity.tsx',
+          '+++ b/packages/ui/src/tool-activity.tsx',
+          '@@ -1,3 +1,3 @@',
+          ' const kept = true;',
+          '-const removed = 1;',
+          '+const added = 2;',
+        ].join('\n'),
+      },
+    }));
+
+    const kinds = Array.from(markup.matchAll(/data-line="(\w+)"/g)).map((m) => m[1]);
+    assert.deepEqual(kinds, ['meta', 'meta', 'meta', 'meta', 'hunk', 'ctx', 'del', 'add']);
+    // The heading is the changed path, in the same surface a command uses.
+    assert.equal((markup.match(/data-slot="tool-output"/g) ?? []).length, 1);
+    assert.match(markup, /class="maka-tool-output-command"[^>]*>packages\/ui\/src\/tool-activity\.tsx</);
+    assert.doesNotMatch(markup, /astryx-codeblock/);
+  });
+
+  // `---`/`+++` only mark a file when the marker is followed by a path. Testing
+  // the bare prefix reads the removal of a YAML document separator or an SQL
+  // `--` comment as a header — the line the reader most needs to see as red.
+  it('reads a removed `---` line as a deletion, not as a file marker', () => {
+    assert.equal(diffLineKind('--- a/x.ts'), 'meta');
+    assert.equal(diffLineKind('+++ b/x.ts'), 'meta');
+    assert.equal(diffLineKind('----'), 'del');
+    assert.equal(diffLineKind('---'), 'del');
+    assert.equal(diffLineKind('+++'), 'add');
+  });
+
+  // A diff arrives newline-terminated; splitting one leaves a trailing empty
+  // field. Flat text hid it, one element per line does not.
+  it('does not draw a blank row after a newline-terminated diff', () => {
+    const markup = renderToStaticMarkup(createElement(ToolResultPreview, {
+      content: {
+        kind: 'file_diff',
+        paths: ['x.ts'],
+        diff: '@@ -1 +1 @@\n-old\n+new\n',
+      },
+    }));
+    assert.deepEqual(
+      Array.from(markup.matchAll(/data-line="(\w+)"/g)).map((m) => m[1]),
+      ['hunk', 'del', 'add'],
+    );
+  });
+
+  // The row-level counterpart of the sweep below, one level down: the detail
+  // panel used to draw the same command three ways — a CodeBlock card while
+  // streaming, that block's `title` slot once a foreground run settled, and
+  // the panel for a background one. Settling a command must not restyle it.
+  it('gives a command and its output one surface in every phase', () => {
+    const base = {
+      toolUseId: 'tool-command-surface',
+      toolName: 'Bash',
+      activityKind: 'command' as const,
+      args: { command: 'npm test' },
+    };
+    const phases: Record<string, ToolActivityItem> = {
+      live: {
+        ...base,
+        status: 'running',
+        outputChunks: [
+          { seq: 1, stream: 'stdout', text: 'streaming\n', redacted: false, createdAt: 1 },
+        ],
+      },
+      foreground: {
+        ...base,
+        status: 'completed',
+        result: {
+          kind: 'terminal',
+          cwd: '/repo',
+          cmd: 'npm test',
+          status: 'completed',
+          exitCode: 0,
+          output: pipeOutput('settled\n'),
+        },
+      },
+      background: {
+        ...base,
+        status: 'running',
+        result: {
+          kind: 'shell_run',
+          ref: 'maka://runtime/background-tasks/bg-surface',
+          mode: 'pipes',
+          status: 'running',
+          cwd: '/repo',
+          cmd: 'npm test',
+          startedAt: 1,
+          updatedAt: 2,
+          revision: 1,
+          output: pipeOutput('tracked\n'),
+        },
+      },
+    };
+
+    for (const [phase, item] of Object.entries(phases)) {
+      const markup = renderToStaticMarkup(createElement(ToolCallDetail, { item }));
+      assert.equal(
+        (markup.match(/data-slot="tool-output"/g) ?? []).length,
+        1,
+        `${phase} draws exactly one surface`,
+      );
+      assert.match(
+        markup,
+        /class="maka-tool-output-command"[^>]*>npm test</,
+        `${phase} puts the command in the surface header`,
+      );
+      // Neither the command nor the body is handed to Astryx's CodeBlock
+      // again: as its `title` the command rendered comment-coloured and tucked
+      // against the output, and the body's own block nested a second border
+      // inside the panel. The class is `astryx-codeblock`, one word — spelled
+      // with a hyphen this assertion matches nothing and passes on the very
+      // markup it exists to forbid.
+      assert.doesNotMatch(markup, /astryx-codeblock/, `${phase} keeps the shell path off CodeBlock`);
+    }
+  });
+
+  // The blocks a detail still draws through CodeBlock — a diff's path header, a
+  // JSON headline — sit beside the command surface, so they have to share its
+  // type tier. `ToolCodeBlock` used to pin Astryx `size="sm"`, the supporting
+  // tier, which rendered them at 12px against the surface's 14px. Astryx's `md`
+  // is `--text-code-size`, the same 0.875rem `--maka-text-code` resolves to.
+  //
+  // `data-size` is the attribute Astryx puts the resolved tier on, so the pin
+  // is visible to a string assertion; the leading and the rebound role tokens
+  // are CSS-only and are not reachable from this harness.
+  it('leaves a tool-detail code block on the code tier, not the supporting one', () => {
+    const markup = renderToStaticMarkup(createElement(ToolCallDetail, {
+      item: {
+        toolUseId: 'tool-code-tier',
+        toolName: 'CustomInspect',
+        status: 'completed',
+        args: { target: 'packages/ui' },
+        result: { kind: 'json', value: { ok: true, detail: 'line one\nline two' } },
+      } satisfies ToolActivityItem,
+    }));
+
+    // Scoped to the block's own tag: the copy affordance Astryx nests inside it
+    // carries `data-size="sm"` of its own, and that icon is not what the pin was
+    // about — a whole-markup match would read it as a regression forever.
+    const block = /<pre[^>]*class="astryx-codeblock[^"]*"[^>]*>/.exec(markup)?.[0];
+    assert.ok(block, 'this result still renders through CodeBlock');
+    assert.match(block, /data-size="md"/, 'the block sits on the code tier');
   });
 
   // The bug this replaced: a running command rendered in a bespoke trow and
