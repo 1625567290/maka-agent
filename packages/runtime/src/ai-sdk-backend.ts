@@ -68,6 +68,10 @@ import {
 } from '@maka/core/orchestration';
 import type { PlanToolResult } from './plan-tools.js';
 import {
+  bindToolResultArchiveDecoder,
+  type ToolResultArchiveCapability,
+} from './tool-result-archive-capability.js';
+import {
   YIELD_AGENT_GRAPH_TOOL_NAME,
   type YieldAgentGraphToolResult,
 } from './stream-graph-supervisor-tools.js';
@@ -197,7 +201,6 @@ import {
   shouldAppendContextCompactedNote,
   shouldAppendContextCompactionFailedOpenNote,
   type ContextBudgetPolicy,
-  type ToolResultArchiveReader,
 } from './context-budget.js';
 import {
   evaluateHistoryCompactCheckpointReplay,
@@ -450,8 +453,6 @@ export type {
   SynthesisCacheWriter,
   SynthesisCacheWriteInput,
   SynthesisCacheWriteResult,
-  ToolResultArchiveRecorder,
-  ToolResultArchiveRecorderInput,
 } from './ai-sdk-compaction-contract.js';
 
 export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
@@ -596,12 +597,6 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
    */
   supportsVision?: boolean;
   maxProviderImageRequestBytes?: number;
-  /**
-   * Optional archive reader for replay-only stale tool-result retrieval. The
-   * runtime never mutates persisted RuntimeEvents; successful reads hydrate
-   * the current model request only.
-   */
-  readToolResultArchive?: ToolResultArchiveReader;
 }
 
 export interface SystemPromptContext {
@@ -799,7 +794,9 @@ export class AiSdkBackend implements AgentBackend {
         this.appendTurnTailPrompt(content, turnTailPrompt),
     });
     this.toolAvailabilityRuntime = new ToolAvailabilityRuntime(
-      input.tools,
+      // The archive decoder is a runtime protocol tool, not a host binding:
+      // this session's placeholders name it, so this session advertises it.
+      bindToolResultArchiveDecoder(input.tools, input.toolResultArchive),
       input.toolAvailability,
       buildInvalidMakaTool(),
     );
@@ -2729,7 +2726,7 @@ export class AiSdkBackend implements AgentBackend {
       const retrieval = await retrieveArchivedToolResultsForReplay(
         runtimeContext,
         contextBudget?.archiveRetrieval,
-        this.input.readToolResultArchive,
+        this.input.toolResultArchive?.services.readToolResultArchive,
         {
           sessionId: this.sessionId,
           charsPerToken: contextBudget?.charsPerToken,
