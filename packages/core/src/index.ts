@@ -260,12 +260,15 @@ export type {
   GenericToolLedgerAppendValidation,
   ToolLedgerLane,
   ToolLedgerLaneValidation,
+  ToolLedgerRejectionCode,
   ToolLedgerScanOperation,
   ToolLedgerScanResult,
   ToolLedgerTransitionKind,
   ToolLedgerTransitionValidation,
 } from './tool-ledger-scanner.js';
 export {
+  ToolLedgerCorruptionError,
+  ToolLedgerRejectionError,
   scanToolLedger,
   validateGenericToolLedgerAppend,
   validateToolLedgerEventLane,
