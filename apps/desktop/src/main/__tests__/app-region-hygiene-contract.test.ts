@@ -62,6 +62,56 @@ describe('app-region hygiene', () => {
       [/-webkit-app-region:\s*no-drag/],
       'workspace action cluster must carve no-drag',
     );
+    assertCssRuleDecls(
+      shell,
+      '.maka-titlebar-identity',
+      [
+        // Both segments are buttons; without the carve-out their clicks reach
+        // the OS as window drags, the same failure the third titlebar button
+        // once had.
+        /-webkit-app-region:\s*no-drag/,
+        // Named column, not implicit placement: the breadcrumb and the
+        // workspace actions are each conditional, and an unnamed survivor
+        // slides into the empty slot — which parks the workbar toggle in the
+        // middle of the window.
+        /grid-column:\s*2/,
+        // The middle column is the one that gives way on a narrow window,
+        // truncating its own text instead of squeezing either action cluster.
+        /min-width:\s*0/,
+        // The one declaration that SIZES the carve-out. A grid item defaults to
+        // `justify-self: stretch`, which widens the no-drag rect to the whole
+        // middle column while looking pixel-identical — the window then cannot
+        // be dragged by its centre band, and every geometry and typography
+        // assertion still passes.
+        /justify-self:\s*start/,
+      ],
+      'session identity must carve no-drag, hold its column, and yield its own width',
+    );
+    // Truncation is a chain: every box between the column and the text has to
+    // agree to shrink. With the nav and the crumb buttons left at `min-width:
+    // auto` the ellipsis never engaged and a long name ran out of its column,
+    // over the workspace actions and into the strip's drag region.
+    assertCssRuleDecls(
+      shell,
+      '.maka-titlebar-identity__breadcrumbs',
+      [/min-width:\s*0/, /overflow:\s*hidden/],
+      'the breadcrumb nav must shrink with its column',
+    );
+    assertCssRuleDecls(
+      shell,
+      '.maka-titlebar-identity__segment',
+      [/overflow:\s*hidden/, /text-overflow:\s*ellipsis/, /white-space:\s*nowrap/],
+      'each segment truncates on its own line',
+    );
+    // The strip is a grid precisely so the breadcrumb can line up with a column
+    // that lives OUTSIDE it; laid out in flow it straddled the seam between the
+    // two columns and aligned with neither.
+    assertCssRuleDecls(
+      shell,
+      '.maka-window-titlebar',
+      [/display:\s*grid/, /grid-template-columns:/],
+      'titlebar must lay its three clusters out as named columns',
+    );
 
     const ui = stripCssComments(await readFile(UI_STYLES, 'utf8'));
     assertCssRuleDecls(

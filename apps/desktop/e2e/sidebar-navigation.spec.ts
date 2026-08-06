@@ -69,7 +69,16 @@ test('project mode nests sessions under collapsible project SideNav items', asyn
   }
 });
 
-test('project rename owns Enter without toggling the project disclosure', async ({
+/**
+ * Renaming a project goes through a dialog, and the row it names keeps its
+ * place — including its disclosure state.
+ *
+ * The in-place field this replaced had to defend that itself: it sat inside the
+ * project row, so Enter bubbled to the SideNavItem and collapsed the group, and
+ * an IME's composing Enter had to be told apart from a committing one. Neither
+ * is reachable from a dialog, which is most of why it is one.
+ */
+test('renaming a project commits from the dialog and leaves its disclosure alone', async ({
   sidebarLongSessionsWindow: page,
 }) => {
   const sidebar = await expandedSidebar(page);
@@ -86,20 +95,11 @@ test('project rename owns Enter without toggling the project disclosure', async 
   const projectToggle = project.locator('button[aria-expanded]').first();
   await expect(project).toBeVisible();
   await expect(projectToggle).toHaveAttribute('aria-expanded', 'true');
-  // Capture the disclosure state while the disclosure control is mounted:
-  // starting a rename swaps the whole project row for the rename input, so
-  // `button[aria-expanded]` does not exist while editing (SideNavItem rows
-  // replace the row, unlike the pre-#1860 TreeList that kept it mounted).
-  const disclosureState = await projectToggle.getAttribute('aria-expanded');
   // SideNavItem renders `endContent` inside the row's primary <button>, so
   // the row button's accessible name is its composite contents and ends with
   // the actions trigger's label — a plain name query matches both (strict
   // mode violation). The trigger is the only button inside the project's own
-  // end content, so scope the name query there. (The nesting is Astryx
-  // SideNavItem's own DOM — SideNavItem also drops extra props in expanded
-  // mode, so the parent's name cannot be overridden — and pulling the
-  // trigger out of the item button would need sidebar.css, frozen by
-  // in-review PR #1857.)
+  // end content, so scope the name query there.
   const projectActions = project
     .locator('.maka-project-item-end')
     .getByRole('button', { name: /项目操作$/ });
@@ -114,28 +114,24 @@ test('project rename owns Enter without toggling the project disclosure', async 
   await expect(renameItem).toBeVisible();
   await renameItem.click();
 
-  // Sidebar-scoped: starting a rename swaps the row's content for the input,
-  // so the name-filtered `project` locator cannot match while editing (the
-  // name lives in the input's value, which hasText does not read).
-  const rename = sidebar.getByRole('textbox', { name: '重命名' });
+  const dialog = page.getByRole('dialog', { name: '重命名项目' });
+  const rename = dialog.getByRole('textbox');
   await expect(rename).toBeFocused();
-  const originalName = await rename.inputValue();
-  await rename.press('A');
-  await expect(rename).toBeFocused();
-  await rename.press('Space');
-  await expect(rename).toHaveValue('A ');
-  await expect(rename).toBeFocused();
-  await rename.evaluate((element) => {
-    element.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Enter',
-      bubbles: true,
-      isComposing: true,
-    }));
-  });
-  await expect(rename).toBeFocused();
-  await rename.fill(originalName);
+  // Seeded from the row it was opened on, so a rename starts as an edit of the
+  // current name rather than an empty field.
+  await expect(rename).toHaveValue('示例项目');
+  await rename.fill('示例项目 II');
   await rename.press('Enter');
-  await expect(projectToggle).toHaveAttribute('aria-expanded', disclosureState ?? 'false');
+
+  await expect(dialog).toBeHidden();
+  await expect(
+    sidebar.locator('[data-project-id]').filter({ hasText: '示例项目 II' }).first(),
+  ).toBeVisible();
+  await expect(projectToggle).toHaveAttribute('aria-expanded', 'true');
+  // The project row captures its opener through its own ref and query, which
+  // is a different few lines from the session row's — the shared half is only
+  // the hand-back itself.
+  await expect(projectActions).toBeFocused();
 });
 
 test('double-clicking the flat ListItem menu does not enter rename', async ({
@@ -148,7 +144,7 @@ test('double-clicking the flat ListItem menu does not enter rename', async ({
   // a substring name query matches both the row button and this trigger.
   await row.getByRole('button', { name: '对话操作', exact: true }).dispatchEvent('dblclick');
 
-  await expect(sidebar.getByRole('textbox', { name: '重命名对话' })).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
 test('session delete intent opens only after its menu closes and restores the trigger', async ({
@@ -204,4 +200,112 @@ test('scheduled-task hub restores the last selected child module', async ({ wind
   await sidebar.getByRole('button', { name: '扩展', exact: true }).click();
   await scheduledTasks.click();
   await expect(selector).toHaveAccessibleName('定时任务内容：每日回顾');
+});
+
+/**
+ * A rename replaces the name, not the row — the same invariant the titlebar's
+ * breadcrumb holds one column to the right, reached the other way.
+ *
+ * In the titlebar the name is the open session's own heading, and the crumb is
+ * a standalone element built to be swapped. Here it is one property of a list
+ * item, and the item is an Astryx `SideNavItem`: `label` is a `string`, the
+ * whole row is one `<button>`, and a text field may not live inside a button.
+ * Editing in place therefore meant standing in for the row — and the stand-in
+ * had to re-derive its box (it came out 31px against 32, re-weighting the text
+ * under the cursor and stepping every row below it up a pixel), its leading
+ * icon, its trailing column, and its subtree, which is not decoration but every
+ * descendant row: renaming a session with running subagents took the whole
+ * branch off screen.
+ *
+ * A dialog leaves all of that alone by construction, which is what this rests
+ * on — the fixture seeds no parent/child pair, so the measurements below cover
+ * the row and its neighbour, not a subtree. What they do pin is the part that
+ * regressed twice: the row keeps its box, and nothing under it moves.
+ */
+test('renaming a session leaves its row exactly where it was', async ({
+  sidebarLongSessionsWindow: page,
+}) => {
+  const sidebar = page.getByRole('navigation', { name: '对话列表' });
+  const row = sidebar.locator('[data-maka-contract="session-row"]').first();
+  const read = () =>
+    page.evaluate(() => {
+      const first = document.querySelector('[data-maka-contract="session-row"]') as HTMLElement;
+      const box = (el: Element | null) =>
+        el
+          ? {
+              x: Math.round(el.getBoundingClientRect().x),
+              width: Math.round(el.getBoundingClientRect().width),
+            }
+          : null;
+      const inner = first.querySelector('.astryx-side-nav-item') as HTMLElement;
+      const next = document.querySelectorAll('[data-maka-contract="session-row"]')[1] as
+        | HTMLElement
+        | undefined;
+      const style = getComputedStyle(inner);
+      return {
+        rowHeight: Math.round(first.getBoundingClientRect().height),
+        // Null rather than a throw: the shift is what this measures, so an
+        // absent neighbour should read as a changed measurement, not a crash
+        // inside the page.
+        nextRowY: next ? Math.round(next.getBoundingClientRect().y) : null,
+        // `'absent'` rather than null: these two are Astryx's own DOM, and a
+        // markup change that made both reads null would leave the comparison
+        // passing on two nulls while measuring nothing. A sentinel still
+        // compares equal to itself, but it says so in the failure text of
+        // whichever OTHER measurement moves.
+        name: box(first.querySelector('.astryx-side-nav-item > span')) ?? 'absent',
+        trailing: box(first.querySelector('.maka-session-row-trailing')) ?? 'absent',
+        type: `${style.fontSize}/${style.fontWeight}`,
+      };
+    });
+
+  const before = await read();
+  const trigger = row.locator('.maka-session-row-end').getByRole('button').first();
+  await trigger.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '重命名对话' });
+  await expect(dialog.getByRole('textbox')).toBeFocused();
+
+  expect(await read()).toEqual(before);
+
+  // Escape leaves, and hands the keyboard back where it came from — the same
+  // contract the delete confirm one item below in this menu already keeps.
+  // Closing by unmounting the dialog skips Astryx's focus restore and drops
+  // the user on <body>, with the next Tab starting at the top of the window.
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
+/**
+ * The session branch of the rename actually commits.
+ *
+ * The project branch is covered above, and the titlebar's rename reaches
+ * storage through a different component entirely — so `commitRename`'s
+ * session arm was the one path with no test on it, and a swapped ternary
+ * there would rename nothing while every other rename test stayed green.
+ */
+test('renaming a session from the dialog reaches the row', async ({
+  sidebarLongSessionsWindow: page,
+}) => {
+  const sidebar = page.getByRole('navigation', { name: '对话列表' });
+  const row = sidebar
+    .locator('[data-maka-contract="session-row"]')
+    .filter({ hasText: '会话 00' })
+    .first();
+  await row.locator('.maka-session-row-end').getByRole('button').first().focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('menuitem', { name: '重命名', exact: true }).click();
+
+  const dialog = page.getByRole('dialog', { name: '重命名对话' });
+  const field = dialog.getByRole('textbox');
+  await expect(field).toHaveValue('会话 00');
+  await field.fill('会话 零零');
+  await field.press('Enter');
+
+  await expect(dialog).toBeHidden();
+  await expect(
+    sidebar.locator('[data-maka-contract="session-row"]').filter({ hasText: '会话 零零' }),
+  ).toHaveCount(1);
 });

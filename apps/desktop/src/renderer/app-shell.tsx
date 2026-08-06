@@ -41,10 +41,12 @@ import {
   SessionListPanel,
   SkillsPage,
   type SessionViewMode,
+  TitlebarSessionIdentity,
   type TurnFooterActionMeta,
   type WorkspacePickerModel,
   useToast,
   activeInteractionFor,
+  deriveTitlebarProjectName,
   enqueueInteraction,
   getConversationCopy,
   getSharedUiCopy,
@@ -1310,6 +1312,13 @@ function AppShellContent({
     },
     onSelectNoProject: selectNoProject,
   };
+  // The titlebar names the directory the ACTIVE session runs in, so it reads
+  // the same projected project state the picker does — `projectInfo` already
+  // resolves to the session's own cwd once a session owns it.
+  const titlebarProjectName = deriveTitlebarProjectName({
+    projectName: currentProject?.name,
+    projectPath: projectInfo?.projectPath,
+  });
   const sessionProjectGroups = useMemo(
     () => deriveProjectGroups(visibleSessions, projects, uiLocale),
     [visibleSessions, projects, uiLocale],
@@ -2058,6 +2067,23 @@ function AppShellContent({
          readers at all — and three writers of the same value is three chances
          for them to disagree. */
       data-sidebar-state={sessionListCollapsed ? 'collapsed' : 'expanded'}
+      /* Published here for the same reason `data-sidebar-state` is: the frame is
+         the only ancestor shared by the sidebar column and the titlebar strip,
+         and both need this number. The column is this wide; the titlebar's
+         session breadcrumb opens at that edge rather than straddling the seam
+         between the columns.
+
+         Only the EXPANDED width, and only as an inline style, because that is
+         the half of the answer this component owns — the user's dragged width.
+         The collapsed width is a constant, so shell-layout.css states it off
+         `data-sidebar-state`. Writing both here would duplicate the constant;
+         writing this one unconditionally would bury the other, since an inline
+         custom property outranks any rule that redefines it. */
+      style={
+        sessionListCollapsed
+          ? undefined
+          : ({ '--maka-sidenav-width': `${sessionListWidth}px` } as CSSProperties)
+      }
     >
       <LiveTurnReconciler
         controller={sessionUiController}
@@ -2080,6 +2106,34 @@ function AppShellContent({
           sidebarToggleHidden={settingsOpen}
           onOpenSearchModal={() => setSearchModalOpen(true)}
         />
+        {/* Only a session has an identity to state. The other views name
+            themselves in the nav column they are selected from, and the
+            new-task surface still shows its project in the composer's
+            WorkspacePicker — which stops rendering at the exact moment this
+            takes over, when the first message creates the session. */}
+        {/* `activeSessionForView`, not `activeSession`: opening or creating a
+            session runs a few hundred ms on a placeholder record while the real
+            summary loads, and the name this replaced (the context layer's) was
+            showing through that window. Hung on the real record alone, 新任务
+            was named nowhere for the length of it. */}
+        {navSelection.section === 'sessions' && activeSessionForView && (
+          <TitlebarSessionIdentity
+            /* Keyed by session: the open rename is local state and the field is
+               uncontrolled, so a switch that left the instance mounted would
+               carry one session's half-typed name — and its commit — onto the
+               next one. A remount ties the edit to the session it belongs to. */
+            key={activeSessionForView.id}
+            sessionName={activeSessionForView.name}
+            onRenameSession={(name) => {
+              void sessionRowActionHandlers.renameSession(activeSessionForView.id, name);
+            }}
+            project={
+              titlebarProjectName
+                ? { name: titlebarProjectName, onOpenFolder: () => void openProjectFolder() }
+                : undefined
+            }
+          />
+        )}
         {!VIEWS_WITHOUT_WORKSPACE_ACTIONS.has(agentsView) && (
           <AppShellWorkspaceTopActions
             workbarAvailable={navSelection.section === 'sessions' && Boolean(activeId)}

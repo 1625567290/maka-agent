@@ -259,27 +259,6 @@
   color: var(--muted-foreground);
 }
 
-.maka-session-row--editing {
-  padding-inline: var(--space-2);
-  padding-block: var(--space-1);
-}
-
-.maka-session-rename-input {
-  font: var(--maka-text-heading-4);
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  border-bottom: var(--border-width-hairline) solid oklch(from var(--focus-ring) l c h / 0.4);
-  background: transparent;
-  color: var(--foreground);
-  outline: 0;
-  padding: 1px 0;
-}
-
-.maka-session-rename-input:focus {
-  border-bottom-color: var(--focus-ring);
-}
-
 /* #1879: an Astryx `Badge variant="yellow"` now. Box, radius, padding and
    caption type all come from the component (20px off `--spacing-5`), so the
    only thing product CSS still owns is that it must not be squeezed by the

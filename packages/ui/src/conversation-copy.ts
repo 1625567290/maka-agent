@@ -251,6 +251,10 @@ export interface ConversationCopy {
     branchBeforeInterrupt: string;
     sessionContextAriaLabel: string;
     sessionLineageAriaLabel: string;
+    titlebarIdentityAriaLabel: string;
+    openProjectFolder: (name: string) => string;
+    /** Action phrase appended to the titlebar project crumb's accessible name. */
+    openProjectFolderAction: string;
     sessionContextMore: (count: number) => string;
     revisionVersionsAriaLabel: string;
     revisionVersion: (current: number, total: number) => string;
@@ -265,6 +269,14 @@ export interface ConversationCopy {
     showMore: string;
     showMoreAriaLabel: (count: number) => string;
     renameAriaLabel: string;
+    /**
+     * Title of the rename dialog when the subject is a project; a session's
+     * reuses `renameAriaLabel`, which is the same phrase the sidebar and the
+     * titlebar already use for it.
+     */
+    renameProjectTitle: string;
+    /** The rename dialog's submit button. */
+    renameSubmit: string;
     respondingAriaLabel: string;
     respondingTitle: string;
     staleTitle: string;
@@ -408,12 +420,13 @@ const CONVERSATION_COPY = {
       clearGoal: (condition, iteration, max, status) => `自主执行目标进行中：「${condition}」（第 ${iteration}/${max} 轮，${status}）。系统每轮后自动续行；点击可清除目标、停止续行。`, clearGoalAriaLabel: (iteration, max) => `清除自主执行目标（已进行 ${iteration}/${max} 轮）`, goalProgress: (iteration, max) => `目标 ${iteration} / ${max}`, goalRunningAriaLabel: '自主目标正在运行',
       loadFailed: '对话载入失败', loading: '载入中…', retryLoad: '重试载入', quoteSelection: '引用', askInSidePanel: '在侧栏追问', noMessages: '暂无消息',
       branchBeforeInterrupt: '从中断前分支', sessionContextAriaLabel: '会话上下文', sessionLineageAriaLabel: '会话来源', sessionContextMore: (count) => `更多会话上下文（${count}）`,
+      titlebarIdentityAriaLabel: '当前会话', openProjectFolder: (name) => `在文件管理器中打开「${name}」`, openProjectFolderAction: '打开项目文件夹',
       revisionVersionsAriaLabel: '对话版本', revisionVersion: (current, total) => `版本 ${current} / ${total}`, previousRevision: '查看上一版本', nextRevision: '查看下一版本',
     },
     sessions: {
       status: { active: '可继续', running: '进行中', waiting_for_user: '等你确认', blocked: '需要处理', review: '待审核', done: '已完成', archived: '已归档', aborted: '已中止' },
       blockedReason: { NO_REAL_CONNECTION: '等待配置可用模型连接', auth: '需要重新登录', permission_required: '等待权限确认', tool_failed: '工具调用失败', unknown: '运行中断，可重试' },
-      listAriaLabel: '对话列表', title: '会话', showMore: '显示更多', showMoreAriaLabel: (count) => `显示 ${count} 条更多对话`, renameAriaLabel: '重命名对话', respondingAriaLabel: '正在响应', respondingTitle: '对话正在流式响应中', staleTitle: '此会话使用的模型连接已不可用，发送时会切换到默认连接', staleAriaLabel: '会话已过期', stale: '已过期', unreadAriaLabel: '未读消息', actionsAriaLabel: '对话操作', pin: '置顶', unpin: '取消置顶', rename: '重命名', archive: '归档', unarchive: '取消归档', delete: '删除', pinned: '置顶', recent: '最近', groupByTime: '按时间', groupByProject: '按项目', groupingAriaLabel: '会话分组方式', projectActionsAriaLabel: (name) => `${name} 项目操作`, projectNewTask: '新建任务', projectRename: '重命名', projectArchive: '归档', projectRestore: '恢复', projectRelink: '重新定位', projectUnavailable: '项目目录不可用', archivedProjects: '已归档项目', archivedProjectsAriaLabel: '展开已归档项目', worktreeAriaLabel: 'Git 工作树', promptRailAriaLabel: '按提问跳转', emptyPrompt: '（空提问）', jumpToPrompt: (preview) => `跳到提问：${preview}`,
+      listAriaLabel: '对话列表', title: '会话', showMore: '显示更多', showMoreAriaLabel: (count) => `显示 ${count} 条更多对话`, renameAriaLabel: '重命名对话', renameProjectTitle: '重命名项目', renameSubmit: '保存', respondingAriaLabel: '正在响应', respondingTitle: '对话正在流式响应中', staleTitle: '此会话使用的模型连接已不可用，发送时会切换到默认连接', staleAriaLabel: '会话已过期', stale: '已过期', unreadAriaLabel: '未读消息', actionsAriaLabel: '对话操作', pin: '置顶', unpin: '取消置顶', rename: '重命名', archive: '归档', unarchive: '取消归档', delete: '删除', pinned: '置顶', recent: '最近', groupByTime: '按时间', groupByProject: '按项目', groupingAriaLabel: '会话分组方式', projectActionsAriaLabel: (name) => `${name} 项目操作`, projectNewTask: '新建任务', projectRename: '重命名', projectArchive: '归档', projectRestore: '恢复', projectRelink: '重新定位', projectUnavailable: '项目目录不可用', archivedProjects: '已归档项目', archivedProjectsAriaLabel: '展开已归档项目', worktreeAriaLabel: 'Git 工作树', promptRailAriaLabel: '按提问跳转', emptyPrompt: '（空提问）', jumpToPrompt: (preview) => `跳到提问：${preview}`,
     },
   },
   en: {
@@ -550,12 +563,13 @@ const CONVERSATION_COPY = {
       clearGoal: (condition, iteration, max, status) => `Autonomous goal in progress: “${condition}” (iteration ${iteration}/${max}, ${status}). Maka continues after each iteration; click to clear the goal and stop continuing.`, clearGoalAriaLabel: (iteration, max) => `Clear autonomous goal after ${iteration}/${max} iterations`, goalProgress: (iteration, max) => `Goal ${iteration} of ${max}`, goalRunningAriaLabel: 'Autonomous goal running',
       loadFailed: 'Conversation failed to load', loading: 'Loading…', retryLoad: 'Retry', quoteSelection: 'Quote', askInSidePanel: 'Ask in side panel', noMessages: 'No messages yet',
       branchBeforeInterrupt: 'Branched before interruption', sessionContextAriaLabel: 'Session context', sessionLineageAriaLabel: 'Session origin', sessionContextMore: (count) => `More session context (${count})`,
+      titlebarIdentityAriaLabel: 'Current conversation', openProjectFolder: (name) => `Open “${name}” in the file manager`, openProjectFolderAction: 'Open project folder',
       revisionVersionsAriaLabel: 'Conversation versions', revisionVersion: (current, total) => `Version ${current} of ${total}`, previousRevision: 'View previous version', nextRevision: 'View next version',
     },
     sessions: {
       status: { active: 'Ready', running: 'Running', waiting_for_user: 'Waiting for you', blocked: 'Needs attention', review: 'Review', done: 'Done', archived: 'Archived', aborted: 'Stopped' },
       blockedReason: { NO_REAL_CONNECTION: 'Waiting for an available model connection', auth: 'Sign in again', permission_required: 'Waiting for permission', tool_failed: 'Tool call failed', unknown: 'Run interrupted; retry available' },
-      listAriaLabel: 'Conversation list', title: 'Conversations', showMore: 'Show more', showMoreAriaLabel: (count) => `Show ${count} more conversations`, renameAriaLabel: 'Rename conversation', respondingAriaLabel: 'Responding', respondingTitle: 'This conversation is streaming a response', staleTitle: 'This conversation\'s model connection is unavailable; sending will switch to the default connection', staleAriaLabel: 'Stale conversation', stale: 'Stale', unreadAriaLabel: 'Unread messages', actionsAriaLabel: 'Conversation actions', pin: 'Pin', unpin: 'Unpin', rename: 'Rename', archive: 'Archive', unarchive: 'Unarchive', delete: 'Delete', pinned: 'Pinned', recent: 'Recent', groupByTime: 'By time', groupByProject: 'By project', groupingAriaLabel: 'Conversation grouping', projectActionsAriaLabel: (name) => `${name} project actions`, projectNewTask: 'New task', projectRename: 'Rename', projectArchive: 'Archive', projectRestore: 'Restore', projectRelink: 'Relocate', projectUnavailable: 'Project directory unavailable', archivedProjects: 'Archived projects', archivedProjectsAriaLabel: 'Expand archived projects', worktreeAriaLabel: 'Git worktree', promptRailAriaLabel: 'Jump by prompt', emptyPrompt: '(empty prompt)', jumpToPrompt: (preview) => `Jump to prompt: ${preview}`,
+      listAriaLabel: 'Conversation list', title: 'Conversations', showMore: 'Show more', showMoreAriaLabel: (count) => `Show ${count} more conversations`, renameAriaLabel: 'Rename conversation', renameProjectTitle: 'Rename project', renameSubmit: 'Save', respondingAriaLabel: 'Responding', respondingTitle: 'This conversation is streaming a response', staleTitle: 'This conversation\'s model connection is unavailable; sending will switch to the default connection', staleAriaLabel: 'Stale conversation', stale: 'Stale', unreadAriaLabel: 'Unread messages', actionsAriaLabel: 'Conversation actions', pin: 'Pin', unpin: 'Unpin', rename: 'Rename', archive: 'Archive', unarchive: 'Unarchive', delete: 'Delete', pinned: 'Pinned', recent: 'Recent', groupByTime: 'By time', groupByProject: 'By project', groupingAriaLabel: 'Conversation grouping', projectActionsAriaLabel: (name) => `${name} project actions`, projectNewTask: 'New task', projectRename: 'Rename', projectArchive: 'Archive', projectRestore: 'Restore', projectRelink: 'Relocate', projectUnavailable: 'Project directory unavailable', archivedProjects: 'Archived projects', archivedProjectsAriaLabel: 'Expand archived projects', worktreeAriaLabel: 'Git worktree', promptRailAriaLabel: 'Jump by prompt', emptyPrompt: '(empty prompt)', jumpToPrompt: (preview) => `Jump to prompt: ${preview}`,
     },
   },
 } satisfies UiCatalog<ConversationCopy>;
