@@ -1004,21 +1004,88 @@ export function buildHarnessAbManifest({
   });
 }
 
+/**
+ * How fast the scheduler was told to go is not which experiment this is.
+ *
+ * The manifest records `maxConcurrency` and `maxConcurrentAttempts`, and a run
+ * id's fingerprint hashes the whole manifest — so an operator resuming a run
+ * at a different pace proposed a different fingerprint and was refused with
+ * "A/B run manifest does not match existing run id". Recovering three
+ * infra-failed cells out of an 89-task sweep meant reproducing the sweep's
+ * concurrency number, on pain of not recovering the data at all, while the
+ * arms, the model, the tasks and their order — everything the comparison is
+ * made of — were identical.
+ *
+ * So the proposed manifest adopts the existing run's pacing before the
+ * fingerprints are compared, the same way the adjudicated-retry path already
+ * adopts its frozen subject and toolchain identity. What the manifest records
+ * stays the pacing the run was created with; this invocation still runs at the
+ * pace it was asked for, which is why the scheduler reads its own policy
+ * rather than the manifest.
+ */
+function withExistingPacing(existing, proposed) {
+  const { fingerprint: _fingerprint, ...body } = proposed;
+  const normalized = {
+    ...body,
+    maxConcurrency: existing.maxConcurrency,
+    maxConcurrentAttempts: existing.maxConcurrentAttempts,
+  };
+  return { ...normalized, fingerprint: buildRunManifestFingerprint(normalized) };
+}
+
+/**
+ * The input the cohort runs from: the run's frozen identity, and this
+ * invocation's pacing.
+ *
+ * Which is the point of pulling it out of `runLocked`. `pairConcurrency` comes
+ * from the execution policy and not from `manifest.maxConcurrency`, because the
+ * gate hands back the manifest the run was created with — so reading pace from
+ * it would let a resume pass the gate and then silently run at the old pace,
+ * with nothing to notice.
+ */
+export function buildHarnessAbRunInput({
+  runId,
+  runRoot,
+  resultsJsonlPath,
+  systemPromptPath,
+  manifest,
+  evaluationTasks,
+  arms,
+  executionPolicy,
+  retryAdjudicatedInfraRoundIdsOnce,
+}) {
+  return {
+    runId,
+    runRoot,
+    resultsJsonlPath,
+    systemPromptPath,
+    resumeFingerprint: buildHarnessAbResumeFingerprint(manifest),
+    evaluationTasks,
+    arms,
+    pairConcurrency: executionPolicy.pairConcurrency,
+    armExecution: manifest.metadata.execution.armExecution,
+    retryAdjudicatedInfraRoundIdsOnce,
+  };
+}
+
 export async function resolveHarnessAbManifestForRun({
   manifestPath,
   proposedManifest,
   retryRoundIds,
   expectedExistingFingerprint,
 }) {
+  const existing = await readAbRunManifest(manifestPath);
   if (!expectedExistingFingerprint) {
-    return ensureAbRunManifest(manifestPath, proposedManifest);
+    return ensureAbRunManifest(
+      manifestPath,
+      existing ? withExistingPacing(existing, proposedManifest) : proposedManifest,
+    );
   }
   if (retryRoundIds.length === 0) {
     throw new Error(
       'MAKA_HARNESS_AB_EXPECTED_EXISTING_MANIFEST_FINGERPRINT requires an explicit adjudicated infra retry',
     );
   }
-  const existing = await readAbRunManifest(manifestPath);
   if (!existing) {
     throw new Error('explicit adjudicated infra retry requires an existing run manifest');
   }
@@ -1029,7 +1096,10 @@ export async function resolveHarnessAbManifestForRun({
   }
   const frozenMakaArm = existing.arms.find((arm) => arm.id === 'maka');
   if (!frozenMakaArm) throw new Error('existing run manifest is missing the Maka arm');
-  const { fingerprint: _proposedFingerprint, ...proposedBody } = proposedManifest;
+  const { fingerprint: _proposedFingerprint, ...proposedBody } = withExistingPacing(
+    existing,
+    proposedManifest,
+  );
   const normalizedBody = {
     ...proposedBody,
     subjectFingerprint: existing.subjectFingerprint,
@@ -1330,18 +1400,17 @@ async function runLocked({
           };
         }),
       ];
-      const runInput = {
+      const runInput = buildHarnessAbRunInput({
         runId,
         runRoot,
         resultsJsonlPath,
         systemPromptPath,
-        resumeFingerprint: buildHarnessAbResumeFingerprint(manifest),
+        manifest,
         evaluationTasks,
         arms,
-        pairConcurrency: manifest.maxConcurrency,
-        armExecution: manifest.metadata.execution.armExecution,
+        executionPolicy,
         retryAdjudicatedInfraRoundIdsOnce,
-      };
+      });
       const reportOracleEvidence = oracleEvidence
         ? {
             ...(oracleEvidence.resolvedSnapshotFingerprint
