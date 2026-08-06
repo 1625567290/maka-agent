@@ -13,6 +13,7 @@ import {
   type VersionedSessionIdentity,
 } from './sqlite-session-metadata-store.js';
 import { isDiscardableConversationCopy } from './session-conversation-copy.js';
+import { importLegacySessionsOnce } from './legacy-session-import.js';
 import {
   acquireOperationalStateDatabase,
   OPERATIONAL_STATE_DATABASE_NAME,
@@ -221,6 +222,20 @@ export interface SessionAuthorityStore extends SessionStore {
     initialBoundary?: ExecutionBoundary,
   ): Promise<CreateStableSessionResult>;
   discardStableConversationCopy(sessionId: string, requestFingerprint: string): Promise<boolean>;
+  /**
+   * Insert a session with its historical facts atomically (header + messages
+   * in one transaction, idempotent by session id). Used by the one-time
+   * legacy JSONL importer; not part of the normal session lifecycle.
+   */
+  importSession(
+    header: SessionHeader,
+    messages: readonly StoredMessage[],
+  ): Promise<'imported' | 'existing'>;
+  /**
+   * Cheap existence probe used by the legacy importer to skip ids already in
+   * SQLite before reading their transcripts.
+   */
+  hasSession(sessionId: string): Promise<boolean>;
   listCatalogPage(
     filter: SessionListFilter | undefined,
     cursor: SessionCatalogPageCursor | undefined,
@@ -272,6 +287,7 @@ export function createSessionStoreWithTestDependencies(
 class SqliteSessionStore implements SessionAuthorityStore {
   private readonly metadata: SqliteSessionMetadataStore;
   private readonly workspaceRoot: string;
+  private readyPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
 
   constructor(workspaceRoot: string, _dependencies: SessionAuthorityStoreTestDependencies) {
@@ -281,6 +297,44 @@ class SqliteSessionStore implements SessionAuthorityStore {
       join(workspaceRoot, OPERATIONAL_STATE_DATABASE_NAME),
       { databaseLease },
     );
+  }
+
+  /**
+   * One-time legacy JSONL session import, awaited by every public method so
+   * upgraded installs see their pre-cutover sessions from any entry point —
+   * desktop boot, CLI, headless, and `maka --resume <legacy-id>` all reach a
+   * read/write method before touching session data, and each awaits this
+   * latch (same shape as `importLegacyCatalogOnce` in project-catalog.ts).
+   *
+   * The import itself is best-effort: per-file errors are reported in the
+   * result and never thrown, and a whole-run failure (e.g. an unreadable
+   * sessions/ directory) is logged and dropped rather than taking the read
+   * path down with it. The outcome is surfaced to the log so a failure is
+   * observable instead of silently swallowed — the feature's purpose (data
+   * appears in the UI) can otherwise fail with zero signal.
+   */
+  private ensureReady(): Promise<void> {
+    this.readyPromise ??= this.importLegacySessionsOnce();
+    return this.readyPromise;
+  }
+
+  private async importLegacySessionsOnce(): Promise<void> {
+    try {
+      const result = await importLegacySessionsOnce(this, this.workspaceRoot);
+      if (result.failed > 0) {
+        console.warn(
+          `[legacy-session-import] ${result.failed} of ${result.imported + result.skipped + result.failed} legacy session(s) failed to import; ` +
+            `failures: ${result.failures.map((failure) => `${failure.sessionId}: ${failure.error}`).join(' | ')}`,
+        );
+      } else if (result.imported > 0) {
+        console.info(`[legacy-session-import] imported ${result.imported} legacy session(s)`);
+      }
+    } catch (error) {
+      console.error(
+        '[legacy-session-import] import run failed:',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   async create(
@@ -367,6 +421,24 @@ class SqliteSessionStore implements SessionAuthorityStore {
       }
     }
     return this.metadata.discardStableSessionCreate(sessionId, requestFingerprint);
+  }
+
+  async importSession(
+    header: SessionHeader,
+    messages: readonly StoredMessage[],
+  ): Promise<'imported' | 'existing'> {
+    // Deliberately not awaited against ensureReady: the importer drives the
+    // migration, so gating its own write primitive on the same latch would
+    // self-deadlock. The store is already ready by construction here (the
+    // metadata store is created in the constructor and importSession only
+    // touches it).
+    return this.metadata.importSession(header, messages, projectSessionCatalogMessages(messages));
+  }
+
+  async hasSession(sessionId: string): Promise<boolean> {
+    // Same rationale as importSession: no ensureReady gate — the importer
+    // drives the migration and must not await its own latch.
+    return this.metadata.hasSession(sessionId);
   }
 
   async createSubagent(
@@ -545,6 +617,9 @@ class SqliteSessionStore implements SessionAuthorityStore {
 
   async readHeaderRecordSnapshot(sessionId: string): Promise<SessionHeaderSnapshot> {
     await this.ensureReady();
+    // `maka --resume <legacy-id>` reads the header before any list; the
+    // import runs in ensureReady, so the first post-upgrade resume of a
+    // pre-cutover session sees its imported rows.
     return projectHeaderSnapshot(await this.metadata.read(sessionId));
   }
 
@@ -589,6 +664,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
 
   async appendMessages(sessionId: string, messages: StoredMessage[]): Promise<void> {
     if (messages.length === 0) return;
+    await this.ensureReady();
     await this.metadata.appendMessages(
       sessionId,
       messages,
@@ -762,10 +838,11 @@ class SqliteSessionStore implements SessionAuthorityStore {
   }
 
   private async closeAfterReady(): Promise<void> {
+    // Ensure the one-time import has settled before closing the database so
+    // a concurrent close cannot race an in-flight migration.
+    await this.ensureReady();
     this.metadata.close();
   }
-
-  private async ensureReady(): Promise<void> {}
 
   private async ensureCatalogProjectionReadable(): Promise<void> {
     await this.ensureReady();
