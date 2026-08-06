@@ -196,6 +196,15 @@ import {
 import { renderSwarmModePrompt } from './swarm-mode.js';
 import { renderGraphModePrompt } from './graph-mode.js';
 import {
+  MEMORY_EXTRACT_TOOL_NAME,
+  MEMORY_REMEMBER_TOOL_NAME,
+  buildMemoryExtractionTriggerTools,
+  type MemoryExtractionSourceCapabilities,
+  type MemoryExtractionSourceSnapshot,
+  type MemoryExtractionTrigger,
+} from './memory-extraction.js';
+import { modelUsesNativeOpenAiResponses } from './model-runtime.js';
+import {
   applyRuntimeEventContextBudget,
   buildContextBudgetDiagnosticShell,
   buildHistoryCompactBlockFromSummary,
@@ -771,6 +780,8 @@ export interface AiSdkBackendInput extends AiSdkCompactionCapabilities {
    */
   supportsVision?: boolean;
   maxProviderImageRequestBytes?: number;
+  /** Host-owned bounded long-term-memory extraction. Source tools are Runtime-reserved. */
+  memoryExtraction?: MemoryExtractionSourceCapabilities;
 }
 
 export interface SystemPromptContext {
@@ -891,6 +902,13 @@ class TurnScope {
    * so a provider request never carries an unpersisted steering directive.
    */
   injectedSteeringMessages: ModelMessage[] = [];
+  memoryExtractRequested = false;
+  memorySourceMessages: readonly ModelMessage[] | undefined;
+  memorySourceEventMessagePositions: Readonly<Record<string, readonly number[]>> | undefined;
+  memorySourceSystemPrompt: string | undefined;
+  memorySourceTools: ModelToolSet | undefined;
+  memorySourceActiveTools: readonly string[] | undefined;
+  finalAssistantText: string | undefined;
   codeModeTools: ReadonlyMap<string, MakaTool> | undefined;
 
   constructor(
@@ -938,6 +956,7 @@ export class AiSdkBackend implements AgentBackend {
   private readonly compaction: AiSdkCompaction;
   /** Session-scoped running total, deliberately accumulated across turns. */
   private cumulativeUsageCheckpoint: NormalizedAiSdkUsage | undefined;
+  private readonly memoryReplayMessageEvents = new WeakMap<ModelMessage, readonly string[]>();
   constructor(input: AiSdkBackendInput) {
     this.input = input;
     this.sessionId = input.sessionId;
@@ -971,13 +990,107 @@ export class AiSdkBackend implements AgentBackend {
       appendTurnTailPrompt: (content, turnTailPrompt) =>
         this.appendTurnTailPrompt(content, turnTailPrompt),
     });
+    if (
+      input.tools.some(
+        (tool) => tool.name === MEMORY_REMEMBER_TOOL_NAME || tool.name === MEMORY_EXTRACT_TOOL_NAME,
+      )
+    ) {
+      throw new Error('Long-term Memory trigger tool names are reserved by Runtime');
+    }
+    const memoryTools = input.memoryExtraction
+      ? buildMemoryExtractionTriggerTools({
+          capabilities: input.memoryExtraction,
+          snapshot: (trigger, context) => this.memorySourceSnapshot(trigger, context),
+          markExtractRequested: (context) => {
+            const scope = [...this.activeTurns].find(
+              (candidate) =>
+                candidate.turnId === context.turnId && candidate.runId === context.runId,
+            );
+            if (scope) scope.memoryExtractRequested = true;
+          },
+          ...(modelUsesNativeOpenAiResponses(input.connection, input.modelId)
+            ? { unsupportedReason: 'provider_unsupported' as const }
+            : {}),
+        })
+      : [];
     this.toolAvailabilityRuntime = new ToolAvailabilityRuntime(
       // The archive decoder is a runtime protocol tool, not a host binding:
       // this session's placeholders name it, so this session advertises it.
-      bindToolResultArchiveDecoder(input.tools, input.toolResultArchive),
+      bindToolResultArchiveDecoder([...input.tools, ...memoryTools], input.toolResultArchive),
       input.toolAvailability,
       buildInvalidMakaTool(),
     );
+  }
+
+  private memorySourceSnapshot(
+    trigger: MemoryExtractionTrigger,
+    context: MakaToolContext,
+  ): MemoryExtractionSourceSnapshot | undefined {
+    if (trigger !== 'remember') return undefined;
+    const scope = [...this.activeTurns].find(
+      (candidate) => candidate.turnId === context.turnId && candidate.runId === context.runId,
+    );
+    return scope
+      ? this.memorySourceSnapshotFromScope(scope, {
+          trigger: 'remember',
+          toolCallId: context.toolCallId,
+        })
+      : undefined;
+  }
+
+  private memorySourceSnapshotFromScope(
+    scope: TurnScope,
+    boundary:
+      | { readonly trigger: 'remember'; readonly toolCallId: string }
+      | { readonly trigger: 'extract'; readonly terminalEventId: string },
+  ): MemoryExtractionSourceSnapshot | undefined {
+    if (
+      !scope.runId ||
+      !scope.memorySourceMessages ||
+      !scope.memorySourceTools ||
+      !scope.memorySourceActiveTools
+    ) {
+      return undefined;
+    }
+    const sourceMessages =
+      boundary.trigger === 'extract' && scope.finalAssistantText
+        ? [
+            ...scope.memorySourceMessages,
+            {
+              role: 'assistant' as const,
+              content: [{ type: 'text' as const, text: scope.finalAssistantText }],
+            } as ModelMessage,
+          ]
+        : scope.memorySourceMessages;
+    const memoryProjection = projectMemoryConversationPrefix(
+      sourceMessages,
+      scope.memorySourceEventMessagePositions,
+    );
+    return {
+      ...boundary,
+      sourceHeader: memoryExtractionModelHeader(this.input.header),
+      ...(scope.memorySourceSystemPrompt
+        ? { sourceSystemPrompt: scope.memorySourceSystemPrompt }
+        : {}),
+      sourceMessages: structuredClone(memoryProjection.messages),
+      ...(memoryProjection.eventMessagePositions
+        ? {
+            sourceEventMessagePositions: structuredClone(memoryProjection.eventMessagePositions),
+          }
+        : {}),
+      sourceTools: { ...scope.memorySourceTools },
+      sourceActiveTools: [...scope.memorySourceActiveTools],
+      ...(this.input.providerOptions
+        ? { sourceProviderOptions: structuredClone(this.input.providerOptions) }
+        : {}),
+      ...(this.modelAdapter.maxOutputTokens() !== undefined
+        ? { sourceMaxOutputTokens: this.modelAdapter.maxOutputTokens() }
+        : {}),
+      sessionId: this.sessionId,
+      runId: scope.runId,
+      turnId: scope.turnId,
+      workspaceKey: this.input.header.workspaceRoot,
+    };
   }
 
   /**
@@ -1212,6 +1325,7 @@ export class AiSdkBackend implements AgentBackend {
           ? { providerOptions: stepTextProviderOptions }
           : {}),
       } satisfies TextCompleteEvent);
+      scope.finalAssistantText = stepText.length > 0 ? stepText : undefined;
       stepText = '';
       stepTextProviderOptions = undefined;
       stepTextPartStartOffset = 0;
@@ -1770,6 +1884,13 @@ export class AiSdkBackend implements AgentBackend {
             stepThinking.length === 0 &&
             stepSignature === undefined;
           for (;;) {
+            scope.memorySourceMessages = [...attemptMessages];
+            scope.memorySourceEventMessagePositions =
+              this.memoryEventMessagePositions(attemptMessages);
+            scope.memorySourceSystemPrompt = requestSystemPrompt;
+            scope.memorySourceTools = modelTools;
+            scope.memorySourceActiveTools = [...activeToolsForRequest];
+            scope.finalAssistantText = undefined;
             scope.codeModeTools =
               toolMode === 'code_mode'
                 ? nestableToolSnapshot(providerTools, activeToolsForRequest)
@@ -2390,13 +2511,26 @@ export class AiSdkBackend implements AgentBackend {
         } else {
           trace.modelStreamCompleted(stopReason);
         }
-        queue.push({
+        const completeEvent = {
           type: 'complete',
           id: this.newId(),
           turnId,
           ts: this.now(),
           stopReason,
-        } satisfies CompleteEvent);
+        } satisfies CompleteEvent;
+        queue.push(completeEvent);
+        if (scope.memoryExtractRequested && this.input.memoryExtraction) {
+          const snapshot = this.memorySourceSnapshotFromScope(scope, {
+            trigger: 'extract',
+            terminalEventId: completeEvent.id,
+          });
+          if (snapshot) {
+            void queue
+              .waitUntilConsumedThroughCurrent()
+              .then(() => this.input.memoryExtraction?.extract(snapshot))
+              .catch(() => undefined);
+          }
+        }
       } catch (err) {
         streamStatus = scope.aborted ? 'aborted' : 'error';
         streamErrorClass = this.modelAdapter.classifyError(watchdogTimeoutError ?? err);
@@ -3228,6 +3362,10 @@ export class AiSdkBackend implements AgentBackend {
       providerOptions?: NonNullable<ModelMessage['providerOptions']>;
     };
     const out: ModelMessage[] = [];
+    const push = (message: ModelMessage, eventIds: readonly string[]) => {
+      out.push(message);
+      this.memoryReplayMessageEvents.set(message, [...new Set(eventIds)]);
+    };
     let bufferedCalls: ToolCallItem[] = [];
     const results = new Map<string, ToolResultItem>();
     const reasoningByStep = new Map<string, ThinkingItem[]>();
@@ -3302,17 +3440,20 @@ export class AiSdkBackend implements AgentBackend {
         const result = results.get(call.toolCallId);
         if (!result || result.providerExecuted === true) continue;
         results.delete(call.toolCallId);
-        out.push({
-          role: 'tool',
-          content: [
-            {
-              type: 'tool-result',
-              toolCallId: result.toolCallId,
-              toolName: result.toolName,
-              output: await materializeReplayToolResult(result),
-            },
-          ],
-        });
+        push(
+          {
+            role: 'tool',
+            content: [
+              {
+                type: 'tool-result',
+                toolCallId: result.toolCallId,
+                toolName: result.toolName,
+                output: await materializeReplayToolResult(result),
+              },
+            ],
+          },
+          [result.eventId],
+        );
       }
     };
     // Emit one assistant message for a step, preserving the distinct client-
@@ -3323,6 +3464,11 @@ export class AiSdkBackend implements AgentBackend {
       calls: readonly ToolCallItem[],
     ) => {
       const content: unknown[] = [];
+      const eventIds = [
+        ...(reasoning ?? []).map((item) => item.eventId),
+        ...(text ? [text.eventId] : []),
+        ...calls.map((call) => call.eventId),
+      ];
       const replayReasoning = reasoning
         ?.map(reasoningReplay)
         .filter((item): item is ReplayReasoning => item !== undefined);
@@ -3346,6 +3492,7 @@ export class AiSdkBackend implements AgentBackend {
         const result = results.get(call.toolCallId);
         if (!result || result.providerExecuted !== true) continue;
         results.delete(call.toolCallId);
+        eventIds.push(result.eventId);
         content.push({
           type: 'tool-result',
           toolCallId: result.toolCallId,
@@ -3377,11 +3524,14 @@ export class AiSdkBackend implements AgentBackend {
         (item) => item.providerOptions !== undefined,
       )?.providerOptions;
       if (content.length > 0 || replayProviderOptions) {
-        out.push({
-          role: 'assistant',
-          content,
-          ...(replayProviderOptions ? { providerOptions: replayProviderOptions } : {}),
-        } as ModelMessage);
+        push(
+          {
+            role: 'assistant',
+            content,
+            ...(replayProviderOptions ? { providerOptions: replayProviderOptions } : {}),
+          } as ModelMessage,
+          eventIds,
+        );
       }
       await pushClientToolResults(calls);
     };
@@ -3450,20 +3600,23 @@ export class AiSdkBackend implements AgentBackend {
             await flushPendingSteps();
             const replayReasoning = reasoningReplay(item);
             if (replayReasoning) {
-              out.push({
-                role: 'assistant',
-                content: replayReasoning.part ? [replayReasoning.part] : [],
-                ...(replayReasoning.providerOptions
-                  ? { providerOptions: replayReasoning.providerOptions }
-                  : {}),
-              } as ModelMessage);
+              push(
+                {
+                  role: 'assistant',
+                  content: replayReasoning.part ? [replayReasoning.part] : [],
+                  ...(replayReasoning.providerOptions
+                    ? { providerOptions: replayReasoning.providerOptions }
+                    : {}),
+                } as ModelMessage,
+                [item.eventId],
+              );
             }
           }
           break;
         case 'text':
           if (item.role !== 'assistant') {
             await flushPendingSteps();
-            out.push(await this.materializeRuntimeReplayItem(budget, item));
+            push(await this.materializeRuntimeReplayItem(budget, item), [item.eventId]);
             break;
           }
           if (item.stepId !== undefined) {
@@ -3486,13 +3639,16 @@ export class AiSdkBackend implements AgentBackend {
           } else {
             // Legacy per-turn assistant text: standalone after any tool block.
             await flushPendingSteps();
-            out.push({
-              role: 'assistant',
-              content: item.content,
-              ...(item.providerOptions !== undefined
-                ? { providerOptions: item.providerOptions }
-                : {}),
-            });
+            push(
+              {
+                role: 'assistant',
+                content: item.content,
+                ...(item.providerOptions !== undefined
+                  ? { providerOptions: item.providerOptions }
+                  : {}),
+              },
+              [item.eventId],
+            );
           }
           break;
       }
@@ -3508,9 +3664,34 @@ export class AiSdkBackend implements AgentBackend {
     const messages: ModelMessage[] = [];
     for (const item of plan.items) {
       if (item.kind === 'text')
-        messages.push(await this.materializeRuntimeReplayItem(budget, item));
+        this.pushMemoryIndexedMessage(
+          messages,
+          await this.materializeRuntimeReplayItem(budget, item),
+          [item.eventId],
+        );
     }
     return messages;
+  }
+
+  private pushMemoryIndexedMessage(
+    messages: ModelMessage[],
+    message: ModelMessage,
+    eventIds: readonly string[],
+  ): void {
+    messages.push(message);
+    this.memoryReplayMessageEvents.set(message, [...new Set(eventIds)]);
+  }
+
+  private memoryEventMessagePositions(
+    messages: readonly ModelMessage[],
+  ): Readonly<Record<string, readonly number[]>> | undefined {
+    const positions: Record<string, number[]> = {};
+    for (const [position, message] of messages.entries()) {
+      for (const eventId of this.memoryReplayMessageEvents.get(message) ?? []) {
+        (positions[eventId] ??= []).push(position);
+      }
+    }
+    return Object.keys(positions).length > 0 ? positions : undefined;
   }
 
   private async materializeRuntimeReplayItem(
@@ -4219,4 +4400,31 @@ function buildHistoryCompactCheckpointFailOpenContext(
   ).fits
     ? replayEvents
     : [...retainedCandidates];
+}
+
+function projectMemoryConversationPrefix(
+  messages: readonly ModelMessage[],
+  eventMessagePositions?: Readonly<Record<string, readonly number[]>>,
+): {
+  messages: ModelMessage[];
+  eventMessagePositions?: Readonly<Record<string, readonly number[]>>;
+} {
+  // Context visibility and durable evidence authority are separate boundaries.
+  // Keep the exact source prefix so the auxiliary request preserves referents
+  // and provider-cache shape. The Evidence Index and trusted admission layer
+  // independently restrict durable citations to user-authored RuntimeEvents.
+  return {
+    messages: [...messages],
+    ...(eventMessagePositions ? { eventMessagePositions } : {}),
+  };
+}
+
+function memoryExtractionModelHeader(
+  header: SessionHeader,
+): MemoryExtractionSourceSnapshot['sourceHeader'] {
+  return {
+    llmConnectionSlug: header.llmConnectionSlug,
+    model: header.model,
+    ...(header.thinkingLevel !== undefined ? { thinkingLevel: header.thinkingLevel } : {}),
+  };
 }

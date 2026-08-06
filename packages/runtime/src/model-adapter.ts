@@ -187,6 +187,15 @@ export class ModelAdapter {
     });
   }
 
+  maxOutputTokens(): number | undefined {
+    return selectedModelMaxOutputTokens(
+      this.input.connection,
+      this.input.modelId,
+      this.input.providerOptions,
+      this.runtime,
+    );
+  }
+
   async startStream(input: ModelAdapterStreamInput): Promise<ModelStreamResult> {
     const ai = await import('ai').catch((err) => {
       throw new Error(
@@ -219,19 +228,7 @@ export class ModelAdapter {
           },
         })
       : input.model;
-    const sdkTools = Object.fromEntries(
-      Object.entries(input.tools).map(([name, definition]) => [
-        name,
-        definition.kind === 'provider'
-          ? compileProviderTool(definition.providerTool)
-          : {
-              ...(definition.description !== undefined
-                ? { description: definition.description }
-                : {}),
-              inputSchema: definition.inputSchema,
-            },
-      ]),
-    );
+    const sdkTools = lowerModelTools(input.tools);
     const fullMessages = lowerNativeAudioMessages(input.messages);
     const responsesLane =
       input.continuationKey && usesNativeOpenAiResponses(this.input.connection, this.runtime)
@@ -811,6 +808,22 @@ function parseProviderExecutedToolInput(input: unknown): unknown {
   } catch {
     return input;
   }
+}
+
+export function lowerModelTools(tools: ModelToolSet): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(tools).map(([name, definition]) => [
+      name,
+      definition.kind === 'provider'
+        ? compileProviderTool(definition.providerTool)
+        : {
+            ...(definition.description !== undefined
+              ? { description: definition.description }
+              : {}),
+            inputSchema: definition.inputSchema,
+          },
+    ]),
+  );
 }
 
 function compileProviderTool(

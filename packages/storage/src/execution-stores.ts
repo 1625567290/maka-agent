@@ -53,6 +53,7 @@ import {
 import type {
   CommitToolOutcomeInput,
   CommitToolPreparedInput,
+  SessionRuntimeEventEntry,
   ToolCommitResult,
   ToolOperationRecord,
 } from './sqlite-runtime-store.js';
@@ -107,6 +108,12 @@ export type ExecutionRuntimeEventWriter = DurableRuntimeEventStore &
     commitToolPrepared(input: CommitToolPreparedInput): Promise<ToolCommitResult>;
     commitToolOutcome(input: CommitToolOutcomeInput): Promise<ToolCommitResult>;
     listUnsettledToolOperations(sessionId: string): Promise<ToolOperationRecord[]>;
+    appendRuntimePartialBatch(
+      sessionId: string,
+      runId: string,
+      events: readonly RuntimeEvent[],
+    ): Promise<void>;
+    readSessionRuntimeEventEntries(sessionId: string): Promise<SessionRuntimeEventEntry[]>;
   };
 export type ExecutionMessageReceiptWriter = MessageReceiptStore;
 
@@ -450,6 +457,8 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => runtimeEventStore.readImmutableRuntimePrefix(input)),
       readSessionRuntimeEvents: (sessionId) =>
         run(() => runtimeEventStore.readSessionRuntimeEvents(sessionId)),
+      readSessionRuntimeEventEntries: (sessionId) =>
+        run(() => runtimeEventStore.readSessionRuntimeEventEntries(sessionId)),
       claimContinuation: (input) => run(() => runtimeEventStore.claimContinuation(input)),
       readContinuationClaimByBoundary: (boundaryDigest) =>
         run(() => runtimeEventStore.readContinuationClaimByBoundary(boundaryDigest)),

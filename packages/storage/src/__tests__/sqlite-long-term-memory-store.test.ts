@@ -313,7 +313,7 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
-  test('replays operation receipts and reports the existing Item before evidence can be lost', async () => {
+  test('replays operation receipts while allowing independent duplicate assertions', async () => {
     await withStore(async ({ store }) => {
       const request = {
         operationId: 'idempotent-create',
@@ -331,28 +331,22 @@ describe('SqliteMemoryItemStore', () => {
         conflict('operation_reused'),
       );
 
-      await assert.rejects(
-        store.applyMutations({
-          operationId: 'fact-duplicate',
-          mutations: [
-            {
-              type: 'create',
-              item: write({
-                origin: 'user_requested',
-                keys: [{ key: 'other', keyType: 'exact', keyOrigin: 'user' }],
-                sources: [source({ eventId: 'event-other' })],
-              }),
-            },
-          ],
-        }),
-        (error: unknown) =>
-          error instanceof MemoryItemStoreConflictError &&
-          error.reason === 'duplicate_active' &&
-          error.itemId === undefined &&
-          error.conflictingItemId === created.results[0]?.itemId,
-      );
+      const duplicate = await store.applyMutations({
+        operationId: 'fact-duplicate',
+        mutations: [
+          {
+            type: 'create',
+            item: write({
+              origin: 'user_requested',
+              keys: [{ key: 'other', keyType: 'exact', keyOrigin: 'user' }],
+              sources: [source({ eventId: 'event-other' })],
+            }),
+          },
+        ],
+      });
+      assert.equal(duplicate.results[0]?.outcome, 'created');
       assert.deepEqual((await store.readItem(created.results[0]!.itemId))?.sources, [source()]);
-      assert.equal(await store.readOperation('fact-duplicate'), undefined);
+      assert.ok(await store.readOperation('fact-duplicate'));
     });
   });
 
@@ -390,7 +384,7 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
-  test('reports the conflicting active Item when an update would duplicate it', async () => {
+  test('allows an Item to be updated to match another active assertion', async () => {
     await withStore(async ({ store }) => {
       const firstId = await createItem(store, 'active-first', write());
       const secondId = await createItem(
@@ -403,19 +397,13 @@ describe('SqliteMemoryItemStore', () => {
         }),
       );
 
-      await assert.rejects(
-        store.applyMutations({
-          operationId: 'active-update-duplicate',
-          mutations: [{ type: 'update', itemId: secondId, expectedVersion: 1, item: write() }],
-        }),
-        (error: unknown) =>
-          error instanceof MemoryItemStoreConflictError &&
-          error.reason === 'duplicate_active' &&
-          error.itemId === secondId &&
-          error.conflictingItemId === firstId,
-      );
-      assert.equal((await store.readItem(secondId))?.item.content, 'A different current fact.');
-      assert.equal(await store.readOperation('active-update-duplicate'), undefined);
+      const updated = await store.applyMutations({
+        operationId: 'active-update-duplicate',
+        mutations: [{ type: 'update', itemId: secondId, expectedVersion: 1, item: write() }],
+      });
+      assert.equal(updated.results[0]?.outcome, 'updated');
+      assert.equal((await store.readItem(secondId))?.item.content, 'User prefers concise answers.');
+      assert.ok(await store.readItem(firstId));
     });
   });
 
@@ -515,7 +503,7 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
-  test('allows an archived no-op but rejects archived changes or restore that collide', async () => {
+  test('allows archived assertions to change and restore even when another assertion matches', async () => {
     await withStore(async ({ store }) => {
       const archivedId = await createItem(store, 'archived-create', write());
       await store.applyMutations({
@@ -534,28 +522,27 @@ describe('SqliteMemoryItemStore', () => {
       assert.equal(noop.results[0]?.lifecycleState, 'archived');
       assert.ok(await store.readOperation('archived-noop'));
 
-      await assert.rejects(
-        store.applyMutations({
-          operationId: 'archived-update-collision',
-          mutations: [
-            {
-              type: 'update',
-              itemId: archivedId,
-              expectedVersion: 2,
-              item: write({ sources: [source({ eventId: 'event-new-evidence' })] }),
-            },
-          ],
-        }),
-        conflict('duplicate_active'),
-      );
-      await assert.rejects(
-        store.applyMutations({
-          operationId: 'restore-collision',
-          mutations: [{ type: 'restore', itemId: archivedId, expectedVersion: 2 }],
-        }),
-        conflict('duplicate_active'),
-      );
-      assert.deepEqual(await itemIds(store, ['concise']), [activeId]);
+      const changed = await store.applyMutations({
+        operationId: 'archived-update-collision',
+        mutations: [
+          {
+            type: 'update',
+            itemId: archivedId,
+            expectedVersion: 2,
+            item: write({ sources: [source({ eventId: 'event-new-evidence' })] }),
+          },
+        ],
+      });
+      assert.equal(changed.results[0]?.version, 3);
+      assert.equal(changed.results[0]?.lifecycleState, 'archived');
+
+      const restored = await store.applyMutations({
+        operationId: 'restore-collision',
+        mutations: [{ type: 'restore', itemId: archivedId, expectedVersion: 3 }],
+      });
+      assert.equal(restored.results[0]?.version, 4);
+      assert.equal(restored.results[0]?.lifecycleState, 'active');
+      assert.deepEqual(new Set(await itemIds(store, ['concise'])), new Set([activeId, archivedId]));
     });
   });
 
@@ -827,24 +814,22 @@ describe('SqliteMemoryItemStore', () => {
     });
   });
 
-  test('does not expose a rolled-back Item id for duplicate facts within one batch', async () => {
+  test('stores duplicate assertions independently within one batch', async () => {
     await withStore(async ({ store }) => {
-      await assert.rejects(
-        store.applyMutations({
-          operationId: 'batch-duplicate-facts',
-          mutations: [
-            { type: 'create', item: write({ content: 'Same batch fact.' }) },
-            { type: 'create', item: write({ content: 'Same batch fact.' }) },
-          ],
-        }),
-        (error: unknown) =>
-          error instanceof MemoryItemStoreConflictError &&
-          error.reason === 'duplicate_within_batch' &&
-          error.itemId === undefined &&
-          error.conflictingItemId === undefined,
+      const result = await store.applyMutations({
+        operationId: 'batch-duplicate-facts',
+        mutations: [
+          { type: 'create', item: write({ content: 'Same batch fact.' }) },
+          { type: 'create', item: write({ content: 'Same batch fact.' }) },
+        ],
+      });
+      assert.deepEqual(
+        result.results.map((entry) => entry.outcome),
+        ['created', 'created'],
       );
-      assert.equal(await store.readItem('item-1'), undefined);
-      assert.equal(await store.readOperation('batch-duplicate-facts'), undefined);
+      assert.ok(await store.readItem('item-1'));
+      assert.ok(await store.readItem('item-2'));
+      assert.ok(await store.readOperation('batch-duplicate-facts'));
     });
   });
 
@@ -974,13 +959,6 @@ describe('SqliteMemoryItemStore', () => {
         const reopened = new SqliteMemoryItemStore(databasePath, { now: () => 1_000 });
         try {
           await assert.rejects(reopened.readItem('corrupt-child-item'), /cardinality/);
-          await assert.rejects(
-            reopened.applyMutations({
-              operationId: `duplicate-${childTable}`,
-              mutations: [{ type: 'create', item: write() }],
-            }),
-            /cardinality/,
-          );
         } finally {
           reopened.close();
         }
@@ -1050,6 +1028,248 @@ describe('SqliteMemoryItemStore', () => {
       } finally {
         reopened.close();
       }
+    });
+  });
+
+  test('atomically commits extracted Items and advances the Session Cursor', async () => {
+    await withStore(async ({ store }) => {
+      const first = await store.commitExtraction({
+        operationId: 'extract-session-1-event-10',
+        sessionId: 'session-1',
+        expectedCursorOrdinal: 0,
+        nextCursorOrdinal: 10,
+        coverageHash: 'a'.repeat(64),
+        items: [write({ sources: [source({ eventId: 'event-8' })] })],
+        requestedItemIndexes: [0],
+        trigger: 'remember',
+      });
+      assert.equal(first.results[0]?.outcome, 'created');
+      assert.equal(first.receipt.status, 'remembered');
+      assert.equal(first.receipt.requestedItems[0]?.itemId, first.results[0]?.itemId);
+      assert.deepEqual(await store.readExtractionCursor('session-1'), {
+        sessionId: 'session-1',
+        processedOrdinal: 10,
+        updatedAt: 1_000,
+      });
+
+      const second = await store.commitExtraction({
+        operationId: 'extract-session-1-event-20',
+        sessionId: 'session-1',
+        expectedCursorOrdinal: 10,
+        nextCursorOrdinal: 20,
+        coverageHash: 'b'.repeat(64),
+        items: [],
+        requestedItemIndexes: [],
+        trigger: 'extract',
+      });
+      assert.deepEqual(second.results, []);
+      assert.equal((await store.readExtractionCursor('session-1'))?.processedOrdinal, 20);
+
+      await assert.rejects(
+        store.commitExtraction({
+          operationId: 'extract-stale-range',
+          sessionId: 'session-1',
+          expectedCursorOrdinal: 10,
+          nextCursorOrdinal: 30,
+          coverageHash: 'c'.repeat(64),
+          items: [],
+          requestedItemIndexes: [],
+          trigger: 'extract',
+        }),
+        conflict('cursor_conflict'),
+      );
+      assert.equal((await store.readExtractionCursor('session-1'))?.processedOrdinal, 20);
+    });
+  });
+
+  test('replays an extraction receipt without duplicating Items', async () => {
+    await withStore(async ({ store }) => {
+      const request = {
+        operationId: 'extract-replay',
+        sessionId: 'session-replay',
+        expectedCursorOrdinal: 0,
+        nextCursorOrdinal: 5,
+        coverageHash: 'd'.repeat(64),
+        items: [write({ sources: [source({ sessionId: 'session-replay' })] })],
+        requestedItemIndexes: [0],
+        trigger: 'remember',
+      } as const;
+      const first = await store.commitExtraction(request);
+      const replay = await store.commitExtraction(request);
+      assert.equal(replay.replayed, true);
+      assert.deepEqual(replay.results, first.results);
+      assert.deepEqual(replay.receipt, first.receipt);
+      assert.deepEqual(await store.readExtractionReceipt('extract-replay'), first.receipt);
+      assert.equal((await store.searchByKeys({ terms: ['concise'], match: 'exact' })).length, 1);
+    });
+  });
+
+  test('rolls back Items, Cursor, and receipt when extraction commit fails', async () => {
+    await withStore(async ({ store, setFailpoint }) => {
+      setFailpoint('after_cursor_write');
+      await assert.rejects(
+        store.commitExtraction({
+          operationId: 'extract-rollback',
+          sessionId: 'session-rollback',
+          expectedCursorOrdinal: 0,
+          nextCursorOrdinal: 9,
+          coverageHash: 'e'.repeat(64),
+          items: [write({ sources: [source({ sessionId: 'session-rollback' })] })],
+          requestedItemIndexes: [0],
+          trigger: 'remember',
+        }),
+        /after_cursor_write/,
+      );
+      assert.equal(await store.readExtractionCursor('session-rollback'), undefined);
+      assert.equal(await store.readItem('item-1'), undefined);
+      assert.equal(await store.readOperation('extract-rollback'), undefined);
+      assert.equal(await store.readExtractionReceipt('extract-rollback'), undefined);
+    });
+  });
+
+  test('initializes an absent extraction Cursor once without leaping an existing Cursor', async () => {
+    await withStore(async ({ store }) => {
+      assert.deepEqual(await store.initializeExtractionCursor('session-bootstrap', 12), {
+        sessionId: 'session-bootstrap',
+        processedOrdinal: 12,
+        updatedAt: 1_000,
+      });
+      assert.equal(
+        (await store.initializeExtractionCursor('session-bootstrap', 30)).processedOrdinal,
+        12,
+      );
+    });
+  });
+
+  test('retries one failed range once, then atomically receipts its discard', async () => {
+    await withStore(async ({ store }) => {
+      const coverageHash = 'f'.repeat(64);
+      const firstRequest = {
+        operationId: 'failed-trigger-1',
+        sessionId: 'session-failed',
+        expectedCursorOrdinal: 0,
+        failedThroughOrdinal: 8,
+        coverageHash,
+        failureClass: 'schema',
+        trigger: 'remember',
+      } as const;
+      const first = await store.settleExtractionFailure(firstRequest);
+      assert.equal(first.status, 'retry_later');
+      assert.equal(await store.readExtractionCursor('session-failed'), undefined);
+      assert.deepEqual(await store.readPendingExtractionFailure('session-failed'), {
+        sessionId: 'session-failed',
+        fromOrdinal: 1,
+        throughOrdinal: 8,
+        coverageHash,
+        firstOperationId: 'failed-trigger-1',
+        firstTrigger: 'remember',
+        firstFailureClass: 'schema',
+        failedAt: 1_000,
+      });
+
+      const same = await store.settleExtractionFailure(firstRequest);
+      assert.equal(same.status, 'retry_later');
+      assert.equal(same.replayed, true);
+      assert.equal(await store.readExtractionCursor('session-failed'), undefined);
+
+      await assert.rejects(
+        store.settleExtractionFailure({
+          ...firstRequest,
+          operationId: 'failed-trigger-wrong-mode',
+          trigger: 'extract',
+        }),
+        (error: unknown) =>
+          error instanceof MemoryItemStoreConflictError && error.reason === 'cursor_conflict',
+      );
+
+      const second = await store.settleExtractionFailure({
+        ...firstRequest,
+        operationId: 'failed-trigger-2',
+        failureClass: 'provider',
+      });
+      assert.equal(second.status, 'discarded');
+      assert.equal(second.replayed, false);
+      assert.equal(second.receipt.status, 'discarded');
+      assert.deepEqual(second.receipt.discardedRange, {
+        fromOrdinal: 1,
+        throughOrdinal: 8,
+        coverageHash,
+        firstFailureClass: 'schema',
+        finalFailureClass: 'provider',
+      });
+      assert.equal((await store.readExtractionCursor('session-failed'))?.processedOrdinal, 8);
+      assert.equal(await store.readPendingExtractionFailure('session-failed'), undefined);
+      assert.deepEqual(await store.readExtractionReceipt('failed-trigger-2'), second.receipt);
+
+      const replay = await store.settleExtractionFailure({
+        ...firstRequest,
+        operationId: 'failed-trigger-2',
+        failureClass: 'provider',
+      });
+      assert.equal(replay.status, 'discarded');
+      assert.equal(replay.replayed, true);
+    });
+  });
+
+  test('clears an exact pending failed range in the successful extraction transaction', async () => {
+    await withStore(async ({ store }) => {
+      const coverageHash = '1'.repeat(64);
+      await store.settleExtractionFailure({
+        operationId: 'pending-before-success',
+        sessionId: 'session-recovered',
+        expectedCursorOrdinal: 0,
+        failedThroughOrdinal: 4,
+        coverageHash,
+        failureClass: 'provider',
+        trigger: 'extract',
+      });
+      const committed = await store.commitExtraction({
+        operationId: 'successful-retry',
+        sessionId: 'session-recovered',
+        expectedCursorOrdinal: 0,
+        nextCursorOrdinal: 4,
+        coverageHash,
+        items: [],
+        requestedItemIndexes: [],
+        trigger: 'extract',
+      });
+      assert.equal(committed.cursor.processedOrdinal, 4);
+      assert.equal(await store.readPendingExtractionFailure('session-recovered'), undefined);
+    });
+  });
+
+  test('rolls back Cursor, pending failure, operation, and receipt when discard fails', async () => {
+    await withStore(async ({ store, setFailpoint }) => {
+      const coverageHash = '2'.repeat(64);
+      await store.settleExtractionFailure({
+        operationId: 'discard-first-trigger',
+        sessionId: 'session-discard-rollback',
+        expectedCursorOrdinal: 0,
+        failedThroughOrdinal: 6,
+        coverageHash,
+        failureClass: 'schema',
+        trigger: 'extract',
+      });
+      setFailpoint('after_cursor_write');
+      await assert.rejects(
+        store.settleExtractionFailure({
+          operationId: 'discard-second-trigger',
+          sessionId: 'session-discard-rollback',
+          expectedCursorOrdinal: 0,
+          failedThroughOrdinal: 6,
+          coverageHash,
+          failureClass: 'provider',
+          trigger: 'extract',
+        }),
+        /after_cursor_write/,
+      );
+      assert.equal(await store.readExtractionCursor('session-discard-rollback'), undefined);
+      assert.equal(
+        (await store.readPendingExtractionFailure('session-discard-rollback'))?.firstOperationId,
+        'discard-first-trigger',
+      );
+      assert.equal(await store.readOperation('discard-second-trigger'), undefined);
+      assert.equal(await store.readExtractionReceipt('discard-second-trigger'), undefined);
     });
   });
 });

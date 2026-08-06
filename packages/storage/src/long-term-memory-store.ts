@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type {
   ApplyMemoryMutationsRequest,
+  CommitMemoryExtractionRequest,
   MemoryItemStore,
   MemoryItemWrite,
   SearchMemoryItemsByKeyRequest,
@@ -113,6 +114,20 @@ function createWriterFacade(
       const snapshot = snapshotApplyRequest(request);
       return run(() => store.applyMutations(snapshot));
     },
+    commitExtraction: (request) => {
+      const snapshot = snapshotCommitExtractionRequest(request);
+      return run(() => store.commitExtraction(snapshot));
+    },
+    initializeExtractionCursor: (sessionId, processedOrdinal) =>
+      run(() => store.initializeExtractionCursor(sessionId, processedOrdinal)),
+    readExtractionCursor: (sessionId) => run(() => store.readExtractionCursor(sessionId)),
+    readPendingExtractionFailure: (sessionId) =>
+      run(() => store.readPendingExtractionFailure(sessionId)),
+    settleExtractionFailure: (request) => {
+      const snapshot = Object.freeze({ ...request });
+      return run(() => store.settleExtractionFailure(snapshot));
+    },
+    readExtractionReceipt: (operationId) => run(() => store.readExtractionReceipt(operationId)),
     readItem: (itemId) => run(() => store.readItem(itemId)),
     searchByKeys: (request) => {
       const snapshot = snapshotSearchRequest(request);
@@ -128,6 +143,22 @@ function createWriterFacade(
     },
   };
   return Object.freeze(writer);
+}
+
+function snapshotCommitExtractionRequest(
+  request: CommitMemoryExtractionRequest,
+): CommitMemoryExtractionRequest {
+  return Object.freeze({
+    operationId: request.operationId,
+    sessionId: request.sessionId,
+    expectedCursorOrdinal: request.expectedCursorOrdinal,
+    nextCursorOrdinal: request.nextCursorOrdinal,
+    coverageHash: request.coverageHash,
+    items: Object.freeze(request.items.map(snapshotItemWrite)),
+    requestedItemIndexes: Object.freeze([...request.requestedItemIndexes]),
+    ...(request.noOpReason ? { noOpReason: request.noOpReason } : {}),
+    trigger: request.trigger,
+  });
 }
 
 function snapshotApplyRequest(request: ApplyMemoryMutationsRequest): ApplyMemoryMutationsRequest {

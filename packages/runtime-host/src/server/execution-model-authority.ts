@@ -13,6 +13,8 @@ import {
   cleanGeneratedSessionTitle,
   createProxiedFetchTransport,
   generateToolFreeModelCall,
+  generateProviderPrefixModelCall,
+  modelUsesAnthropicMessages,
   getAIModel,
   llmCallUsageFields,
   recordLlmCallStrict,
@@ -23,6 +25,8 @@ import {
   type ProxiedFetchProxy,
   type ProxiedFetchTransport,
   type ToolFreeModelCallContent,
+  type MemoryExtractionSourceSnapshot,
+  ProviderPrefixModelCallUnavailableError,
 } from '@maka/runtime';
 import type { RuntimePolicyStoresWriter } from '@maka/storage/runtime-policy-stores';
 import type { InteractiveUsageStoresWriter } from '@maka/storage/usage-stores';
@@ -105,6 +109,69 @@ export interface HostDailyReviewModel {
     readonly prompt: string;
     readonly abortSignal: AbortSignal;
   }): Promise<HostDailyReviewModelResult>;
+}
+
+export interface HostMemoryExtractionModel {
+  generate(input: {
+    readonly snapshot: MemoryExtractionSourceSnapshot;
+    readonly prompt: string;
+    readonly stage: 'proposal' | 'localized' | 'canonicalize';
+    readonly abortSignal: AbortSignal;
+  }): Promise<
+    | { readonly ok: true; readonly text: string }
+    | { readonly ok: false; readonly errorClass: HostAuxiliaryModelFailureClass }
+  >;
+}
+
+/** Creates bounded extraction calls on the source Session's model authority. */
+export function createHostMemoryExtractionModel(
+  input: HostSessionEffectModelInput,
+): HostMemoryExtractionModel {
+  const authority = createAuxiliaryModelCallAuthority(input);
+  return Object.freeze({
+    generate: async ({
+      snapshot,
+      prompt,
+      stage,
+      abortSignal,
+    }: Parameters<HostMemoryExtractionModel['generate']>[0]) => {
+      try {
+        const result = await runHostAuxiliaryModelCall(authority, {
+          transportContextId: snapshot.sessionId,
+          telemetrySessionId: snapshot.sessionId,
+          header: snapshot.sourceHeader,
+          callKind: 'memory_extraction',
+          callId: `memory_${stage}_${authority.newId()}`,
+          abortSignal,
+          buildRequest: () =>
+            stage === 'canonicalize'
+              ? {
+                  prompt,
+                  maxOutputTokens: snapshot.sourceMaxOutputTokens ?? 2_048,
+                  maxRetries: 0,
+                }
+              : {
+                  ...(snapshot.sourceSystemPrompt ? { system: snapshot.sourceSystemPrompt } : {}),
+                  messages: [...snapshot.sourceMessages, { role: 'user', content: prompt }],
+                  tools: snapshot.sourceTools,
+                  activeTools: snapshot.sourceActiveTools,
+                  ...(snapshot.sourceProviderOptions
+                    ? { providerOptions: snapshot.sourceProviderOptions }
+                    : {}),
+                  ...(snapshot.sourceMaxOutputTokens !== undefined
+                    ? { maxOutputTokens: snapshot.sourceMaxOutputTokens }
+                    : {}),
+                },
+        });
+        return { ok: true as const, text: result.text };
+      } catch (error) {
+        return {
+          ok: false as const,
+          errorClass: auxiliaryModelErrorClass(error, abortSignal),
+        };
+      }
+    },
+  });
 }
 
 /** Creates root-scoped Daily Review calls on the canonical Host model authority. */
@@ -281,9 +348,21 @@ interface AuxiliaryModelCallAuthority {
   readonly newId: () => string;
 }
 
-type AuxiliaryModelRequest = ToolFreeModelCallContent & {
-  readonly maxOutputTokens: number;
-};
+type AuxiliaryModelRequest =
+  | (ToolFreeModelCallContent & {
+      readonly maxOutputTokens: number;
+      readonly maxRetries?: number;
+      readonly system?: string;
+      readonly tools?: never;
+    })
+  | {
+      readonly messages: readonly ModelMessage[];
+      readonly system?: string;
+      readonly tools: MemoryExtractionSourceSnapshot['sourceTools'];
+      readonly activeTools: readonly string[];
+      readonly providerOptions?: Record<string, unknown>;
+      readonly maxOutputTokens?: number;
+    };
 
 interface HostAuxiliaryModelCallInput {
   readonly transportContextId: string;
@@ -386,27 +465,37 @@ async function runHostAuxiliaryModelCall(
       modelId: target.model,
       startedAt,
     };
-    let result: Awaited<ReturnType<typeof generateToolFreeModelCall>>;
+    let result:
+      | Awaited<ReturnType<typeof generateToolFreeModelCall>>
+      | Awaited<ReturnType<typeof generateProviderPrefixModelCall>>;
     try {
-      result = await readDuringBackendCreation(
-        () =>
-          generateToolFreeModelCall({
-            model: getAIModel({
-              connection: target.connection,
-              apiKey,
-              modelId: target.model,
-              fetch: modelFetch,
-            }),
-            ...request,
-            abortSignal: input.abortSignal,
-            providerOptions: buildProviderOptions(
-              target.connection,
-              target.model,
-              input.header.thinkingLevel,
-            ),
-          }),
-        input.abortSignal,
-      );
+      result = await readDuringBackendCreation(() => {
+        const model = getAIModel({
+          connection: target.connection,
+          apiKey,
+          modelId: target.model,
+          fetch: modelFetch,
+        });
+        return request.tools !== undefined
+          ? generateProviderPrefixModelCall({
+              model,
+              ...request,
+              toolChoicePolicy: modelUsesAnthropicMessages(target.connection, target.model)
+                ? 'omit'
+                : 'none',
+              abortSignal: input.abortSignal,
+            })
+          : generateToolFreeModelCall({
+              model,
+              ...request,
+              abortSignal: input.abortSignal,
+              providerOptions: buildProviderOptions(
+                target.connection,
+                target.model,
+                input.header.thinkingLevel,
+              ),
+            });
+      }, input.abortSignal);
       const oauthFailure = readDeferredOAuthFailure?.();
       if (oauthFailure) throw oauthFailure;
     } catch (error) {
@@ -590,6 +679,7 @@ function auxiliaryModelErrorClass(
     return reason instanceof Error && reason.name === 'TimeoutError' ? 'timeout' : 'aborted';
   }
   if (!(error instanceof Error)) return 'unknown';
+  if (error instanceof ProviderPrefixModelCallUnavailableError) return 'configuration';
   if (error instanceof AuxiliaryModelCallConfigurationError) return 'configuration';
   return 'provider';
 }

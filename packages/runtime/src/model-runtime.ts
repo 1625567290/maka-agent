@@ -90,6 +90,24 @@ export function resolveModelRuntime(
   };
 }
 
+export function modelUsesAnthropicMessages(
+  connection: ModelRuntimeConnection,
+  modelId: string,
+): boolean {
+  return resolveModelRuntime(connection, modelId).wire === 'anthropic-messages';
+}
+
+/** Native OpenAI lanes keep mutable continuation state inside ModelAdapter. */
+export function modelUsesNativeOpenAiResponses(
+  connection: ModelRuntimeConnection,
+  modelId: string,
+): boolean {
+  return (
+    connection.providerType === 'openai' &&
+    resolveModelRuntime(connection, modelId).wire === 'openai-responses'
+  );
+}
+
 function resolveModelRuntimeWire(
   providerType: ProviderType,
   modelId: string,
