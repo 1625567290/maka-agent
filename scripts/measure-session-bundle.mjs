@@ -18,10 +18,15 @@ import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
+import { DatabaseSync } from 'node:sqlite';
 import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { SESSION_BUNDLE_STATE_ENTRIES, isArtifactPathForSession } from '@maka/storage';
+import {
+  OPERATIONAL_STATE_DATABASE_NAME,
+  SESSION_BUNDLE_STATE_ENTRIES,
+  isArtifactPathForSession,
+} from '@maka/storage';
 import { STORAGE_ROOT_MARKER_FILE } from '@maka/storage/root-authority';
 import {
   constants as zlibConstants,
@@ -52,23 +57,6 @@ const SUPPORTED_OPTIONS = new Set([
 // must be regenerated when a session export is materialized elsewhere.
 const STORAGE_ROOT_AUTHORITY_MARKER = STORAGE_ROOT_MARKER_FILE;
 const PORTABLE_STATE_TOP_LEVEL = new Set(SESSION_BUNDLE_STATE_ENTRIES);
-// Legacy directory exports may still be supplied to this measurement tool,
-// but storage's SQLite-only authority no longer exports these compatibility
-// constants. Keep the historical read allowlist local to the legacy reader.
-const PORTABLE_SESSION_DIRECTORIES = new Set([
-  'deep-research',
-  'projections',
-  'runs',
-  'shell-runs',
-  'turn-admissions',
-]);
-const PORTABLE_SESSION_FILES = new Set([
-  'execution-boundary.json',
-  'plan-events.jsonl',
-  'plans.json',
-  'task-events.jsonl',
-  'tasks.json',
-]);
 const MAX_JSON_BYTES = 1_048_576;
 const EXCLUDED_WORKSPACE_SEGMENTS = new Set(['.git', 'node_modules']);
 const SENSITIVE_WORKSPACE_FILE_PATTERNS = [
@@ -383,19 +371,25 @@ async function createBootstrapSmokeExport(temporaryRoot) {
   return storageRoot;
 }
 
-async function prepareStateExport(sourceRoot, destinationRoot, expectedSessionId) {
+export async function prepareStateExport(sourceRoot, destinationRoot, expectedSessionId) {
   const source = resolve(sourceRoot);
   const sourceStats = await stat(source).catch(() => undefined);
   if (!sourceStats?.isDirectory()) throw new Error(`session export is not a directory: ${source}`);
   const entries = await readTreeEntries(source);
-  const sessionId = findSessionId(entries);
+  // Identity comes out of the database, so screen the tree before opening it. An
+  // unrecognized entry here covers a stray -wal or -shm sidecar, which the immutable
+  // read would silently ignore rather than honor, and requiring the database as a
+  // walked entry keeps a symlinked one from passing identity and then being skipped
+  // by the copy below.
+  for (const entry of entries) assertPortableStateEntry(entry.path);
+  if (!entries.some((entry) => entry.path === OPERATIONAL_STATE_DATABASE_NAME)) {
+    throw new Error(`session export has no ${OPERATIONAL_STATE_DATABASE_NAME}: ${source}`);
+  }
+  const sessionId = await readSessionExportId(source);
   if (expectedSessionId !== undefined && expectedSessionId !== sessionId) {
     throw new Error(`session export identity changed while preparing: ${source}`);
   }
   await validateStateExportEntries(source, entries, sessionId);
-  if (!entries.some((entry) => entry.path.startsWith('sessions/'))) {
-    throw new Error(`session export has no sessions/** tree: ${source}`);
-  }
   for (const entry of entries) {
     if (entry.path === STORAGE_ROOT_AUTHORITY_MARKER) continue;
     const destination = join(destinationRoot, entry.path);
@@ -408,35 +402,21 @@ async function prepareStateExport(sourceRoot, destinationRoot, expectedSessionId
   }
 }
 
+function assertPortableStateEntry(path) {
+  if (path === STORAGE_ROOT_AUTHORITY_MARKER) return;
+  const [topLevel] = path.split('/');
+  if (!PORTABLE_STATE_TOP_LEVEL.has(topLevel)) {
+    throw new Error(`session export contains protected or unclassified state entry: ${path}`);
+  }
+}
+
 async function validateStateExportEntries(sourceRoot, entries, sessionId) {
   for (const entry of entries) {
     if (entry.path === STORAGE_ROOT_AUTHORITY_MARKER) continue;
     const [topLevel, child] = entry.path.split('/');
-    if (!PORTABLE_STATE_TOP_LEVEL.has(topLevel)) {
-      throw new Error(
-        `session export contains protected or unclassified state entry: ${entry.path}`,
-      );
-    }
-    if (topLevel === 'sessions') {
-      const sessionPrefix = `sessions/${sessionId}/`;
-      if (entry.path === `sessions/${sessionId}/session.jsonl`) continue;
-      if (!entry.path.startsWith(sessionPrefix)) {
-        throw new Error(`session export contains unfiltered session entry: ${entry.path}`);
-      }
-      const relativePath = entry.path.slice(sessionPrefix.length);
-      const firstSegment = relativePath.split('/')[0];
-      if (
-        (relativePath.includes('/') && PORTABLE_SESSION_DIRECTORIES.has(firstSegment)) ||
-        PORTABLE_SESSION_FILES.has(relativePath)
-      ) {
-        continue;
-      }
-      throw new Error(
-        `session export contains protected or unclassified session entry: ${entry.path}`,
-      );
-    }
-    if (topLevel === 'runtime.sqlite') {
-      if (entry.path !== 'runtime.sqlite') {
+    assertPortableStateEntry(entry.path);
+    if (topLevel === OPERATIONAL_STATE_DATABASE_NAME) {
+      if (entry.path !== OPERATIONAL_STATE_DATABASE_NAME) {
         throw new Error(
           `session export contains protected or unclassified state entry: ${entry.path}`,
         );
@@ -477,7 +457,7 @@ async function validateArtifactMetadata(sourceRoot, entry, sessionId) {
 
 async function createBundleArchive({ stateRoot, workspaceEntries, archivePath }) {
   const stateEntries = await readTreeEntries(stateRoot);
-  const sessionId = findSessionId(stateEntries);
+  const sessionId = await readSessionExportId(stateRoot);
   const files = [
     ...stateEntries.map((entry) => ({ ...entry, path: `state/${entry.path}` })),
     ...workspaceEntries.map((entry) => ({ ...entry, path: `workspace/${entry.path}` })),
@@ -747,8 +727,7 @@ async function validateMaterializedBundle(destination, manifest) {
   validateManifest(manifest);
   const stateRoot = join(destination, manifest.stateRoot);
   const workspaceRoot = join(destination, manifest.workspaceRoot);
-  const sessionPath = join(stateRoot, 'sessions', manifest.sessionId, 'session.jsonl');
-  await stat(sessionPath);
+  await stat(join(stateRoot, OPERATIONAL_STATE_DATABASE_NAME));
   await stat(workspaceRoot);
   for (const file of manifest.files) {
     const path = join(destination, file.path);
@@ -821,20 +800,45 @@ async function readTreeEntries(root, options = {}) {
   return files;
 }
 
-async function readSessionExportId(root) {
-  const sessionsRoot = join(root, 'sessions');
-  const entries = await readdir(sessionsRoot, { withFileTypes: true }).catch(() => []);
-  const sessionIds = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const sessionPath = join(sessionsRoot, entry.name, 'session.jsonl');
-    const sessionStats = await stat(sessionPath).catch(() => undefined);
-    if (sessionStats?.isFile()) sessionIds.push(entry.name);
+// Session identity lives in the operational-state database. `exportSessionBundleState`
+// emits that database plus an optional artifacts/** tree and nothing else, so the
+// export carries no directory whose name is the session id.
+export async function readSessionExportId(root) {
+  const databasePath = join(root, OPERATIONAL_STATE_DATABASE_NAME);
+  const databaseStats = await stat(databasePath).catch(() => undefined);
+  if (!databaseStats?.isFile()) {
+    throw new Error(`state export must contain ${OPERATIONAL_STATE_DATABASE_NAME}: ${root}`);
   }
-  if (sessionIds.length === 0)
-    throw new Error('state export must contain sessions/<id>/session.jsonl');
-  if (sessionIds.length !== 1)
-    throw new Error('each session export must contain exactly one sessions/<id>/session.jsonl');
+  // `immutable=1`, not a plain read-only open: a read-only connection to a WAL
+  // database still materializes -wal/-shm beside it, which writes into an export
+  // the caller handed us and makes a second run fail its own entry allowlist.
+  let database;
+  let sessionIds;
+  try {
+    database = new DatabaseSync(`${pathToFileURL(databasePath).href}?immutable=1`, {
+      readOnly: true,
+    });
+    sessionIds = database
+      .prepare('SELECT session_id FROM session_metadata')
+      .all()
+      .map((row) => row.session_id);
+  } catch (error) {
+    throw new Error(
+      `state export ${OPERATIONAL_STATE_DATABASE_NAME} is not readable session state: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  } finally {
+    database?.close();
+  }
+  if (sessionIds.length === 0) {
+    throw new Error(`state export contains no session: ${root}`);
+  }
+  if (sessionIds.length !== 1) {
+    throw new Error(
+      `each session export must contain exactly one session, found ${sessionIds.length}: ${root}`,
+    );
+  }
   return sessionIds[0];
 }
 
@@ -880,22 +884,6 @@ function excludedWorkspaceCategory(relativePath) {
     return 'sensitive';
   }
   return undefined;
-}
-
-function findSessionId(entries) {
-  const sessionIds = [
-    ...new Set(
-      entries.flatMap((entry) => {
-        const match = /^sessions\/([^/]+)\/session\.jsonl$/.exec(entry.path);
-        return match ? [match[1]] : [];
-      }),
-    ),
-  ];
-  if (sessionIds.length === 0)
-    throw new Error('state export must contain sessions/<id>/session.jsonl');
-  if (sessionIds.length !== 1)
-    throw new Error('each session export must contain exactly one sessions/<id>/session.jsonl');
-  return sessionIds[0];
 }
 
 export function isDecisionReady(
