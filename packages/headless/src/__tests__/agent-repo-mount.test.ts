@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, test } from 'node:test';
 import {
@@ -21,7 +21,46 @@ const COMPETITORS: readonly Exclude<HarnessAgentId, 'maka'>[] = [
   'reasonix',
 ];
 
+const AGENTS: readonly HarnessAgentId[] = ['maka', ...COMPETITORS];
+
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
+
+/** The repo's own top-level directories: what a container path can start with. */
+const REPO_TOP_LEVEL = new Set(
+  readdirSync(REPO_ROOT, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name),
+);
+
+/**
+ * Every repo file an adapter names at a container path.
+ *
+ * Two forms carry a container path, and both must be read: the mounted path
+ * spelled out in full, and the same path built by joining segments onto some
+ * expression for the mount root. Matching a bare filename instead would be
+ * neither — it resolves against whichever directory the matcher happens to
+ * scan, so a read outside that directory looks like no read at all.
+ *
+ * The join form is matched by the chain rather than by what it hangs off,
+ * because what it hangs off varies: `maka_repo` from the environment in one
+ * adapter, a `Path("/opt/maka-agent")` constant in another, and nothing stops a
+ * third from binding its own name. The chain is the part that cannot vary — a
+ * repo path starts at a repo directory.
+ */
+function adapterContainerRepoReads(source: string): Set<string> {
+  const read = new Set<string>();
+  for (const [, literal] of source.matchAll(/["']([^"'\n]+)["']/g)) {
+    if (literal.startsWith(`${CONTAINER_MAKA_REPO}/`)) {
+      read.add(literal.slice(CONTAINER_MAKA_REPO.length + 1));
+    }
+  }
+  for (const [, head, rest] of source.matchAll(/\/\s*"([^"\n]+)"((?:\s*\/\s*"[^"\n]+")*)/g)) {
+    if (!REPO_TOP_LEVEL.has(head)) continue;
+    const tail = [...rest.matchAll(/"([^"]+)"/g)].map(([, segment]) => segment);
+    read.add([head, ...tail].join('/'));
+  }
+  return read;
+}
 
 const RENDERER_ONLY = new Set(RENDERER_ONLY_WORKSPACES);
 
@@ -168,67 +207,64 @@ describe('agent repo mounts', () => {
     });
   }
 
-  test('declares every repo file the adapters read at a container path', () => {
-    // Every assertion above derives its expectation from competitorRepoFiles(),
+  test('declares every repo file an adapter names at a container path', () => {
+    // Every assertion above derives its expectation from the declaration lists,
     // so none of them can tell a wrong list from a right one. The adapters are
     // the authority for what is read at a container path, so read them instead:
-    // a repo read added there without an entry here mounts nothing, and the arm
-    // fails inside the container partway through a graded run.
-    const harborDir = join(REPO_ROOT, 'packages/headless/harbor');
-    const repoFileByBasename = new Map(
-      readdirSync(harborDir, { recursive: true, withFileTypes: true })
-        .filter((entry) => entry.isFile())
-        .map((entry) => {
-          const absolute = join(entry.parentPath, entry.name);
-          return [entry.name, relative(REPO_ROOT, absolute)] as const;
-        }),
-    );
-
-    for (const agent of COMPETITORS) {
+    // a repo read added there without an entry in the list mounts nothing.
+    // `run-host-cell.mjs` is what that costs — `install()` probes for it in
+    // every cell-mode branch, it was left out of the declaration, and a missing
+    // probe target aborts the trial before the arm runs at all.
+    for (const agent of AGENTS) {
       const adapterModule = harnessAgentImportPath(agent).split(':')[0];
-      const source = readFileSync(join(harborDir, `${adapterModule}.py`), 'utf8');
-      const read = new Set<string>();
-      for (const [, literal] of source.matchAll(/["']([^"'\n]+)["']/g)) {
-        // Adapters name a file either by its absolute container path or by
-        // joining MAKA_REPO_ROOT with the path segments, so match both.
-        if (literal.startsWith(`${CONTAINER_MAKA_REPO}/`)) {
-          read.add(literal.slice(CONTAINER_MAKA_REPO.length + 1));
-          continue;
-        }
-        const repoFile = repoFileByBasename.get(literal);
-        if (repoFile) read.add(repoFile);
+      const source = readFileSync(
+        join(REPO_ROOT, 'packages/headless/harbor', `${adapterModule}.py`),
+        'utf8',
+      );
+      const mounted = agent === 'maka' ? makaRepoPaths() : competitorRepoFiles(agent);
+      const reads = adapterContainerRepoReads(source);
+      // A reader that matches nothing passes everything. An adapter with files
+      // declared for it is one whose source names them, so an empty read set
+      // here is the reader having stopped reading — the way a regex guard
+      // rots, and the way the form it replaced rotted.
+      if (mounted.length > 0) {
+        assert.ok(reads.size > 0, `no container paths were found in ${adapterModule}.py`);
       }
-      for (const repoFile of read) {
-        assert.ok(
-          competitorRepoFiles(agent).includes(repoFile),
-          `${adapterModule}.py reads ${repoFile}, which ${agent} is not mounted`,
+      for (const repoFile of reads) {
+        // A file may be mounted directly or inside a mounted directory.
+        const covered = mounted.some(
+          (repoPath) => repoPath === repoFile || repoFile.startsWith(`${repoPath}/`),
         );
+        assert.ok(covered, `${adapterModule}.py names ${repoFile}, which ${agent} is not mounted`);
       }
     }
   });
 
-  test('declares every repo file the Maka adapter names at a container path', () => {
-    // The same authority check, which the Maka side did not have — and its
-    // absence is why `run-host-cell.mjs` was left out of the declaration while
-    // `install()` probes for it in every cell-mode branch. A missing probe
-    // target aborts the trial before the arm runs at all.
-    //
-    // `maka_agent.py` builds container paths by joining segments onto the mount
-    // root rather than writing them out, so match the join instead of a literal.
-    const source = readFileSync(join(REPO_ROOT, 'packages/headless/harbor/maka_agent.py'), 'utf8');
-    const mounted = new Set(makaRepoPaths());
-    const read = new Set<string>();
-    for (const [, segments] of source.matchAll(/Path\(maka_repo\)((?:\s*\/\s*"[^"\n]+")+)/g)) {
-      read.add([...segments.matchAll(/"([^"]+)"/g)].map(([, segment]) => segment).join('/'));
-    }
-    assert.ok(read.size > 0, 'no container paths were found in maka_agent.py');
-    for (const repoFile of read) {
-      // A file may be mounted directly or inside a mounted directory.
-      const covered = [...mounted].some(
-        (repoPath) => repoPath === repoFile || repoFile.startsWith(`${repoPath}/`),
-      );
-      assert.ok(covered, `maka_agent.py names ${repoFile}, which Maka is not mounted`);
-    }
+  test('the container-path reader sees both ways an adapter names a file', () => {
+    // The check above is worth exactly what this reader sees, and what it saw
+    // was narrower than it looked: competitor adapters used to be scanned for
+    // bare filenames resolved against `harbor/`, so a read of any repo file
+    // outside that one directory — `dist/index.js`, say — matched nothing and
+    // passed. Both forms below appear in adapters today.
+    assert.deepEqual(
+      [...adapterContainerRepoReads(`_P = Path("${CONTAINER_MAKA_REPO}/packages/a/b.json")`)],
+      ['packages/a/b.json'],
+    );
+    assert.deepEqual(
+      [
+        ...adapterContainerRepoReads(
+          'p = (\n    Path(maka_repo)\n    / "packages"\n    / "headless"\n    / "dist"\n    / "index.js"\n)',
+        ),
+      ],
+      ['packages/headless/dist/index.js'],
+    );
+    // The same chain hung off a different name for the mount root. Both
+    // spellings are in the adapters today, and reading only the first left the
+    // second — `_CONTAINER_MAKA_REPO / "packages" / …` — unseen.
+    assert.deepEqual(
+      [...adapterContainerRepoReads('_CLI = _CONTAINER_MAKA_REPO / "packages" / "a" / "cli.js"')],
+      ['packages/a/cli.js'],
+    );
   });
 
   test('keeps the benchmark identity out of every graded container', () => {
