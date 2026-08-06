@@ -17,9 +17,6 @@ export type AppUpdateStatus =
       state: 'available';
       currentVersion: string;
       latestVersion: string;
-      releaseName?: string;
-      releaseUrl?: string;
-      publishedAt?: string;
     }
   | {
       state: 'downloading';
@@ -31,8 +28,6 @@ export type AppUpdateStatus =
       state: 'downloaded';
       currentVersion: string;
       latestVersion: string;
-      releaseName?: string;
-      downloadedFile?: string;
     }
   | { state: 'installing'; currentVersion: string; latestVersion: string }
   | {
@@ -59,13 +54,11 @@ export interface AppUpdateService {
   getStatus(): AppUpdateStatus;
   retryUpdateDownload(): Promise<AppUpdateStatus>;
   installUpdate(input: AppUpdateInstallRequest): Promise<AppUpdateInstallResult>;
-  openUpdateDownload(): Promise<{ ok: true } | { ok: false; reason: 'not_available' | 'open_failed' }>;
 }
 
 interface AppUpdateServiceDeps {
   currentVersion: string;
   isPackaged: boolean;
-  openExternal(url: string): Promise<void>;
   updater?: AppUpdater;
   mockLatestVersion?: string;
   mockState?: 'available' | 'downloading' | 'downloaded';
@@ -77,7 +70,6 @@ interface AppUpdateServiceDeps {
   };
 }
 
-const RELEASES_URL = 'https://github.com/Maka-Agent/maka-agent/releases/latest';
 const FIRST_UPDATE_CHECK_DELAY_MS = 10_000;
 const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
@@ -112,20 +104,6 @@ function updateInfoVersion(info: Pick<UpdateInfo, 'version'> | undefined): strin
   return typeof info?.version === 'string' ? normalizeVersion(info.version) : undefined;
 }
 
-function updateInfoReleaseName(info: UpdateInfo | undefined): string | undefined {
-  return typeof info?.releaseName === 'string' ? info.releaseName : undefined;
-}
-
-function updateInfoReleaseDate(info: UpdateInfo | undefined): string | undefined {
-  return typeof info?.releaseDate === 'string' ? info.releaseDate : undefined;
-}
-
-function updateInfoReleaseUrl(info: UpdateInfo | undefined): string | undefined {
-  const files = Array.isArray(info?.files) ? info.files : [];
-  const firstUrl = files.find((file) => typeof file.url === 'string')?.url;
-  return firstUrl ? new URL(firstUrl, RELEASES_URL).toString() : RELEASES_URL;
-}
-
 function progressFromInfo(info: ProgressInfo): AppUpdateProgress {
   return {
     percent: Math.max(0, Math.min(100, Number.isFinite(info.percent) ? info.percent : 0)),
@@ -144,8 +122,6 @@ function mockStatus(currentVersion: string, latestVersion: string, state: AppUpd
       state: 'downloaded',
       currentVersion,
       latestVersion,
-      releaseName: `Maka ${latestVersion}`,
-      downloadedFile: 'mock-update.zip',
     };
   }
   if (state === 'downloading') {
@@ -160,9 +136,6 @@ function mockStatus(currentVersion: string, latestVersion: string, state: AppUpd
     state: 'available',
     currentVersion,
     latestVersion,
-    releaseName: `Maka ${latestVersion}`,
-    releaseUrl: RELEASES_URL,
-    publishedAt: new Date().toISOString(),
   };
 }
 
@@ -253,9 +226,6 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       state: 'available',
       currentVersion: deps.currentVersion,
       latestVersion: version,
-      releaseName: updateInfoReleaseName(info),
-      releaseUrl: updateInfoReleaseUrl(info),
-      publishedAt: updateInfoReleaseDate(info),
     });
   });
   updater.on('update-not-available', (info) => {
@@ -281,8 +251,6 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
       state: 'downloaded',
       currentVersion: deps.currentVersion,
       latestVersion: updateInfoVersion(event) ?? latestVersion() ?? deps.currentVersion,
-      releaseName: updateInfoReleaseName(event),
-      downloadedFile: event.downloadedFile,
     });
   });
   updater.on('error', (error) => {
@@ -397,25 +365,11 @@ export function createAppUpdateService(deps: AppUpdateServiceDeps): AppUpdateSer
     }
   }
 
-  async function openUpdateDownload(): Promise<{ ok: true } | { ok: false; reason: 'not_available' | 'open_failed' }> {
-    const url = status.state === 'available' ? status.releaseUrl ?? RELEASES_URL : RELEASES_URL;
-    if (status.state === 'not-available' || status.state === 'idle' || status.state === 'checking') {
-      return { ok: false, reason: 'not_available' };
-    }
-    try {
-      await deps.openExternal(url);
-      return { ok: true };
-    } catch {
-      return { ok: false, reason: 'open_failed' };
-    }
-  }
-
   return {
     start,
     dispose,
     getStatus: currentStatus,
     retryUpdateDownload,
     installUpdate,
-    openUpdateDownload,
   };
 }

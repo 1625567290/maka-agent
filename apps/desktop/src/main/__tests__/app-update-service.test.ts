@@ -103,7 +103,6 @@ function createHarness(input: {
   const service = createAppUpdateService({
     currentVersion: '1.0.0',
     isPackaged: input.isPackaged ?? true,
-    openExternal: async () => undefined,
     updater: updater as unknown as AppUpdater,
     clock,
     onStatusChange: input.onStatusChange,
@@ -216,8 +215,6 @@ describe('AppUpdateService', () => {
       state: 'downloaded',
       currentVersion: '1.0.0',
       latestVersion: '1.1.0',
-      releaseName: undefined,
-      downloadedFile: '/tmp/maka-update.zip',
     });
   });
 

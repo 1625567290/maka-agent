@@ -153,9 +153,6 @@ export type AppUpdateStatus =
       state: 'available';
       currentVersion: string;
       latestVersion: string;
-      releaseName?: string;
-      releaseUrl?: string;
-      publishedAt?: string;
     }
   | {
       state: 'downloading';
@@ -172,8 +169,6 @@ export type AppUpdateStatus =
       state: 'downloaded';
       currentVersion: string;
       latestVersion: string;
-      releaseName?: string;
-      downloadedFile?: string;
     }
   | { state: 'installing'; currentVersion: string; latestVersion: string }
   | {
@@ -659,7 +654,6 @@ export interface MakaBridge {
     updateStatus(): Promise<AppUpdateStatus>;
     retryUpdateDownload(): Promise<AppUpdateStatus>;
     installUpdate(input: AppUpdateInstallRequest): Promise<AppUpdateInstallResult>;
-    openUpdateDownload(): Promise<{ ok: true } | { ok: false; reason: 'not_available' | 'open_failed' }>;
     sessionProjectInfo(sessionId: string): Promise<{
       projectPath: string;
       projectGit: { isGitRepo: boolean; branch?: string };
