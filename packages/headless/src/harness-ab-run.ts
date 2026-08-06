@@ -12,6 +12,7 @@ import {
   type TaskRunner,
 } from './fixed-prompt-controller.js';
 import { HARNESS_AB_PAIR_CONCURRENCY, type HarnessAbArmId } from './harness-ab-manifest.js';
+import { appendScheduledCells, scheduledCellLogPath } from './trial-cell-log.js';
 
 export interface HarnessAbRuntimeArm {
   id: HarnessAbArmId;
@@ -178,6 +179,24 @@ async function executeHarnessArmCohort(input: RunHarnessArmCohortInput): Promise
       billingMode: arm.billingMode,
     }),
   }));
+  // The grid, written down where it is handed over to be run, from the same
+  // two arrays. A later reader has no other way to learn it: the frozen
+  // manifest names the whole benchmark, of which a run grades a slice, and one
+  // manifest serves both a canary and the full run that resumes against it.
+  //
+  // Here rather than where the slice is chosen, which is before the toolchains
+  // and credentials a run most often dies on. It is still a statement of
+  // intent, not of work done — the first cell has yet to launch — so a run
+  // abandoned between here and its first trial directory leaves a grid it
+  // never filled, and this root stays refused until it is graded or given up
+  // for a fresh run id. That is the conservative direction: the grid can only
+  // widen what a reader demands, never narrow it.
+  await appendScheduledCells(
+    scheduledCellLogPath(input.runRoot),
+    arms.flatMap((arm) =>
+      input.evaluationTasks.map((task) => ({ agent: arm.id, taskId: task.id })),
+    ),
+  );
   const cohort = await runArmCohort({
     runId: input.runId,
     arms,
