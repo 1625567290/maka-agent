@@ -29,6 +29,7 @@ import {
 import type {
   MakaPreparePromptOptions,
   MakaPreparedSessionTurn,
+  MakaAttachedSessionTurn,
   MakaSessionMoveResult,
   MakaSessionDriver,
   MakaSessionRewindResult,
@@ -2590,7 +2591,7 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => driver.prompts.length === 2);
     assert.equal(driver.prompts[1], 'second thought\n\nand afterwards');
 
-    await waitFor(() => driver.parked);
+    await waitForUpTo(() => driver.parked, 1_000);
     driver.endTurn();
     await waitFor(() => terminal.progressStates.at(-1) === false);
     terminal.input('/exit');
@@ -2629,6 +2630,73 @@ describe('Maka Pi TUI runner', () => {
     await waitFor(() => terminal.progressStates.at(-1) === false);
     // Nothing left to flush: the text was delivered mid-turn, not re-queued.
     assert.deepEqual(driver.prompts, ['start the work']);
+    terminal.input('/exit');
+    terminal.input('\r');
+    await run;
+  });
+
+  test('a turn boundary waits for an unresolved enqueue before deciding whether to flush it', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new DeferredAdmissionDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'm',
+      connectionSlug: 'c',
+      permissionMode: 'bypass',
+      terminal,
+    });
+
+    terminal.input('start');
+    terminal.input('\r');
+    await waitFor(() => terminal.progressStates.at(-1) === true);
+    await waitForUpTo(() => driver.parked, 1_000);
+    terminal.input('late admission');
+    terminal.input('\r');
+    await waitFor(() => driver.steerCalls === 1);
+
+    driver.endTurn();
+    await waitFor(() => driver.completedTurns === 1);
+    assert.deepEqual(driver.prompts, ['start']);
+    driver.releaseAdmission({ kind: 'fallback' });
+    await waitForUpTo(() => driver.prompts.length === 2, 1_000);
+    assert.equal(driver.prompts[1], 'late admission');
+
+    await waitForUpTo(() => driver.parked, 1_000);
+    driver.endTurn();
+    await waitFor(() => terminal.progressStates.at(-1) === false);
+    terminal.input('/exit');
+    terminal.input('\r');
+    await run;
+  });
+
+  test('a queued retry settling at the turn boundary is not also flushed as a new turn', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new DeferredRetryDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'm',
+      connectionSlug: 'c',
+      permissionMode: 'bypass',
+      terminal,
+    });
+
+    terminal.input('start');
+    terminal.input('\r');
+    await waitFor(() => terminal.progressStates.at(-1) === true);
+    terminal.input('lands on retry');
+    terminal.input('\r');
+    await waitForUpTo(() => driver.steerCalls === 2, 1_000);
+
+    driver.endTurn();
+    driver.releaseRetry();
+    await waitFor(() => terminal.progressStates.at(-1) === false);
+    assert.deepEqual(driver.prompts, ['start']);
+    assert.deepEqual(driver.delivered, ['lands on retry']);
+
     terminal.input('/exit');
     terminal.input('\r');
     await run;
@@ -5750,6 +5818,31 @@ describe('Maka Pi TUI runner', () => {
     });
   });
 
+  test('uses a Host Skill catalog for presentation while leaving invocation preparation to Host', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new SlashCommandDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'ask',
+      terminal,
+      listSkills: async () => [
+        { ref: 'project:alpha', id: 'alpha', name: 'Alpha', description: 'Alpha skill' },
+      ],
+    });
+
+    terminal.input('/skill:alpha help');
+    terminal.input('\r');
+    await waitFor(() => driver.prompts.length === 1);
+
+    assert.equal(driver.prompts[0], '/skill:alpha help');
+    exitMaka(terminal);
+    await run;
+  });
+
   // Governance closeout: an all-failed explicit invocation yields a bounded
   // local diagnostic and must not create a provider turn.
   test('does not create a turn when every skill token fails to resolve', async () => {
@@ -6249,6 +6342,64 @@ describe('Maka Pi TUI runner', () => {
     ]);
   });
 
+  test('resumes an active Host turn from its atomic transcript and continues live output', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new ActiveResumeDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'ask',
+      terminal,
+      resumeSessionId: 'session-2',
+    });
+
+    await waitFor(() => plainTerminalOutput(terminal.output()).includes('Hello world'));
+    await waitFor(() => terminal.progressStates.at(-1) === false);
+    assert.deepEqual(driver.prompts, []);
+
+    terminal.input('/exit');
+    terminal.input('\r');
+    await run;
+  });
+
+  test('adopts a Host-started successor after the visible turn reaches its boundary', async () => {
+    const terminal = new FakeTerminal();
+    const driver = new HostSuccessorDriver();
+    const run = runMakaPiTui({
+      title: 'Maka',
+      driver,
+      cwd: '/repo',
+      model: 'claude-sonnet-4-5',
+      connectionSlug: 'claude-subscription',
+      permissionMode: 'ask',
+      terminal,
+      listShellRunUpdates: (sessionId) => driver.listShellRunUpdates(sessionId),
+    });
+
+    terminal.input('first');
+    terminal.input('\r');
+    await waitFor(() => terminal.progressStates.at(-1) === true);
+    driver.publishSuccessor();
+    driver.probeFirstTurn();
+    await waitFor(() => plainTerminalOutput(terminal.output()).includes('First still active'));
+    assert.equal(driver.successorPulls, 0);
+    assert.equal(plainTerminalOutput(terminal.output()).includes('Second answer'), false);
+
+    driver.finishFirstTurn();
+    await waitFor(() => plainTerminalOutput(terminal.output()).includes('Second answer'));
+    await waitFor(() => plainTerminalOutput(terminal.screenOutput()).includes('(4s · 2 lines)'));
+    await waitFor(() => terminal.progressStates.at(-1) === false);
+    assert.deepEqual(driver.prompts, ['first']);
+    assert.deepEqual(driver.shellRunReads, ['session-1']);
+
+    terminal.input('/exit');
+    terminal.input('\r');
+    await run;
+  });
+
   test('reports a resume failure and continues with the fresh session', async () => {
     const terminal = new FakeTerminal();
     const driver = new FailingSwitchSessionDriver();
@@ -6643,28 +6794,28 @@ class SteeringTurnDriver implements MakaSessionDriver {
     yield { type: 'complete', id: 'event-complete', turnId, ts: 2, stopReason: 'user_stop' };
   }
 
-  steer(text: string): QueueEnqueueOutcome {
+  async steer(text: string): Promise<QueueEnqueueOutcome> {
     this.steered.push(text);
     this.steering.push(text);
     this.emitQueueUpdate();
     return { kind: 'queued' };
   }
 
-  queueMessage(text: string): QueueEnqueueOutcome {
+  async queueMessage(text: string): Promise<QueueEnqueueOutcome> {
     this.queuedMessages.push(text);
     this.followup.push(text);
     this.emitQueueUpdate();
     return { kind: 'queued' };
   }
 
-  takePendingFollowup(): string | null {
+  async takePendingFollowup(): Promise<string | null> {
     if (this.followup.length === 0) return null;
     const joined = this.followup.join('\n\n');
     this.followup = [];
     return joined;
   }
 
-  retractQueued(): string {
+  async retractQueued(): Promise<string> {
     this.retractCalls += 1;
     const joined = [...this.steering, ...this.followup].join('\n\n');
     this.steering = [];
@@ -6719,6 +6870,7 @@ class FallbackSteeringDriver implements MakaSessionDriver {
   readonly steered: string[] = [];
   readonly queuedMessages: string[] = [];
   stopCalls = 0;
+  completedTurns = 0;
   /** Enqueue calls that report `fallback` before the owner "appears". */
   steerFallbacks = Number.POSITIVE_INFINITY;
   queueFallbacks = Number.POSITIVE_INFINITY;
@@ -6796,6 +6948,7 @@ class FallbackSteeringDriver implements MakaSessionDriver {
         ts: 2,
         stopReason: 'user_stop',
       };
+      this.completedTurns += 1;
       return;
     }
     yield {
@@ -6805,12 +6958,13 @@ class FallbackSteeringDriver implements MakaSessionDriver {
       ts: 1,
       stopReason: 'end_turn',
     };
+    this.completedTurns += 1;
   }
 
   /** Next endTurn() finishes the turn as aborted instead of end_turn. */
   abortNextTurn = false;
 
-  steer(text: string): QueueEnqueueOutcome {
+  async steer(text: string): Promise<QueueEnqueueOutcome> {
     if (this.steerFallbacks > 0) {
       this.steerFallbacks -= 1;
       return { kind: 'fallback' };
@@ -6821,7 +6975,7 @@ class FallbackSteeringDriver implements MakaSessionDriver {
     return { kind: 'queued' };
   }
 
-  queueMessage(text: string): QueueEnqueueOutcome {
+  async queueMessage(text: string): Promise<QueueEnqueueOutcome> {
     if (this.queueFallbacks > 0) {
       this.queueFallbacks -= 1;
       return { kind: 'fallback' };
@@ -6832,14 +6986,14 @@ class FallbackSteeringDriver implements MakaSessionDriver {
     return { kind: 'queued' };
   }
 
-  takePendingFollowup(): string | null {
+  async takePendingFollowup(): Promise<string | null> {
     if (this.followup.length === 0) return null;
     const joined = this.followup.join('\n\n');
     this.followup = [];
     return joined;
   }
 
-  retractQueued(): string {
+  async retractQueued(): Promise<string> {
     const joined = [...this.steering, ...this.followup].join('\n\n');
     this.steering = [];
     this.followup = [];
@@ -6877,6 +7031,38 @@ class FallbackSteeringDriver implements MakaSessionDriver {
   startNewSession(): void {}
   getSessionId(): string {
     return 'session-1';
+  }
+}
+
+class DeferredAdmissionDriver extends FallbackSteeringDriver {
+  steerCalls = 0;
+  readonly #admission = deferred<QueueEnqueueOutcome>();
+
+  override async steer(_text: string): Promise<QueueEnqueueOutcome> {
+    this.steerCalls += 1;
+    return this.#admission.promise;
+  }
+
+  releaseAdmission(outcome: QueueEnqueueOutcome): void {
+    this.#admission.resolve(outcome);
+  }
+}
+
+class DeferredRetryDriver extends FallbackSteeringDriver {
+  steerCalls = 0;
+  readonly delivered: string[] = [];
+  readonly #retry = deferred<void>();
+
+  override async steer(text: string): Promise<QueueEnqueueOutcome> {
+    this.steerCalls += 1;
+    if (this.steerCalls === 1) return { kind: 'fallback' };
+    await this.#retry.promise;
+    this.delivered.push(text);
+    return { kind: 'queued' };
+  }
+
+  releaseRetry(): void {
+    this.#retry.resolve();
   }
 }
 
@@ -7624,6 +7810,183 @@ class SlashCommandDriver implements MakaSessionDriver {
 class FailingSwitchSessionDriver extends SlashCommandDriver {
   async switchSession(_sessionId: string): Promise<MakaSessionSwitchResult> {
     throw new Error('session not found');
+  }
+}
+
+class ActiveResumeDriver extends SlashCommandDriver {
+  override async switchSession(sessionId: string): Promise<MakaSessionSwitchResult> {
+    const switched = await super.switchSession(sessionId);
+    const turnId = 'turn-active';
+    return {
+      ...switched,
+      messages: [
+        storedUserMessage('user-active', turnId, 'Question'),
+        storedAssistantMessage('assistant-active', turnId, 'Hello'),
+      ],
+      activeTurn: {
+        sessionId,
+        turnId,
+        events: (async function* () {
+          yield {
+            type: 'text_delta',
+            id: 'delta-active',
+            turnId,
+            messageId: 'assistant-active',
+            ts: 2,
+            text: ' world',
+          } satisfies SessionEvent;
+          yield {
+            type: 'text_complete',
+            id: 'text-active',
+            turnId,
+            messageId: 'assistant-active',
+            ts: 3,
+            text: 'Hello world',
+          } satisfies SessionEvent;
+          yield {
+            type: 'complete',
+            id: 'complete-active',
+            turnId,
+            ts: 4,
+            stopReason: 'end_turn',
+          } satisfies SessionEvent;
+        })(),
+      },
+    };
+  }
+}
+
+class HostSuccessorDriver extends SlashCommandDriver {
+  #startedTurnListener: ((turn: MakaAttachedSessionTurn) => void) | undefined;
+  readonly #probeFirst = deferred<void>();
+  #finishFirst: (() => void) | undefined;
+  successorPulls = 0;
+  readonly shellRunReads: string[] = [];
+
+  override async *promptEvents(_prompt: string, turnId = 'turn-1'): AsyncIterable<SessionEvent> {
+    await this.#probeFirst.promise;
+    yield {
+      type: 'text_delta',
+      id: 'text-delta-first',
+      turnId,
+      messageId: 'assistant-first',
+      ts: 1,
+      text: 'First still active',
+    };
+    yield {
+      type: 'text_complete',
+      id: 'text-complete-first',
+      turnId,
+      messageId: 'assistant-first',
+      ts: 2,
+      text: 'First still active',
+    };
+    await new Promise<void>((resolve) => {
+      this.#finishFirst = resolve;
+    });
+    yield { type: 'complete', id: 'complete-first', turnId, ts: 3, stopReason: 'end_turn' };
+  }
+
+  subscribeStartedTurns(listener: (turn: MakaAttachedSessionTurn) => void): () => void {
+    this.#startedTurnListener = listener;
+    return () => {
+      if (this.#startedTurnListener === listener) this.#startedTurnListener = undefined;
+    };
+  }
+
+  publishSuccessor(): void {
+    const turnId = 'turn-second';
+    const driver = this;
+    this.#startedTurnListener?.({
+      sessionId: this.getSessionId()!,
+      turnId,
+      messages: [
+        storedUserMessage('user-second', turnId, 'Second question'),
+        {
+          type: 'tool_call',
+          id: 'tool-bg',
+          turnId,
+          ts: 1,
+          toolName: 'Bash',
+          args: { command: 'build' },
+        },
+        {
+          type: 'tool_result',
+          id: 'result-bg',
+          turnId,
+          ts: 2,
+          toolUseId: 'tool-bg',
+          isError: false,
+          content: {
+            kind: 'shell_run',
+            ref: 'maka://runtime/background-tasks/bg-successor',
+            mode: 'pipes',
+            status: 'running',
+            cwd: '/repo',
+            cmd: 'build',
+            startedAt: 1_000,
+            updatedAt: 2_000,
+            revision: 2_000,
+            output: pipeOutput('starting\n'),
+          },
+        },
+        storedAssistantMessage('assistant-second', turnId, 'Second'),
+      ],
+      summary: fakeSessionSummary(this.getSessionId()!),
+      events: (async function* () {
+        driver.successorPulls += 1;
+        yield {
+          type: 'text_delta',
+          id: 'delta-second',
+          turnId,
+          messageId: 'assistant-second',
+          ts: 2,
+          text: ' answer',
+        } satisfies SessionEvent;
+        yield {
+          type: 'complete',
+          id: 'complete-second',
+          turnId,
+          ts: 3,
+          stopReason: 'end_turn',
+        } satisfies SessionEvent;
+      })(),
+    });
+  }
+
+  probeFirstTurn(): void {
+    this.#probeFirst.resolve();
+  }
+
+  listShellRunUpdates(sessionId: string): Promise<ShellRunUpdate[]> {
+    this.shellRunReads.push(sessionId);
+    return Promise.resolve([
+      {
+        sessionId,
+        ownership: { kind: 'local' },
+        sourceTurnId: 'turn-second',
+        sourceToolCallId: 'tool-bg',
+        result: {
+          kind: 'shell_run',
+          ref: 'maka://runtime/background-tasks/bg-successor',
+          mode: 'pipes',
+          status: 'completed',
+          cwd: '/repo',
+          cmd: 'build',
+          startedAt: 1_000,
+          updatedAt: 5_000,
+          completedAt: 5_000,
+          exitCode: 0,
+          revision: 5_000,
+          output: pipeOutput('starting\ndone\n'),
+        },
+      },
+    ]);
+  }
+
+  finishFirstTurn(): void {
+    this.#finishFirst?.();
+    this.#finishFirst = undefined;
   }
 }
 
