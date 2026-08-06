@@ -7,6 +7,9 @@ import {
   buildAgentRepoMounts,
   competitorRepoFiles,
   CONTAINER_MAKA_REPO,
+  isOptionalRepoPath,
+  makaRepoPaths,
+  RENDERER_ONLY_WORKSPACES,
 } from '../agent-repo-mount.js';
 import { type HarnessAgentId, harnessAgentImportPath } from '../harness-agent-registry.js';
 
@@ -20,11 +23,114 @@ const COMPETITORS: readonly Exclude<HarnessAgentId, 'maka'>[] = [
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 
+const RENDERER_ONLY = new Set(RENDERER_ONLY_WORKSPACES);
+
+/** The workspaces the container is expected to be able to load. */
+const MAKA_WORKSPACES = (
+  JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as { workspaces: string[] }
+).workspaces.filter((workspace) => !RENDERER_ONLY.has(workspace));
+
 describe('agent repo mounts', () => {
-  test('gives Maka the tree it executes out of', () => {
-    assert.deepEqual(buildAgentRepoMounts('maka', '/repo'), [
-      { type: 'bind', source: '/repo', target: CONTAINER_MAKA_REPO, read_only: true },
-    ]);
+  test('gives Maka its build outputs, not the repo root', () => {
+    const mounts = buildAgentRepoMounts('maka', '/repo', { pathExists: () => true }) as Array<{
+      source: string;
+      target: string;
+      read_only: boolean;
+    }>;
+    assert.ok(
+      mounts.every((mount) => mount.target !== CONTAINER_MAKA_REPO),
+      'Maka must not receive the repo root',
+    );
+    assert.deepEqual(
+      mounts.map((mount) => mount.target),
+      makaRepoPaths().map((repoPath) => `${CONTAINER_MAKA_REPO}/${repoPath}`),
+    );
+    assert.ok(
+      mounts.every((mount) => mount.read_only),
+      'Maka must not receive a writable repo path',
+    );
+  });
+
+  test('every required path Maka declares exists in the repo', () => {
+    for (const repoPath of makaRepoPaths()) {
+      if (isOptionalRepoPath(repoPath)) continue;
+      assert.ok(existsSync(join(REPO_ROOT, repoPath)), `Maka declares missing ${repoPath}`);
+    }
+  });
+
+  test('declares every workspace dependency tree npm could not hoist away', () => {
+    // This is the direction that actually broke: `packages/runtime/node_modules`
+    // exists — npm could not hoist `@slack/socket-mode` past a version conflict
+    // — and omitting it resolved fine on the host, then failed in the container
+    // on the first import that needed it. Nothing but a live container run
+    // caught that. The repo already knows the answer, so ask it here.
+    const mounted = new Set(makaRepoPaths());
+    for (const workspace of MAKA_WORKSPACES) {
+      const repoPath = `${workspace}/node_modules`;
+      if (!existsSync(join(REPO_ROOT, repoPath))) continue;
+      assert.ok(
+        mounted.has(repoPath),
+        `${workspace} keeps a private ${repoPath} that is not mounted`,
+      );
+    }
+  });
+
+  test('drops a workspace dependency tree npm managed to hoist away', () => {
+    // Mounting it blind would have Docker create the directory on the host,
+    // inside the repo, as a side effect of starting a graded run.
+    const absent = `${CONTAINER_MAKA_REPO}/packages/runtime/node_modules`;
+    const mounts = buildAgentRepoMounts('maka', '/repo', {
+      pathExists: (path) => !path.endsWith('packages/runtime/node_modules'),
+    }) as Array<{ target: string }>;
+    assert.ok(!mounts.some((mount) => mount.target === absent));
+    assert.ok(mounts.some((mount) => mount.target.endsWith('/packages/runtime/dist')));
+  });
+
+  test('keeps sources and evaluation records out of the Maka container', () => {
+    // What the #2245 run actually reached through the old repo-root mount: the
+    // benchmark's own per-task results under docs/eval, and the verifier source
+    // under packages/headless/src. The container executes dist, so neither is
+    // needed to run — only to look up what this benchmark expects.
+    //
+    // Read the produced mounts, not the declaration. A declaration that names
+    // no forbidden path still leaks every one of them if the builder mounts the
+    // root anyway, and asserting the list cannot tell those apart.
+    const mounts = buildAgentRepoMounts('maka', '/repo', { pathExists: () => true }) as Array<{
+      target: string;
+    }>;
+    for (const mount of mounts) {
+      assert.notEqual(mount.target, CONTAINER_MAKA_REPO, 'Maka must not receive the repo root');
+    }
+    for (const repoPath of mounts.map((mount) =>
+      mount.target.slice(CONTAINER_MAKA_REPO.length + 1),
+    )) {
+      assert.ok(!repoPath.startsWith('docs'), `Maka must not be handed evaluation records`);
+      assert.ok(!/(^|\/)src(\/|$)/.test(repoPath), `Maka must not be handed sources (${repoPath})`);
+      assert.ok(!/(^|\/)\.git(\/|$)/.test(repoPath), `Maka must not be handed repo history`);
+      assert.notEqual(
+        repoPath,
+        'packages/headless/harbor/run-harness-ab.mjs',
+        'Maka must not be handed the harness manifest source',
+      );
+    }
+  });
+
+  test('mounts the build output of every workspace the container CLI can reach', () => {
+    // The declared list is the authority for what exists in the container, and
+    // nothing else checks it against the workspaces that actually ship. A new
+    // runtime workspace added without an entry here resolves at build time and
+    // fails inside the container partway through a graded run.
+    const mounted = new Set(makaRepoPaths());
+    for (const workspace of MAKA_WORKSPACES) {
+      assert.ok(
+        mounted.has(`${workspace}/dist`),
+        `${workspace} ships but its dist is not mounted for Maka`,
+      );
+      assert.ok(
+        mounted.has(`${workspace}/package.json`),
+        `${workspace} ships but its manifest is not mounted for Maka`,
+      );
+    }
   });
 
   for (const agent of COMPETITORS) {
@@ -98,6 +204,30 @@ describe('agent repo mounts', () => {
           `${adapterModule}.py reads ${repoFile}, which ${agent} is not mounted`,
         );
       }
+    }
+  });
+
+  test('declares every repo file the Maka adapter names at a container path', () => {
+    // The same authority check, which the Maka side did not have — and its
+    // absence is why `run-host-cell.mjs` was left out of the declaration while
+    // `install()` probes for it in every cell-mode branch. A missing probe
+    // target aborts the trial before the arm runs at all.
+    //
+    // `maka_agent.py` builds container paths by joining segments onto the mount
+    // root rather than writing them out, so match the join instead of a literal.
+    const source = readFileSync(join(REPO_ROOT, 'packages/headless/harbor/maka_agent.py'), 'utf8');
+    const mounted = new Set(makaRepoPaths());
+    const read = new Set<string>();
+    for (const [, segments] of source.matchAll(/Path\(maka_repo\)((?:\s*\/\s*"[^"\n]+")+)/g)) {
+      read.add([...segments.matchAll(/"([^"]+)"/g)].map(([, segment]) => segment).join('/'));
+    }
+    assert.ok(read.size > 0, 'no container paths were found in maka_agent.py');
+    for (const repoFile of read) {
+      // A file may be mounted directly or inside a mounted directory.
+      const covered = [...mounted].some(
+        (repoPath) => repoPath === repoFile || repoFile.startsWith(`${repoPath}/`),
+      );
+      assert.ok(covered, `maka_agent.py names ${repoFile}, which Maka is not mounted`);
     }
   });
 
