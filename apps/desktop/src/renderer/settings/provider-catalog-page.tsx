@@ -1,10 +1,11 @@
 import {
   Banner,
   EmptyState,
+  HStack,
   List,
   ListItem,
+  Section,
   Selector,
-  Toolbar,
   VStack,
 } from '@astryxdesign/core';
 import { ChevronRight, Search } from '@maka/ui/icons';
@@ -79,21 +80,16 @@ export function ProviderCatalogPage(props: {
 
   return (
     <VStack gap={4} data-maka-contract="provider-catalog">
-      <Toolbar
-        label={copy.categoriesAria}
-        gap={2}
-        startContent={(
+      <Section variant="transparent" paddingBlock={2}>
+        <HStack gap={2} hAlign="between" vAlign="center">
           <TextInput
             value={query}
             onChange={(value) => props.onFilterChange({ ...props.filter, query: value })}
             placeholder={copy.searchPlaceholder}
             label={copy.searchAria}
             isLabelHidden
-            startIcon={<Search aria-hidden="true" />}
-            width="100%"
+            startIcon={Search}
           />
-        )}
-        endContent={(
           <Selector
             label={copy.category}
             isLabelHidden
@@ -102,8 +98,8 @@ export function ProviderCatalogPage(props: {
             options={categoryOptions}
             data-catalog-category={category}
           />
-        )}
-      />
+        </HStack>
+      </Section>
       {oauth.refreshError && (
         <Banner
           status="warning"
