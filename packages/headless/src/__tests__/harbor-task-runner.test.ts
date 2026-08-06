@@ -126,6 +126,50 @@ test('DeepSeek routes each CLI through its native wire protocol', () => {
   assert.equal(harnessAgentImportPath('reasonix'), 'reasonix_agent:MakaReasonixAgent');
 });
 
+test('the Maka arm measures the wire its own runtime resolves, not the adapter kind', () => {
+  // deepseek-v4-flash routes through the Responses API (`openAiAdapterApiProtocol`),
+  // so a proxy parsing it as Chat SSE never sees `[DONE]`, marks every request
+  // `interrupted`, and the runner throws the whole graded cell away as infra.
+  assert.equal(
+    providerProxyUsageProtocol('maka', 'deepseek', undefined, 'deepseek-v4-flash'),
+    'openai-responses-sse',
+  );
+  // Same provider, a model that stays on Chat Completions.
+  assert.equal(
+    providerProxyUsageProtocol('maka', 'deepseek', undefined, 'deepseek-v3.2'),
+    'openai-chat-sse',
+  );
+  // An advertised protocol wins only where the runtime's own connection carries
+  // one. For DeepSeek it does not: `connectionFromEnv` drops it, so the runtime
+  // dials Responses regardless and a proxy that honoured the override would be
+  // parsing a wire nobody is speaking — the same wrong number, reintroduced
+  // through this function's own input.
+  assert.equal(
+    providerProxyUsageProtocol('maka', 'deepseek', 'openai-chat', 'deepseek-v4-flash'),
+    'openai-responses-sse',
+  );
+  // The two providers whose connections do carry an advertised protocol have
+  // their own explicit branches above, asserted separately.
+  // Competitors run their own CLI, so the Maka runtime says nothing about them.
+  assert.equal(
+    providerProxyUsageProtocol('reasonix', 'deepseek', undefined, 'deepseek-v4-flash'),
+    'openai-chat-sse',
+  );
+  // The catalog spelling resolves to the same wire as the one the runtime dials.
+  // `resolveModelRuntime` does not recognize the prefixed id, so a caller that
+  // forwarded it raw would silently get the Chat guess back — this fix's own
+  // API re-entering the bug it exists to close.
+  assert.equal(
+    providerProxyUsageProtocol('maka', 'deepseek', undefined, 'deepseek/deepseek-v4-flash'),
+    'openai-responses-sse',
+  );
+  // And a caller with no model id at all gets an error, not the guess.
+  assert.throws(
+    () => providerProxyUsageProtocol('maka', 'deepseek'),
+    /the maka arm requires a model id/,
+  );
+});
+
 interface FakeOptions {
   reward?: string;
   cell?: HarborCellOutput | null;
