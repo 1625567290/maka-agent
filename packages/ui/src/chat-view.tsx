@@ -2,7 +2,6 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import {
   AlertTriangle,
   ArrowRight,
-  TextQuote,
 } from './icons.js';
 import { DeepResearchEmptyHero, EmptyChatHero } from './chat-empty-hero.js';
 import type { ChatModelChoice } from './chat-model-helpers.js';
@@ -210,16 +209,17 @@ export function ChatView(props: {
    * Codex/Cursor-style "quote this": when set, selecting text in the transcript
    * surfaces a floating action that hands the excerpt (+ its turn) to the host,
    * which stages it as a quote chip on the composer. Omitted by hosts that
-   * don't compose quotes.
+   * don't compose quotes. Only selections that resolve to a turn are offered,
+   * so `turnId` always arrives.
    */
-  onQuoteSelection?(input: { text: string; turnId?: string }): void;
+  onQuoteSelection?(input: { text: string; turnId: string }): void;
   /**
    * Codex/Cursor-style "ask in side panel": when set, selecting text in the
    * transcript surfaces a second floating action that hands the excerpt (+ its
    * turn) to the desktop app, which opens a read-only companion side panel
    * seeded with the quote. Omitted by hosts that don't support the side panel.
    */
-  onAskAboutSelection?(input: { text: string; turnId?: string }): void;
+  onAskAboutSelection?(input: { text: string; turnId: string }): void;
 }) {
   const conversationCopy = getConversationCopy(useUiLocale());
   const copy = conversationCopy.chat;
@@ -689,6 +689,9 @@ export function ChatView(props: {
               // Keep the live selection alive while clicking an action.
               onMouseDown={(event) => event.preventDefault()}
             >
+              {/* No icons: the labels already name the actions, so an icon
+                  beside each one encodes the same thing twice and buys the
+                  width back from the text the layer is covering. */}
               <ButtonGroup
                 label={selectionActionsLabel}
                 size="sm"
@@ -698,11 +701,10 @@ export function ChatView(props: {
                   <Button
                     type="button"
                     label={copy.quoteSelection}
-                    icon={<TextQuote aria-hidden="true" />}
                     onClick={() => {
                       props.onQuoteSelection?.({
                         text: selectionQuote.text,
-                        ...(selectionQuote.turnId ? { turnId: selectionQuote.turnId } : {}),
+                        turnId: selectionQuote.turnId,
                       });
                       clearSelectionQuote();
                       window.getSelection()?.removeAllRanges();
@@ -713,11 +715,10 @@ export function ChatView(props: {
                   <Button
                     type="button"
                     label={copy.askInSidePanel}
-                    icon={<TextQuote aria-hidden="true" />}
                     onClick={() => {
                       props.onAskAboutSelection?.({
                         text: selectionQuote.text,
-                        ...(selectionQuote.turnId ? { turnId: selectionQuote.turnId } : {}),
+                        turnId: selectionQuote.turnId,
                       });
                       clearSelectionQuote();
                       window.getSelection()?.removeAllRanges();
@@ -727,8 +728,8 @@ export function ChatView(props: {
               </ButtonGroup>
             </div>,
             {
-              x: selectionQuote.rect.left + selectionQuote.rect.width / 2,
-              y: Math.max(8, selectionQuote.rect.top - 42),
+              x: selectionQuote.anchor.x,
+              y: Math.max(8, selectionQuote.anchor.y - 42),
               style: { transform: 'translateX(-50%)' },
             },
           )
