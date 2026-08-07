@@ -471,7 +471,6 @@ function SettingsPageBody(props: {
         <AppearanceSettingsPage
           themePref={props.themePref}
           themePalette={props.themePalette}
-          settings={props.settings}
           onUpdate={props.onUpdateSettings}
           onThemeChange={props.onThemeChange}
           onThemePaletteChange={props.onThemePaletteChange}
