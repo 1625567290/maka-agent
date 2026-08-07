@@ -21,14 +21,184 @@
   max-width: var(--maka-chat-measure);
 }
 
+/* Row-flow, not the old stacked column: image thumbnails and file/quote
+   chips share one wrapping row. `width: 100%` is what makes the wrap real:
+   as a flex item of Astryx's drawer content this group would otherwise size
+   to max-content, run past the drawer edge, and get clipped by the drawer
+   root's overflow:hidden — the drawer must grow DOWN, never rightward. */
 .maka-composer-context-drawer {
   display: flex;
+  width: 100%;
   min-width: 0;
   flex-wrap: wrap;
-  align-items: flex-start;
+  align-items: center;
   gap: var(--space-1-5);
-  flex-direction: column;
+  flex-direction: row;
   padding: var(--space-1) var(--space-3) var(--space-2);
+}
+
+/* Astryx ChatComposerDrawer wraps its content in a display:grid whose single
+   implicit column sizes to the content's max-content contribution — with a
+   long chip row that resolves WIDER than the grid (measured: 896px column in
+   a 648px grid), so the row wrapped against a phantom width and everything
+   past the drawer's right edge was clipped. Pin the column to the grid's own
+   width; the group above then wraps against the real edge. The content region
+   is the child carrying the disclosure id (aria-controls target). */
+.maka-composer-astryx .astryx-chat-composer-drawer > div[id] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* The collapse toggle is a full-width 20px band whose only visible affordance
+   is a 20×2px pill — its aria-label («收起附加内容» / «展开附加内容») was
+   unreadable for sighted users, and a native `title` needs a ~1s motionless
+   hover that a thin band rarely gets. Surface the label as an instant CSS
+   tooltip instead: `attr(aria-label)` tracks the live attribute, so the text
+   flips with the collapse state and stays localized with no JS.
+
+   Placement is the hard constraint: the drawer root clips its own box
+   (overflow:hidden for the collapse animation), so the bubble can't rise
+   above the band, and the input card paints ABOVE the drawer (body z-index 2
+   vs drawer 1 — that overlap is the card's design), so anything hanging
+   below the collapsed band gets covered. The one strip clear of both is the
+   band's own height — within it the bubble tracks the pointer horizontally
+   (--maka-drawer-tooltip-x, set by the drawer's onPointerMove in
+   composer.tsx), falling back to beside the pill for keyboard focus. */
+.maka-composer-astryx .astryx-chat-composer-drawer > [role='button'][aria-controls] {
+  position: relative;
+}
+
+.maka-composer-astryx .astryx-chat-composer-drawer > [role='button'][aria-controls]::after {
+  /* local: --maka-drawer-tooltip-x — bubble x within the band, written by
+     the drawer's onPointerMove in composer.tsx (cleared on pointer leave);
+     the fallback beside the pill serves keyboard focus. */
+  content: attr(aria-label);
+  position: absolute;
+  top: 50%;
+  left: var(--maka-drawer-tooltip-x, calc(50% + 20px));
+  transform: translateY(-50%);
+  padding: 3px 8px;
+  border-radius: var(--radius-control);
+  /* Astryx's fixed tooltip pair (same as Thumbnail's remove scrim): legible
+     in both themes without borrowing surface tokens for text. */
+  background-color: var(--color-overlay);
+  color: var(--color-on-dark);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--duration-fast, 120ms) var(--ease-standard, ease);
+  z-index: var(--z-tooltip);
+}
+
+.maka-composer-astryx .astryx-chat-composer-drawer > [role='button'][aria-controls]:hover::after,
+.maka-composer-astryx .astryx-chat-composer-drawer > [role='button'][aria-controls]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Staged non-image file — a two-line card in the idiom of contemporary agent
+   composers: kind icon on a tinted tile, filename, "EXT · size" meta. Fixed
+   64px height so cards and image thumbnails read as one row, not a staggered
+   pile; capped width + ellipsis so a full z-library book title cannot span
+   the card. */
+.maka-composer-attachment-card {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: 56px;
+  gap: var(--space-1-5);
+  max-width: min(280px, 100%);
+  padding: 0 var(--space-1-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-modal);
+  background: var(--background);
+}
+
+.maka-composer-attachment-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-surface);
+  background: var(--muted);
+  color: var(--foreground-secondary);
+}
+
+/* Kind accents keep to existing semantic tokens (no new hues): documents that
+   read as "PDF red" everywhere else, code as the accent. */
+.maka-composer-attachment-card[data-kind="pdf"] .maka-composer-attachment-card-icon {
+  background: color-mix(in oklch, var(--status-danger, var(--destructive)) 12%, var(--background));
+  color: var(--status-danger, var(--destructive));
+}
+
+.maka-composer-attachment-card[data-kind="code"] .maka-composer-attachment-card-icon {
+  background: color-mix(in oklch, var(--accent) 12%, var(--background));
+  color: var(--accent);
+}
+
+.maka-composer-attachment-card-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.maka-composer-attachment-card-name {
+  font-size: 13px;
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+  color: var(--foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.maka-composer-attachment-card-meta {
+  font-size: 11px;
+  line-height: 1.2;
+  color: var(--muted-foreground);
+  white-space: nowrap;
+}
+
+.maka-composer-attachment-card-remove {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background-color: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.maka-composer-attachment-card-remove:hover,
+.maka-composer-attachment-card-remove:focus-visible {
+  background-color: var(--muted);
+  color: var(--foreground);
+}
+
+/* Image thumbnails: hairline border + the same 12px radius as the file card,
+   so a mostly-white screenshot doesn't melt into the drawer surface.
+   `--radius-element` feeds Astryx Thumbnail's inner image container; 11px
+   (outer 12 − 1px border) nests the image corners flush against the border
+   instead of leaving a sliver of background in each corner. */
+.maka-composer-attachment-thumbnail {
+  /* local: --radius-element — Astryx Thumbnail's inner image radius; outer
+     radius minus the 1px border nests the image flush in the frame. */
+  --radius-element: calc(var(--radius-modal) - 1px);
+  width: 56px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-modal);
+  overflow: hidden;
+  background: var(--background);
 }
 
 .maka-composer-input {

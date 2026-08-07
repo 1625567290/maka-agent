@@ -23,6 +23,7 @@ import {
   Sparkles,
   Upload,
   Workflow,
+  X,
 } from './icons.js';
 import {
   ChatModelSwitcher,
@@ -57,6 +58,7 @@ import {
   ChatComposerDrawer,
   ChatComposerInput,
   IconButton,
+  Thumbnail,
   Token,
   useChatPasteAsToken,
   type ChatComposerInputHandle,
@@ -71,6 +73,8 @@ import {
   DropdownMenuItem,
 } from '@astryxdesign/core/DropdownMenu';
 import { PermissionModeSelect } from './permission-mode-menu.js';
+import { AttachmentKindIcon } from './attachment-kinds.js';
+import { formatPreviewSize } from './artifact-preview-registry.js';
 import {
   inlineReferenceFileBasename,
   inlineReferenceToken,
@@ -119,6 +123,15 @@ function skillTokenValue(id: string): string {
  * rows before it scrolls; rows, not pixels, is the knob upstream exposes.
  */
 const COMPOSER_MAX_ROWS = 10;
+
+/** Uppercased extension for the staged-file card's meta line ("EPUB · 621.0 KB").
+ *  Null when the name has no usable extension, so the meta line is size-only. */
+function attachmentExtensionLabel(name: string): string | null {
+  const idx = name.lastIndexOf('.');
+  if (idx <= 0 || idx === name.length - 1) return null;
+  const ext = name.slice(idx + 1);
+  return ext.length > 8 ? null : ext.toUpperCase();
+}
 
 /**
  * PR-UI-15 (@yuejing 2026-05-22): Composer copy is locale-aware.
@@ -187,7 +200,16 @@ export const Composer = forwardRef<
     onStop(): void | Promise<void>;
     onPickAttachments?(): void | Promise<void>;
     onAttachFilePaths?(files: File[]): void | Promise<void>;
-    pendingAttachments?: readonly { displayName: string; kind: AttachmentRef['kind']; mimeType?: string; size: number }[];
+    pendingAttachments?: readonly {
+      displayName: string;
+      kind: AttachmentRef['kind'];
+      mimeType?: string;
+      size: number;
+      /** Renderer-resolvable image source (object/data URL) for `kind: 'image'`
+       *  previews. While absent (still loading, or preview failed) the image
+       *  renders as a named file card instead of a thumbnail. */
+      previewUrl?: string;
+    }[];
     onRemoveAttachment?(index: number): void;
     /** Quoted excerpts staged for the next send; rendered as removable chips. */
     pendingQuotes?: readonly QuoteRef[];
@@ -1240,8 +1262,45 @@ export const Composer = forwardRef<
           onSubmit={() => {}}
           isDisabled={props.disabled}
           drawer={drawerTokenCount > 0 ? (
-            <ChatComposerDrawer count={drawerTokenCount} label={copy.addContext}>
-              <div className="maka-composer-context-drawer" role="group" aria-label={copy.addContext}>
+            <ChatComposerDrawer
+              count={drawerTokenCount}
+              label={copy.stagedContext}
+              // The collapse band's tooltip (composer.css ::after) follows the
+              // pointer instead of sitting at a fixed offset — on a full-width
+              // band a fixed bubble can be half a window away from the cursor.
+              // The custom property feeds the ::after's `left`; clamped so the
+              // bubble never crosses the band's right edge.
+              onPointerMove={(event) => {
+                const toggle = event.currentTarget.querySelector<HTMLElement>(
+                  '[role="button"][aria-controls]',
+                );
+                if (!toggle) return;
+                const band = toggle.getBoundingClientRect();
+                if (event.clientY < band.top || event.clientY > band.bottom) return;
+                // Clamp against the bubble's border-box: computed width is
+                // content-box only, so the paddings must be priced in or the
+                // right edge overshoots by exactly their sum.
+                const bubbleStyle = getComputedStyle(toggle, '::after');
+                const bubbleWidth =
+                  (Number.parseFloat(bubbleStyle.width) || 124) +
+                  (Number.parseFloat(bubbleStyle.paddingLeft) || 0) +
+                  (Number.parseFloat(bubbleStyle.paddingRight) || 0);
+                const x = Math.min(
+                  Math.max(event.clientX - band.left + 14, 8),
+                  Math.max(8, band.width - bubbleWidth - 8),
+                );
+                toggle.style.setProperty('--maka-drawer-tooltip-x', `${x}px`);
+              }}
+              // Without this, keyboard focus after a hover would show the
+              // bubble at the last pointer position instead of the
+              // beside-the-pill fallback.
+              onPointerLeave={(event) => {
+                event.currentTarget
+                  .querySelector<HTMLElement>('[role="button"][aria-controls]')
+                  ?.style.removeProperty('--maka-drawer-tooltip-x');
+              }}
+            >
+              <div className="maka-composer-context-drawer" role="group" aria-label={copy.stagedContext}>
                 {props.pendingQuotes?.map((quote, index) => (
                   <Token
                     key={`${quote.sourceTurnId ?? 'quote'}-${index}`}
@@ -1250,14 +1309,63 @@ export const Composer = forwardRef<
                     onRemove={props.onRemoveQuote ? () => props.onRemoveQuote?.(index) : undefined}
                   />
                 ))}
-                {props.pendingAttachments?.map((attachment, index) => (
-                  <Token
-                    key={`${attachment.displayName}-${index}`}
-                    size="sm"
-                    label={attachment.displayName}
-                    onRemove={props.onRemoveAttachment ? () => props.onRemoveAttachment?.(index) : undefined}
-                  />
-                ))}
+                {props.pendingAttachments?.map((attachment, index) => {
+                  const onRemove = props.onRemoveAttachment
+                    ? () => props.onRemoveAttachment?.(index)
+                    : undefined;
+                  // Astryx-standard rendering (per maintainer guidance): images
+                  // with a resolved preview get a real Thumbnail; everything
+                  // else — other kinds, AND images whose preview failed or is
+                  // still loading — gets the two-line file card, so nothing
+                  // ever sits in the drawer as an anonymous placeholder square.
+                  if (attachment.kind === 'image' && attachment.previewUrl) {
+                    return (
+                      <Thumbnail
+                        key={`${attachment.displayName}-${index}`}
+                        className="maka-composer-attachment-thumbnail"
+                        src={attachment.previewUrl}
+                        label={attachment.displayName}
+                        onRemove={onRemove}
+                      />
+                    );
+                  }
+                  const extension = attachmentExtensionLabel(attachment.displayName);
+                  const sizeLabel = formatPreviewSize(attachment.size, locale);
+                  return (
+                    <span
+                      key={`${attachment.displayName}-${index}`}
+                      className="maka-composer-attachment-card"
+                      data-kind={attachment.kind}
+                    >
+                      <span className="maka-composer-attachment-card-icon" aria-hidden="true">
+                        <AttachmentKindIcon kind={attachment.kind} />
+                      </span>
+                      <span className="maka-composer-attachment-card-text">
+                        <span
+                          className="maka-composer-attachment-card-name"
+                          title={attachment.displayName}
+                        >
+                          {attachment.displayName}
+                        </span>
+                        <span className="maka-composer-attachment-card-meta">
+                          {extension ? `${extension} · ${sizeLabel}` : sizeLabel}
+                        </span>
+                      </span>
+                      {onRemove && (
+                        <button
+                          type="button"
+                          className="maka-composer-attachment-card-remove"
+                          aria-label={getConversationCopy(locale).messages.removeAttachmentAriaLabel(
+                            attachment.displayName,
+                          )}
+                          onClick={onRemove}
+                        >
+                          <X size={13} aria-hidden="true" />
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             </ChatComposerDrawer>
           ) : undefined}
