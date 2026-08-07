@@ -129,6 +129,8 @@ export function ToolResultPreview(props: {
   toolName?: string;
   args?: unknown;
   shellRunSource?: 'owned' | 'unavailable';
+  /** Open a linked subagent child session in the main chat column. */
+  onOpenLinkedSession?(sessionId: string): void;
 }) {
   const { content } = props;
   const locale = useUiLocale();
@@ -179,11 +181,21 @@ export function ToolResultPreview(props: {
   }
 
   if (content.kind === 'subagent') {
-    return <SubagentPreview result={content} />;
+    return (
+      <SubagentPreview
+        result={content}
+        onOpenSession={props.onOpenLinkedSession}
+      />
+    );
   }
 
   if (content.kind === 'agent_swarm') {
-    return <AgentSwarmPreview result={content} />;
+    return (
+      <AgentSwarmPreview
+        result={content}
+        onOpenSession={props.onOpenLinkedSession}
+      />
+    );
   }
 
   if (content.kind === 'rive_workflow') {

@@ -18,11 +18,9 @@ import type {
 } from '@maka/core';
 import {
   collapseSessionRevisions,
-  filterLinkedSessionTree,
   isLinkedSubagentSession,
   parseGraphCommand,
   parseSwarmCommand,
-  projectRevisionLinkedSessionTree,
   resolveUiLocale,
 } from '@maka/core';
 import { hasSettledInitialOnboarding } from '@maka/core/onboarding-milestone';
@@ -92,6 +90,7 @@ import { useShellSearch } from './use-shell-search';
 import { useSessionGoal } from './use-session-goal';
 import { deriveStaleSessionIds } from './stale-sessions';
 import { deriveProjectGroups, deriveWorktreeSessionIds } from './session-project-grouping';
+import { deriveSessionRail } from './session-rail';
 import { useAppShellTurnPresentation } from './app-shell-turn-view-model';
 import { readScrollMotionBehavior } from './scroll-motion-policy';
 import { deriveBranchBanner } from './branch-banner';
@@ -576,22 +575,22 @@ function AppShellContent({
   // Running → Waiting → Blocked → Active → Review → Done → Archived);
   // `aborted` is dropped. Pinned (flagged) sessions float to the top
   // in their own group, preserving the PR48 pin-floats behavior.
-  const sidebarSessionTree = useMemo(
-    () => projectRevisionLinkedSessionTree(sessions, activeId),
-    [sessions, activeId],
-  );
-  const visibleSessionTree = useMemo(
+  // One projection owns rail membership, active highlight, and titlebar parent:
+  // revision-tree roots (orphans stay; linked children with a live parent leave),
+  // flat nav / companion filter — never promote children past ancestors.
+  const {
+    sessions: visibleSessions,
+    activeRowId: sidebarActiveId,
+    activeParentSession: railParentSession,
+  } = useMemo(
     () =>
-      // Exclude the quote companion's ephemeral fork so it stays hidden from the
-      // main session list while its panel is open.
-      filterLinkedSessionTree(sidebarSessionTree, (session) =>
+      deriveSessionRail(sessions, activeId, (session) =>
         !hiddenCompanionForkIds.has(session.id)
           ? sessionMatchesNavSelection(session, navSelection)
           : false,
       ),
-    [sidebarSessionTree, navSelection, hiddenCompanionForkIds],
+    [sessions, activeId, navSelection, hiddenCompanionForkIds],
   );
-  const visibleSessions = visibleSessionTree.roots;
   // PR-DAILY-REVIEW-MVP-0: bridge for the main Daily Review module.
   // Memoized so the panel's `useEffect` cleanup keys
   // off a stable reference instead of refetching on every render.
@@ -1024,6 +1023,16 @@ function AppShellContent({
   function handleBranchBannerClick(parentSessionId: string): void {
     openSessionInChat(parentSessionId);
   }
+
+  // Same revision-aware parent row the rail uses — not a second physical-id walk.
+  const titlebarParentSession = useMemo(() => {
+    if (!railParentSession) return undefined;
+    const parentId = railParentSession.id;
+    return {
+      name: railParentSession.name,
+      onOpen: () => openSessionInChatRef.current(parentId),
+    };
+  }, [railParentSession]);
 
   const activeSessionForView: SessionSummary | undefined =
     activeSession ??
@@ -2133,6 +2142,7 @@ function AppShellContent({
                 ? { name: titlebarProjectName, onOpenFolder: () => void openProjectFolder() }
                 : undefined
             }
+            parentSession={titlebarParentSession}
           />
         )}
         {!VIEWS_WITHOUT_WORKSPACE_ACTIONS.has(agentsView) && (
@@ -2168,14 +2178,13 @@ function AppShellContent({
             maxWidth={SESSION_LIST_EXPANDED_MAX_WIDTH}
             selection={navSelection}
             sessions={visibleSessions}
-            activeId={activeId}
+            activeId={sidebarActiveId}
             planReminders={planReminders}
             streamingSessionIds={streamingSessionIds}
             staleSessionIds={staleSessionIds}
             viewMode={viewMode}
             onViewModeChange={setViewMode}
             groups={viewMode === 'project' ? sessionProjectGroups : undefined}
-            childSessionsByParentId={visibleSessionTree.childrenByParentId}
             worktreeSessionIds={worktreeSessionIds}
             moduleMemory={navigationState.moduleMemory}
             onSelect={setNavSelection}
@@ -2517,6 +2526,7 @@ function AppShellContent({
                 } : undefined}
                 onLineageBadgeClick={handleLineageBadgeClick}
                 onReadAttachmentBytes={window.maka.attachments.readBytes}
+                onOpenLinkedSession={openSessionInChat}
                 scrollTargetTurn={
                   activeId && searchScrollTarget?.sessionId === activeId
                         ? {
