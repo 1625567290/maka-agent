@@ -142,6 +142,16 @@ export interface MakaPiTuiInput {
    * without waiting real seconds; defaults to the attention layer's own value.
    */
   attentionLongTurnThresholdMs?: number;
+  /**
+   * Clock + interval scheduling for the running shell-run elapsed ticker
+   * (1s cadence). Injectable so tests drive ticks deterministically instead
+   * of waiting wall-clock seconds; defaults to Date.now + a real unref'd
+   * setInterval.
+   */
+  shellRunTicker?: {
+    now?: () => number;
+    schedule?: (callback: () => void, intervalMs: number) => () => void;
+  };
   subscribeSessionTitleChanges?: (listener: (sessionId: string) => void) => () => void;
   subscribeShellRunUpdates?: (listener: (update: ShellRunUpdate) => void) => () => void;
   listShellRunUpdates?: (sessionId: string) => Promise<ShellRunUpdate[]>;
@@ -373,6 +383,8 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   const shellRunElapsedTicker = createShellRunElapsedTicker({
     state,
     onTick: requestRender,
+    now: input.shellRunTicker?.now,
+    schedule: input.shellRunTicker?.schedule,
   });
 
   // ── Explicit skill invocation (#1148) ────────────────────────────────────
