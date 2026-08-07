@@ -8873,7 +8873,7 @@ SOFTWARE.
 
 ================================================================================
 
-Package: hono@4.12.30
+Package: hono@4.12.34
 Declared license: MIT
 Selected license: MIT
 Repository: git+https://github.com/honojs/hono.git
@@ -9535,7 +9535,7 @@ THE SOFTWARE.
 
 ================================================================================
 
-Package: js-yaml@4.3.0
+Package: js-yaml@4.3.1
 Declared license: MIT
 Selected license: MIT
 Repository: nodeca/js-yaml
@@ -10818,7 +10818,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ================================================================================
 
-Package: mermaid@11.16.0
+Package: mermaid@11.16.1
 Declared license: MIT
 Selected license: MIT
 Repository: https://github.com/mermaid-js/mermaid
