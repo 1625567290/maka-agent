@@ -53,9 +53,16 @@ async function scrollToBottom(page: import('@playwright/test').Page) {
   // Astryx's synthetic-scroll guard bails out of the scroll handler while
   // scrollHeight is still changing, which a programmatic jump right after the
   // reply settles can trip; a real user's scroll keeps firing until the
-  // layout stops. Drive one more cycle after the layout settles so
+  // layout stops. Wait for the layout fact itself — scrollHeight stable across
+  // two consecutive animation frames — then drive one more cycle so
   // `isScrolledUp` follows the final position.
-  await page.waitForTimeout(250);
+  await page.waitForFunction(() => {
+    const el = document.querySelector<HTMLElement>('[data-chat-scroll-container="true"]');
+    if (!el) return false;
+    const sampled = (window as { __scrollHeightSample?: number }).__scrollHeightSample;
+    (window as { __scrollHeightSample?: number }).__scrollHeightSample = el.scrollHeight;
+    return sampled === el.scrollHeight;
+  });
   await page.evaluate(() => {
     const el = document.querySelector<HTMLElement>('[data-chat-scroll-container="true"]');
     el?.dispatchEvent(new Event('scroll'));

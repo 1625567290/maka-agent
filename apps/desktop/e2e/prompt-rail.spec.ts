@@ -403,14 +403,16 @@ test('the highlight travels with the prompt being read', async ({ longTranscript
   const seen: number[] = [];
   for (const ratio of [0, 0.35, 0.7]) {
     await scrollToRatio(page, ratio);
-    // The glide is a transition on `top`; wait for it to land before reading.
-    await page.waitForTimeout(600);
-    const highlight = await readHighlight();
-    const where = `at scroll ratio ${ratio}: ${JSON.stringify(highlight)}`;
-    expect(highlight, where).not.toBeNull();
-    expect(highlight!.centreDrift, where).toBeLessThanOrEqual(1);
-    expect(highlight!.rightDrift, where).toBeLessThanOrEqual(1);
-    seen.push(highlight!.activeIndex);
+    // The glide is a transition on `top`; poll for the landed geometry itself
+    // instead of guessing the transition's duration.
+    await expect(async () => {
+      const highlight = await readHighlight();
+      const where = `at scroll ratio ${ratio}: ${JSON.stringify(highlight)}`;
+      expect(highlight, where).not.toBeNull();
+      expect(highlight!.centreDrift, where).toBeLessThanOrEqual(1);
+      expect(highlight!.rightDrift, where).toBeLessThanOrEqual(1);
+    }).toPass();
+    seen.push((await readHighlight())!.activeIndex);
   }
   // And it actually moved, rather than agreeing with a highlight that never
   // left the first tick.
@@ -427,26 +429,31 @@ test('the highlight stays on the active tick while the rail scrolls itself', asy
   await settled(page, 90);
   await scrollToRatio(page, 1);
   await expect(page.locator('.maka-prompt-rail-tick').last()).toHaveAttribute('aria-current', 'true');
-  await page.waitForTimeout(600);
 
-  const reading = await page.evaluate(() => {
-    const rail = document.querySelector<HTMLElement>('.maka-prompt-rail')!;
-    const indicator = document.querySelector<HTMLElement>('.maka-prompt-rail-indicator')!;
-    const active = rail.querySelector<HTMLElement>('.maka-prompt-rail-tick[data-active="true"]')!;
-    const i = indicator.getBoundingClientRect();
-    const a = active.getBoundingClientRect();
-    const railBox = rail.getBoundingClientRect();
-    return {
-      railScrollTop: Math.round(rail.scrollTop),
-      centreDrift: Math.round(Math.abs(i.top + i.height / 2 - (a.top + a.height / 2))),
-      indicatorInsideRail: i.top >= railBox.top - 1 && i.bottom <= railBox.bottom + 1,
-    };
-  });
-  const where = JSON.stringify(reading);
-  // The rail really did scroll, so the highlight had something to keep up with.
-  expect(reading.railScrollTop, where).toBeGreaterThan(0);
-  expect(reading.centreDrift, where).toBeLessThanOrEqual(1);
-  expect(reading.indicatorInsideRail, where).toBe(true);
+  const readAlignment = () =>
+    page.evaluate(() => {
+      const rail = document.querySelector<HTMLElement>('.maka-prompt-rail')!;
+      const indicator = document.querySelector<HTMLElement>('.maka-prompt-rail-indicator')!;
+      const active = rail.querySelector<HTMLElement>('.maka-prompt-rail-tick[data-active="true"]')!;
+      const i = indicator.getBoundingClientRect();
+      const a = active.getBoundingClientRect();
+      const railBox = rail.getBoundingClientRect();
+      return {
+        railScrollTop: Math.round(rail.scrollTop),
+        centreDrift: Math.round(Math.abs(i.top + i.height / 2 - (a.top + a.height / 2))),
+        indicatorInsideRail: i.top >= railBox.top - 1 && i.bottom <= railBox.bottom + 1,
+      };
+    });
+  // The glide is a transition on `top`; poll for the landed geometry itself
+  // instead of guessing the transition's duration.
+  await expect(async () => {
+    const reading = await readAlignment();
+    const where = JSON.stringify(reading);
+    // The rail really did scroll, so the highlight had something to keep up with.
+    expect(reading.railScrollTop, where).toBeGreaterThan(0);
+    expect(reading.centreDrift, where).toBeLessThanOrEqual(1);
+    expect(reading.indicatorInsideRail, where).toBe(true);
+  }).toPass();
 });
 
 test('hovering a tick swells its neighbours and settles back', async ({ longTranscriptWindow: page }) => {
@@ -467,18 +474,20 @@ test('hovering a tick swells its neighbours and settles back', async ({ longTran
   // pointerover/pointerout, which do.
   const hovered = 12;
   await page.locator('.maka-prompt-rail-tick').nth(hovered).dispatchEvent('pointerover');
-  await page.waitForTimeout(500);
-
-  const swollen = await barWidths();
-  const note = JSON.stringify(swollen);
-  // A falloff, not a single fat tick: widest under the pointer, then stepping
-  // down on both sides until it meets the resting width.
-  expect(swollen[hovered], note).toBeGreaterThan(swollen[hovered - 1]!);
-  expect(swollen[hovered - 1], note).toBeGreaterThan(swollen[hovered - 2]!);
-  expect(swollen[hovered], note).toBeGreaterThan(swollen[hovered + 1]!);
-  expect(swollen[hovered + 1], note).toBeGreaterThan(swollen[hovered + 2]!);
-  expect(swollen[hovered - 3], note).toBe(rest[0]);
-  expect(swollen[hovered + 3], note).toBe(rest[0]);
+  // The swell is a width transition; poll for the settled falloff shape itself
+  // instead of guessing the transition's duration.
+  await expect(async () => {
+    const swollen = await barWidths();
+    const note = JSON.stringify(swollen);
+    // A falloff, not a single fat tick: widest under the pointer, then stepping
+    // down on both sides until it meets the resting width.
+    expect(swollen[hovered], note).toBeGreaterThan(swollen[hovered - 1]!);
+    expect(swollen[hovered - 1], note).toBeGreaterThan(swollen[hovered - 2]!);
+    expect(swollen[hovered], note).toBeGreaterThan(swollen[hovered + 1]!);
+    expect(swollen[hovered + 1], note).toBeGreaterThan(swollen[hovered + 2]!);
+    expect(swollen[hovered - 3], note).toBe(rest[0]);
+    expect(swollen[hovered + 3], note).toBe(rest[0]);
+  }).toPass();
 
   await page.evaluate((index) => {
     const tick = document.querySelectorAll('.maka-prompt-rail-tick')[index]!;
@@ -486,6 +495,7 @@ test('hovering a tick swells its neighbours and settles back', async ({ longTran
       new PointerEvent('pointerout', { bubbles: true, composed: true, relatedTarget: document.body }),
     );
   }, hovered);
-  await page.waitForTimeout(500);
-  expect(await barWidths()).toEqual(rest);
+  await expect(async () => {
+    expect(await barWidths()).toEqual(rest);
+  }).toPass();
 });
