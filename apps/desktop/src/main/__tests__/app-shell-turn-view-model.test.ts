@@ -188,6 +188,35 @@ describe('AppShell turn presentation sandbox denial', () => {
   });
 });
 
+describe('turn meta tooltip', () => {
+  const timed: StoredMessage[] = [
+    { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 0, text: 'run it' },
+    { type: 'assistant', id: 'assistant-1', turnId: 'turn-1', ts: 25_400, text: 'done', modelId: 'model-1' },
+    { type: 'turn_state', id: 'state-1', turnId: 'turn-1', ts: 25_400, status: 'completed', partialOutputRetained: false },
+  ];
+
+  it('reports the duration in whole seconds', () => {
+    // The tooltip is the turn duration's only home, and it shares the running
+    // status line's shape so a turn that read「25s」while it ran does not settle
+    // into a differently-rounded number here.
+    const info = derive(timed).footerActionsByTurn['turn-1']?.find((action) => action.id === 'info');
+
+    assert.ok(info, 'expected an info action for a turn with meta');
+    assert.equal(info.tooltip, 'model-1 · 25s');
+  });
+
+  it('omits a sub-second duration rather than reporting 0s', () => {
+    const brief: StoredMessage[] = [
+      { type: 'user', id: 'user-1', turnId: 'turn-1', ts: 0, text: 'run it' },
+      { type: 'assistant', id: 'assistant-1', turnId: 'turn-1', ts: 300, text: 'done', modelId: 'model-1' },
+      { type: 'turn_state', id: 'state-1', turnId: 'turn-1', ts: 300, status: 'completed', partialOutputRetained: false },
+    ];
+    const info = derive(brief).footerActionsByTurn['turn-1']?.find((action) => action.id === 'info');
+
+    assert.equal(info?.tooltip, 'model-1');
+  });
+});
+
 /**
  * A memoized `TurnView` compares every prop, not just `turn`. These props are
  * derived from the turns the transcript projection produced, so a turn the

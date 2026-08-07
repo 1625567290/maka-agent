@@ -1,11 +1,11 @@
 import { memo, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import { useMountedRef } from './use-mounted-ref.js';
-import { AlertOctagon, Ban, Check, Copy, GitBranch, Info, Loader2, Pencil, RefreshCcw, Timer } from './icons.js';
+import { AlertOctagon, Ban, Check, Copy, GitBranch, Info, Pencil, RefreshCcw, Timer } from './icons.js';
 import { type ClipboardCopyPhase, useClipboardCopyFeedback } from './clipboard-feedback.js';
 import { Markdown } from './markdown.js';
-import { turnAbortMarkerLabel } from './chat-display-helpers.js';
+import { formatTurnDuration, turnAbortMarkerLabel } from './chat-display-helpers.js';
 import { redactSecrets } from './redact.js';
-import { isProgressiveStreamingEnabled } from './streaming-presentation.js';
+import { isProgressiveStreamingEnabled, isTimeDrivenMotionEnabled } from './streaming-presentation.js';
 import {
   Badge,
   Button as UiButton,
@@ -25,7 +25,6 @@ import { useStreamingText } from '@astryxdesign/core/hooks';
 import { ChatReasoning } from './astryx-chat-reasoning.js';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
 import {
-  isInFlightToolStatus,
   SKILL_INVOCATION_TOKEN_SOURCE,
   type AttachmentRef,
   type InlineReference,
@@ -36,7 +35,7 @@ import type { TurnTimelineItem, TurnViewModel } from './materialize.js';
 import { foldTimeline, type FoldedTimelineChild } from './timeline-fold.js';
 import { AttachmentKindIcon } from './attachment-kinds.js';
 import { QuoteRefChip } from './quote-ref-chip.js';
-import { Marker, markerVariants, TextShimmer } from './primitives/chat.js';
+import { Marker, markerVariants } from './primitives/chat.js';
 import { ToolTrow } from './tool-activity.js';
 import { formatBytes } from './tool-activity/preview-utils.js';
 import { useUiLocale } from './locale-context.js';
@@ -375,8 +374,15 @@ export const TurnView = memo(function TurnView(props: {
    */
   liveStreaming?: {
     onStreamingSettled?: (messageId?: string) => void;
-    processingIndicator?: boolean;
-    continuingIndicator?: boolean;
+    /**
+     * Whether to show the running status line at the tail of the live turn.
+     *
+     * It stays up for the WHOLE turn, not just the wait before the first token.
+     * The cue it replaces was gated on the turn having no live content yet, so
+     * it vanished the moment a tool started — exactly the stretch where a turn
+     * looks abandoned and the user most needs to see it is still working.
+     */
+    runningStatus?: boolean;
     providerRetry?: ProviderRetryEvent;
   };
   /**
@@ -396,13 +402,6 @@ export const TurnView = memo(function TurnView(props: {
   // this is the live streaming tail (a thinking-only / textless streaming turn
   // has an empty committed timeline but must still show its live answer block).
   const showAssistantMessage = turn.timeline.length > 0 || !!props.liveStreaming;
-  const hasLiveTimelineContent = turn.timeline.some((item) =>
-    item.kind === 'thinking'
-      ? item.live === true
-      : item.kind === 'text'
-        ? item.live === true
-        : item.items.some((tool) => isInFlightToolStatus(tool.status)),
-  );
   // #1307: the collapsed "Processing" fold is derived at render time from the
   // flat timeline. Settled turn identities are stable (memoized projections),
   // so this only recomputes for the turn whose timeline actually changed.
@@ -581,10 +580,7 @@ export const TurnView = memo(function TurnView(props: {
                 {props.liveStreaming.providerRetry ? (
                   <ModelProviderRetryIndicator retry={props.liveStreaming.providerRetry} />
                 ) : (
-                  <>
-                    {props.liveStreaming.processingIndicator && !hasLiveTimelineContent && <ModelProcessingIndicator />}
-                    {props.liveStreaming.continuingIndicator && !props.liveStreaming.processingIndicator && !hasLiveTimelineContent && <ModelContinuingIndicator />}
-                  </>
+                  props.liveStreaming.runningStatus && <TurnRunningStatus startedAt={turn.startedAt} />
                 )}
               </>
             )}
@@ -789,29 +785,97 @@ const STATUS_FOOTER_ICON: Record<TurnFooterActionMeta['id'], ReactNode> = {
   info: <Info size={FOOTER_ICON_SIZE} aria-hidden="true" />,
 };
 
-export function ModelProcessingIndicator() {
-  const copy = getConversationCopy(useUiLocale()).messages;
-  return (
-    <div className="maka-turn-processing" role="status" aria-live="polite">
-      <Loader2
-        size={16}
-        aria-hidden="true"
-        className="maka-turn-processing-spinner"
-      />
-      <TextShimmer active className="maka-turn-indicator-text">{copy.processing}</TextShimmer>
-    </div>
-  );
-}
+/** How long one working phrase holds before the next fades in. */
+const WORKING_PHRASE_INTERVAL_MS = 20_000;
+/** Must match the `.maka-turn-working-phrase` transition duration in styles.css. */
+const WORKING_PHRASE_FADE_MS = 300;
+const ELAPSED_TICK_MS = 1_000;
 
-export function ModelContinuingIndicator() {
+/**
+ * The live turn's running status line: a working phrase that rotates every 20s,
+ * and the elapsed clock beside it.
+ *
+ * The elapsed time is what actually carries the message — it is the only part
+ * that proves the harness and the model are still moving, and it is why the
+ * phrase pool can afford to be playful rather than informative. Both are driven
+ * by the clock, so this component owns its own timers and re-renders only
+ * itself: hoisting the seconds into the turn (let alone the shell) would repaint
+ * the whole transcript once a second while an answer streams into it.
+ *
+ * `startedAt` is the turn's own first-message timestamp, so the clock measures
+ * the wait the user actually experienced — from pressing send, not from
+ * whenever the model's first event happened to land. It is absent only on the
+ * rare fallback path where streaming beat the user turn into the transcript;
+ * the phrase then stands alone.
+ */
+export function TurnRunningStatus(props: { startedAt?: number }) {
   const copy = getConversationCopy(useUiLocale()).messages;
+  const phrases = copy.workingPhrases;
+  const { startedAt } = props;
+  const rootRef = useRef<HTMLDivElement>(null);
+  // Undefined until an effect measures it, which is also what keeps a static
+  // render deterministic: the clock is a client-only value, so server markup
+  // and the first paint carry the phrase alone.
+  const [elapsedMs, setElapsedMs] = useState<number | undefined>(undefined);
+  const [phraseIndex, setPhraseIndex] = useState(0);
+  const [phraseFading, setPhraseFading] = useState(false);
+
+  useEffect(() => {
+    // Frozen (fixture / reduced motion) the clock is dropped rather than
+    // pinned: any value it could show is a real wall-clock difference, so a
+    // capture taken a second later would differ from this one. The gate needs
+    // this node because the freeze can be declared on any ancestor.
+    if (startedAt === undefined || !isTimeDrivenMotionEnabled(rootRef.current)) return;
+    setElapsedMs(Math.max(0, Date.now() - startedAt));
+    const tick = window.setInterval(() => {
+      setElapsedMs(Math.max(0, Date.now() - startedAt));
+    }, ELAPSED_TICK_MS);
+    return () => window.clearInterval(tick);
+  }, [startedAt]);
+
+  useEffect(() => {
+    if (phrases.length < 2 || !isTimeDrivenMotionEnabled(rootRef.current)) return;
+    let fadeTimer: number | undefined;
+    const rotate = window.setInterval(() => {
+      setPhraseFading(true);
+      fadeTimer = window.setTimeout(() => {
+        setPhraseIndex((current) => (current + 1) % phrases.length);
+        setPhraseFading(false);
+      }, WORKING_PHRASE_FADE_MS);
+    }, WORKING_PHRASE_INTERVAL_MS);
+    return () => {
+      window.clearInterval(rotate);
+      if (fadeTimer !== undefined) window.clearTimeout(fadeTimer);
+    };
+  }, [phrases.length]);
+
   return (
-    <div
-      className="maka-turn-continuing"
-      role="status"
-      aria-live="polite"
-    >
-      <span className="maka-turn-indicator-text">{copy.continuing}</span>
+    /* This row runs no animation of its own. Both idioms above it are already
+       spoken for — a running tool card spins, and `ChatReasoning` shimmers its
+       label while reasoning streams — and Astryx's guidance is not to stack a
+       second instance of either in one view. What moves here is the content:
+       the phrase every 20s, the seconds every second. The seconds are the
+       better proof anyway, because a spinner turns and a shimmer sweeps at the
+       same rate whether or not anything is happening. */
+    <div className="maka-turn-processing" role="status" aria-label={copy.processing} ref={rootRef}>
+      {/* Every visible token here moves on the clock. Announcing either would
+          talk over the answer being streamed beside it, so the row's label is
+          its whole accessible name and the text is decoration. */}
+      <span className="maka-turn-indicator-text" aria-hidden="true">
+        {/* No sweep here. Astryx already owns that idiom: `ChatReasoning`
+            shimmers its own label while reasoning streams, a few pixels above
+            this row. Running a second one, at a second speed, made the two
+            read as competing rather than as one turn working. */}
+        <span className="maka-turn-working-phrase" data-fading={phraseFading || undefined}>
+          {phrases[phraseIndex] ?? copy.processing}
+        </span>
+        {elapsedMs !== undefined && (
+          <>
+            <span className="maka-turn-status-separator">·</span>
+            <span className="maka-turn-elapsed">{formatTurnDuration(elapsedMs)}</span>
+          </>
+        )}
+      </span>
     </div>
   );
 }

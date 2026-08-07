@@ -166,7 +166,10 @@ function deriveTurnPresentationEntry(input: {
   const { turn, lineageEntry, pendingForTurn, uiLocale } = input;
   const metaParts: string[] = [];
   if (turn.modelId) metaParts.push(turn.modelId);
-  if (turn.durationMs && turn.durationMs > 0) metaParts.push(formatTurnDuration(turn.durationMs));
+  // Below a second there is nothing to report: a turn's duration counts whole
+  // seconds, so a 300ms turn would read「0s」— a number that says less than no
+  // number at all.
+  if (turn.durationMs && turn.durationMs >= 1_000) metaParts.push(formatTurnDuration(turn.durationMs));
   if (turn.tokens?.costUsd && turn.tokens.costUsd > 0) metaParts.push(`$${turn.tokens.costUsd.toFixed(4)}`);
   const metaSummary = metaParts.length > 0 ? metaParts.join(' · ') : undefined;
   const footerActions = deriveTurnFooterActions({

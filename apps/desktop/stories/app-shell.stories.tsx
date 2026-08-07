@@ -477,6 +477,7 @@ export const StreamingTurn: Story = {
     <ComposedShell
       session={{ status: 'running', streaming: true }}
       chat={{
+        runningStatus: true,
         messages: [
           user('msg-s-1', 'turn-s', 3, '顶层布局的 story 怎么做最稳？'),
           { type: 'turn_state', id: 'state-s', turnId: 'turn-s', ts: NOW - 30_000, status: 'running', partialOutputRetained: false },
@@ -486,6 +487,44 @@ export const StreamingTurn: Story = {
             stepId: 'msg-assistant-s',
             text: { text: '直接挂载 Astryx AppShell，通过官方插槽组合真实产品子组件，只隔离 IPC。', truncated: false, complete: false },
             tools: [],
+          }],
+        },
+      }}
+    />
+  ),
+};
+
+// Real path: ask for something long-running → a tool has been going for
+// minutes and the model has produced nothing to look at. The cue this replaced
+// was hidden exactly here — it only covered the gap before the first content
+// event — so this state used to offer no evidence the harness was still
+// working.
+//
+// What renders is the frozen form: the shell frame carries the e2e-fixture
+// attribute, and the elapsed clock is dropped rather than pinned under it,
+// because any value it could print is a real wall-clock difference that would
+// differ between two captures. In the app the same row reads
+// "正在琢磨… · 2m 1s", with the phrase swapping every 20s.
+export const RunningStatusDuringToolRun: Story = {
+  render: () => (
+    <ComposedShell
+      session={{ status: 'running', streaming: true }}
+      chat={{
+        runningStatus: true,
+        messages: [
+          user('msg-t-1', 'turn-t', 2, '把整个测试套件跑一遍，看看那三个失败用例是不是同一个原因。'),
+          { type: 'turn_state', id: 'state-t', turnId: 'turn-t', ts: NOW - 120_000, status: 'running', partialOutputRetained: false },
+        ],
+        liveTurn: {
+          turnId: 'turn-t', phase: 'streamed', steps: [{
+            stepId: 'msg-assistant-t',
+            tools: [{
+              toolUseId: 'tool-t-1',
+              toolName: 'Bash',
+              activityKind: 'command',
+              status: 'running',
+              args: { command: 'npm test' },
+            }],
           }],
         },
       }}
