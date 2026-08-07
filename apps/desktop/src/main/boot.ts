@@ -50,7 +50,9 @@ import {
   buildParentAgentTools,
   listRunnableBuiltinAgentDefinitions,
   listInvocableSkills,
+  renderAgentSwarmSupervisorWake,
   prepareSkillInvocationMessage,
+  shouldWakeAgentSwarmSupervisor,
   resolveSkillDiscoveryPaths,
 } from '@maka/runtime';
 import type {
@@ -1023,6 +1025,8 @@ agentGraphSupervisorWakeCoordinator = new AgentGraphSupervisorWakeCoordinator({
     }
     return runs[0]?.status ?? 'missing';
   },
+  shouldWake: shouldWakeAgentSwarmSupervisor,
+  renderWake: renderAgentSwarmSupervisorWake,
   newId: randomUUID,
   onError: (rootSessionId) => {
     emitSessionsChanged('status-change', rootSessionId);
@@ -1037,6 +1041,9 @@ agentGraphCoordinator = new AgentGraphCoordinator({
   newId: randomUUID,
   onReconciliation: (rootSessionId, result) => {
     agentGraphSupervisorWakeCoordinator.notify(rootSessionId, result);
+  },
+  onCheckpoint: (rootSessionId) => {
+    agentGraphSupervisorWakeCoordinator.notify(rootSessionId);
   },
 });
 let settingsIpc: SettingsIpcHandle | undefined;
