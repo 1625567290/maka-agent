@@ -493,6 +493,8 @@ export interface CreateConnectionInput {
   providerType: ProviderType;
   baseUrl?: string;
   defaultModel?: string;
+  /** When omitted, falls back to the default model alone. */
+  enabledModelIds?: string[];
   apiKey?: string;
   extras?: Record<string, unknown>;
 }
