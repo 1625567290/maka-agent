@@ -30,7 +30,7 @@ import {
 } from '@maka/core';
 import { SettingsSurface } from '../../src/renderer/settings/settings-surface';
 import { createUiLocaleUpdateGate } from '../../src/renderer/settings/ui-locale-update-gate';
-import type { ConnectionsBridge } from '../../src/renderer/settings/ProvidersPanel';
+import type { ConnectionsBridge } from '../../src/renderer/settings/providers-panel';
 import { withScopedMakaBridge } from '../maka-bridge';
 const STORY_PLATFORM = 'darwin' as const;
 
@@ -626,6 +626,18 @@ const makaBridge = {
   },
   e2eFixture: {
     getState: async () => null,
+  },
+  // Appearance mounts CustomPetSettingsSection, which reads and subscribes on
+  // window.maka.pets. Without this fixture the catalog story throws on mount
+  // (subscribeChanges of undefined) and smoke:storybook fails the page.
+  pets: {
+    list: async () => [],
+    getSelection: async () => null,
+    select: async () => ({ ok: true as const, selectedPetId: null }),
+    remove: async () => ({ ok: true as const, removed: false }),
+    importLocalDirectory: async () => ({ ok: false as const, reason: 'cancelled' as const }),
+    readSpriteSheet: async () => ({ ok: false as const, reason: 'not_found' as const }),
+    subscribeChanges: () => () => undefined,
   },
 } satisfies Record<string, unknown>;
 
