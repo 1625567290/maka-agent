@@ -104,6 +104,12 @@ const DYNAMIC_STYLE_HOOKS = new Set([
   // The column resize handle's hit area (Resizable/ResizeHandle themeProps).
   // sidebar.css styles the sidenav handle's own line through it.
   'astryx-resize-handle',
+  // Astryx's shared floating-layer surface. Unlike the entries above this is
+  // not a themeProps class — Astryx labels no hook there — so it is added by
+  // patches/@astryxdesign+core+0.3.0.patch purely so DESIGN.md §5's Floating
+  // Recipe has one place to attach (astryx-mount.css). It leaves with the
+  // patch; see patches/README.md for the exit condition.
+  'astryx-layer-surface',
   // A form field's outer box (Field themeProps). module-shell.css gives up the
   // vendor's tuned control widths inside the module page's control bar once the
   // column is narrower than they are.
@@ -207,6 +213,22 @@ const RESERVED_SCALE_TOKENS = new Set([
   '--elevation-raised',
   '--elevation-overlay',
   '--elevation-drag',
+  // Tinted status surfaces (visual system 2.0 T4). Four statuses x fill/border,
+  // plus a reserved strong tier. These rungs are unconsumed TODAY only because
+  // no current banner happens to be that status at that weight -- and a family
+  // with holes in it is the failure this family exists to end: fourteen call
+  // sites each hand-rolled an alpha precisely because there was no complete set
+  // to consume. A half-defined family sends the next author back to writing
+  // `oklch(from var(--info) l c h / 0.07)`, and it breaks the regeneration
+  // guarantee, since a status recolour can only flow through members that
+  // exist. The strong tier is deliberately reserved rather than convenient:
+  // DESIGN.md restricts it to data-destruction and irreversible warnings.
+  '--success-wash-border',
+  '--info-wash',
+  '--info-wash-border',
+  '--destructive-wash-border',
+  '--destructive-wash-strong',
+  '--destructive-wash-strong-border',
   // Control-height scale, 20/24/28/32/36/40 on the 4px ruler.
   '--h-control-xl',
   '--h-control-2xl',
