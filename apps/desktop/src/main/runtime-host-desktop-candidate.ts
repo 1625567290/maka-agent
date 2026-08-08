@@ -1,5 +1,9 @@
 import type { IpcMain } from "electron";
-import type { SessionChangedEvent, SessionChangedReason } from "@maka/core";
+import type {
+  CreateSessionRequestInput,
+  SessionChangedEvent,
+  SessionChangedReason,
+} from "@maka/core";
 import type { BotRegistry } from "@maka/runtime";
 import {
   connectOrSpawnRuntimeHost,
@@ -28,8 +32,12 @@ import { registerRuntimeHostSessionCatalogIpc } from "./runtime-host-session-cat
 import {
   registerRuntimeHostSessionDomainsIpc,
   type RuntimeHostSessionDomainsIpcDeps,
+  type RuntimeHostSessionDomainsIpcHandle,
 } from "./runtime-host-session-domains-ipc-main.js";
-import { registerRuntimeHostSessionExecutionIpc } from "./runtime-host-session-execution-ipc-main.js";
+import {
+  registerRuntimeHostSessionExecutionIpc,
+  type RuntimeHostSessionExecutionIpcDeps,
+} from "./runtime-host-session-execution-ipc-main.js";
 import { RuntimeHostSessionObserver } from "./runtime-host-session-observer.js";
 
 type CandidateIpcMain = Pick<IpcMain, "handle" | "removeHandler">;
@@ -46,6 +54,9 @@ export interface DesktopRuntimeHostCandidateDeps {
     readonly cwd: string;
     readonly projectId?: string | null;
   }>;
+  readonly resolveSessionCreateProject: (
+    input: Pick<CreateSessionRequestInput, "cwd" | "projectId">,
+  ) => Promise<{ readonly cwd: string; readonly projectId?: string | null }>;
   readonly emitSessionsChanged: (
     reason: SessionChangedReason,
     sessionId?: string,
@@ -55,12 +66,19 @@ export interface DesktopRuntimeHostCandidateDeps {
   readonly completeComputerUseTurn: (
     sessionId: string,
   ) => void | Promise<void>;
+  readonly e2eInteractions?: RuntimeHostSessionExecutionIpcDeps["e2eInteractions"];
   readonly sendToRenderer?: RuntimeHostSessionDomainsIpcDeps["sendToRenderer"];
   readonly onError?: RuntimeHostSessionDomainsIpcDeps["onError"];
   readonly newId?: () => string;
   readonly now?: () => number;
   readonly createSessionCopyCleanup: (input: {
     removeSession: (sessionId: string) => Promise<SessionCopyCleanupDisposition>;
+    resumeSessionCopy: (input: {
+      sessionId: string;
+      kind: 'branch' | 'revision';
+      sourceSessionId: string;
+      sourceTurnId: string;
+    }) => Promise<void>;
   }) => SessionCopyCleanupAuthority;
   readonly registerClientIpc?: (
     client: DesktopRuntimeHostClient,
@@ -106,6 +124,7 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
   readonly #ipc: ScopedIpcMain;
   readonly #botIncoming: BotIncomingMainService;
   readonly #closeNativeCapabilities: () => Promise<void>;
+  readonly #closeSessionDomains: () => Promise<void>;
   readonly #disposeClientIpc: (() => void | Promise<void>) | undefined;
   readonly #hasRegisteredCapabilities: () => boolean;
   readonly #stopSession: (sessionId: string) => Promise<void>;
@@ -117,6 +136,7 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
     ipc: ScopedIpcMain;
     botIncoming: BotIncomingMainService;
     closeNativeCapabilities: () => Promise<void>;
+    closeSessionDomains: () => Promise<void>;
     disposeClientIpc: (() => void | Promise<void>) | undefined;
     connectionClosed: Promise<void>;
     hasRegisteredCapabilities: () => boolean;
@@ -128,6 +148,7 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
     this.#ipc = input.ipc;
     this.#botIncoming = input.botIncoming;
     this.#closeNativeCapabilities = input.closeNativeCapabilities;
+    this.#closeSessionDomains = input.closeSessionDomains;
     this.#disposeClientIpc = input.disposeClientIpc;
     this.#hasRegisteredCapabilities = input.hasRegisteredCapabilities;
     this.#stopSession = input.stopSession;
@@ -145,13 +166,14 @@ class DesktopRuntimeHostCandidateImpl implements DesktopRuntimeHostCandidate {
   }
 
   async #close(): Promise<void> {
+    const domainResults = await Promise.allSettled([this.#closeSessionDomains()]);
     const results = await Promise.allSettled([
       this.#botIncoming.close(),
       this.#closeNativeCapabilities(),
       Promise.resolve().then(() => this.#disposeClientIpc?.()),
       this.#closeConnection(),
     ]);
-    const failed = results.find(
+    const failed = [...domainResults, ...results].find(
       (result): result is PromiseRejectedResult => result.status === "rejected",
     );
     if (failed) throw failed.reason;
@@ -267,12 +289,29 @@ export async function createDesktopRuntimeHostCandidate(
     if (failed) throw failed.reason;
   };
   let observer: RuntimeHostSessionObserver | undefined;
+  let closeSessionDomains: (() => Promise<void>) | undefined;
   let disposeClientIpc: (() => void | Promise<void>) | undefined;
   let capabilitiesRegistered = false;
   try {
-    const domains = registerRuntimeHostSessionDomainsIpc(
+    let domains: RuntimeHostSessionDomainsIpcHandle | undefined;
+    const sessionObserver = new RuntimeHostSessionObserver({
+      client,
+      emitSessionsChanged: (reason, sessionId, extra) =>
+        deps.emitSessionsChanged(reason, sessionId, extra),
+      emitSessionDomainChanged: (change) => domains?.sessionDomainChanged(change),
+      emitRuntimeResourcePtyData: (event) => domains?.runtimeResourcePtyData(event),
+      emitAgentGraphChanged: (event) => domains?.agentGraphChanged(event),
+      onWatchedTurnFinished: (sessionId, outcome) =>
+        outcome === "completed"
+          ? deps.completeComputerUseTurn(sessionId)
+          : deps.nativeCapabilities.releaseComputerUseSession(sessionId),
+      ...(deps.now ? { now: deps.now } : {}),
+    });
+    observer = sessionObserver;
+    domains = registerRuntimeHostSessionDomainsIpc(
       {
         client,
+        sessionObserver,
         emitModeChanged: deps.emitModeChanged,
         ...(deps.sendToRenderer ? { sendToRenderer: deps.sendToRenderer } : {}),
         ...(deps.onError ? { onError: deps.onError } : {}),
@@ -281,19 +320,7 @@ export async function createDesktopRuntimeHostCandidate(
       },
       ipc,
     );
-    const sessionObserver = new RuntimeHostSessionObserver({
-      client,
-      emitSessionsChanged: (reason, sessionId, extra) =>
-        deps.emitSessionsChanged(reason, sessionId, extra),
-      emitSessionDomainChanged: domains.sessionDomainChanged,
-      emitAgentGraphChanged: domains.agentGraphChanged,
-      onWatchedTurnFinished: (sessionId, outcome) =>
-        outcome === "completed"
-          ? deps.completeComputerUseTurn(sessionId)
-          : deps.nativeCapabilities.releaseComputerUseSession(sessionId),
-      ...(deps.now ? { now: deps.now } : {}),
-    });
-    observer = sessionObserver;
+    closeSessionDomains = domains.close;
     const watchComputerUseTurn = (sessionId: string, turnId: string): void => {
       void sessionObserver
         .watchTurn(sessionId, turnId)
@@ -345,11 +372,25 @@ export async function createDesktopRuntimeHostCandidate(
         deps.emitSessionsChanged("deleted", sessionId);
         return disposition;
       },
+      resumeSessionCopy: async ({ sessionId, kind, sourceSessionId, sourceTurnId }) => {
+        await client.copySession(kind, {
+          sourceSessionId,
+          targetSessionId: sessionId,
+          sourceTurnId,
+        });
+      },
     });
+    const registeredClientIpc = deps.registerClientIpc?.(client, ipc, {
+      refreshClientCapabilities,
+    });
+    disposeClientIpc =
+      typeof registeredClientIpc === "function"
+        ? registeredClientIpc
+        : undefined;
     registerRuntimeHostSessionCatalogIpc(
       {
         client,
-        workspaceRoot: deps.workspaceRoot,
+        resolveCreateProject: deps.resolveSessionCreateProject,
         emitSessionsChanged: deps.emitSessionsChanged,
         releaseSessionResources: releaseNativeSession,
         sessionCopyCleanup,
@@ -366,17 +407,15 @@ export async function createDesktopRuntimeHostCandidate(
         stat: deps.stat,
         resizeImage: deps.resizeImage,
         beforeStop: deps.nativeCapabilities.releaseComputerUseSession,
+        sessionCopyCleanup,
+        onBackgroundError: (error) => deps.onError?.(error),
+        ...(deps.e2eInteractions
+          ? { e2eInteractions: deps.e2eInteractions }
+          : {}),
         ...(deps.newId ? { newId: deps.newId } : {}),
       },
       ipc,
     );
-    const registeredClientIpc = deps.registerClientIpc?.(client, ipc, {
-      refreshClientCapabilities,
-    });
-    disposeClientIpc =
-      typeof registeredClientIpc === "function"
-        ? registeredClientIpc
-        : undefined;
     const botIncoming = createBotIncomingMainService({
       botRegistry: deps.botRegistry,
       sessions: createRuntimeHostBotSessionAdapter({
@@ -392,6 +431,7 @@ export async function createDesktopRuntimeHostCandidate(
       ipc,
       botIncoming,
       closeNativeCapabilities,
+      closeSessionDomains: domains.close,
       disposeClientIpc,
       connectionClosed: connection.closed,
       hasRegisteredCapabilities: () => capabilitiesRegistered,
@@ -400,6 +440,7 @@ export async function createDesktopRuntimeHostCandidate(
   } catch (error) {
     ipc.close();
     await Promise.resolve(disposeClientIpc?.()).catch(() => undefined);
+    await closeSessionDomains?.().catch(() => undefined);
     await observer?.close().catch(() => undefined);
     await client.close().catch(() => undefined);
     await closeNativeCapabilities().catch(() => undefined);

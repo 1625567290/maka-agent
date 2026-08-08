@@ -210,6 +210,7 @@ async function withE2eWindow(
     e2eFixtureScenario,
     locale,
     platform,
+    showWindow,
     invocableSkills,
     gitReviewExtraFiles,
     extraConnectionCount,
@@ -220,6 +221,8 @@ async function withE2eWindow(
     locale?: 'zh' | 'en';
     /** #1312: force app:info's platform so the window boots natively into that platform's `data-os` cascade. */
     platform?: 'darwin' | 'win32' | 'linux';
+    /** Show fixtures whose contract depends on compositor-paced frames. */
+    showWindow?: boolean;
     invocableSkills?: boolean;
     gitReviewExtraFiles?: number;
     extraConnectionCount?: number;
@@ -251,9 +254,9 @@ async function withE2eWindow(
         scenario: e2eFixtureScenario,
         locale,
         platform,
-        // xvfb throttles a hidden window's compositor to ~1fps; only that
-        // isolated display gets a visible window.
-        showWindow: isCiLinuxDisplay(),
+        // xvfb throttles a hidden window's compositor to ~1fps. Geometry
+        // fixtures opt in locally; every fixture is visible on isolated CI X.
+        showWindow: showWindow || isCiLinuxDisplay(),
       }),
     });
     app.on('console', (message) => {

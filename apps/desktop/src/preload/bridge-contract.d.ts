@@ -387,6 +387,7 @@ export interface MakaBridge {
       sessionId: string;
       ref: string;
     }): Promise<ShellRunPtySnapshot | null>;
+    detach(input: { sessionId: string; ref: string }): Promise<void>;
     start(sessionId: string): Promise<ShellRunUpdate>;
     write(input: {
       sessionId: string;

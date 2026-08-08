@@ -110,6 +110,7 @@ export type {
   TurnRunStatus,
   TurnSnapshot,
   TurnStartInput,
+  TurnStartResult,
   TurnStopInput,
 } from './turn.js';
 export * from './connection-effects.js';

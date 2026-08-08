@@ -445,6 +445,9 @@ const makaBridge = {
     }): Promise<ShellRunPtySnapshot | null> {
       return ipcRenderer.invoke('shell-runs:attach', input);
     },
+    detach(input: { sessionId: string; ref: string }): Promise<void> {
+      return ipcRenderer.invoke('shell-runs:detach', input);
+    },
     start(sessionId: string): Promise<ShellRunUpdate> {
       return ipcRenderer.invoke('shell-runs:start', sessionId);
     },
