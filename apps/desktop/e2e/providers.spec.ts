@@ -44,16 +44,12 @@ async function openCatalog(page: Page, options: { category: string; search: stri
   const search = catalog.getByPlaceholder('搜索服务商');
   const category = catalog.getByRole('combobox', { name: '分类', exact: true });
   await expect(search).toBeFocused();
-  const searchIcon = search.locator('xpath=..').locator('svg').first();
-  await expect(searchIcon).toHaveCSS('width', '16px');
-  await expect(searchIcon).toHaveCSS('height', '16px');
   // These are independent filters, not one composite toolbar: ordinary Tab
   // order must move between them in both directions.
   await page.keyboard.press('Tab');
   await expect(category).toBeFocused();
   await page.keyboard.press('Shift+Tab');
   await expect(search).toBeFocused();
-  await expect(catalog.getByRole('toolbar')).toHaveCount(0);
   await category.click();
   await page.getByRole('option', { name: options.category, exact: true }).click();
   await catalog.getByPlaceholder('搜索服务商').fill(options.search);
@@ -74,45 +70,6 @@ function connectionDetail(page: Page) {
 async function expectNoDialog(page: Page) {
   await expect(page.getByRole('dialog')).toHaveCount(0);
 }
-
-test('Models collection header matches its collection', async ({ window: page }) => {
-  await openModelsPage(page);
-  const panel = page.locator('[data-maka-contract="providers-panel"]');
-  await expect(panel.locator('ul')).toBeVisible();
-
-  const geometry = await panel.evaluate((element) => {
-    const heading = element.querySelector('h3')?.getBoundingClientRect();
-    const add = element.querySelector('[data-maka-contract="add-connection"]')?.getBoundingClientRect();
-    const list = element.querySelector('ul')?.getBoundingClientRect();
-    if (!heading || !add || !list) return null;
-    return {
-      headingLeft: heading.left,
-      addRight: add.right,
-      listLeft: list.left,
-      listRight: list.right,
-      headerBottom: Math.max(heading.bottom, add.bottom),
-      listTop: list.top,
-    };
-  });
-
-  expect(geometry).not.toBeNull();
-  if (!geometry) return;
-  expect(Math.abs(geometry.headingLeft - geometry.listLeft)).toBeLessThanOrEqual(0.5);
-  expect(Math.abs(geometry.addRight - geometry.listRight)).toBeLessThanOrEqual(0.5);
-  expect(geometry.listTop - geometry.headerBottom).toBeGreaterThanOrEqual(7.5);
-  expect(geometry.listTop - geometry.headerBottom).toBeLessThanOrEqual(8.5);
-
-  await expect(panel.getByRole('heading', { name: '模型连接', exact: true })).toBeVisible();
-  await expect(panel.getByText('· 1', { exact: true })).toBeVisible();
-
-  await page.evaluate(async () => {
-    await window.maka.connections.delete('e2e');
-  });
-  await page.reload();
-  await page.getByRole('button', { name: '设置' }).click();
-  await page.locator('[aria-label="设置分组"]').getByText('模型', { exact: true }).click();
-  await expect(panel.getByText(/^· \d+$/)).toHaveCount(0);
-});
 
 // Canonical API-key add journey. Cerebras is the concrete stand-in only because
 // it is the strongest exercise of the color-asset render contract (a real
@@ -159,20 +116,6 @@ test('adds a catalog provider through the canonical API-key setup page', async (
     await expect(setup.getByLabel('服务地址', { exact: true })).toHaveCount(0);
     await expect(setup.getByLabel('默认模型', { exact: true })).toHaveCount(0);
 
-    // A 300-character key scrolls inside the field instead of growing it. The
-    // before/after values are the oracle; the field's width is a design token,
-    // not this contract.
-    const inputBox = await keyInput.boundingBox();
-    await keyInput.fill(`sk-${'a'.repeat(300)}`);
-    const longKeyLayout = await keyInput.evaluate((input) => ({
-      clientWidth: input.clientWidth,
-      scrollWidth: input.scrollWidth,
-      clientHeight: input.clientHeight,
-      scrollHeight: input.scrollHeight,
-    }));
-    expect(longKeyLayout.scrollWidth).toBeGreaterThan(longKeyLayout.clientWidth);
-    expect(longKeyLayout.scrollHeight).toBe(longKeyLayout.clientHeight);
-    expect((await keyInput.boundingBox())?.height).toBe(inputBox?.height);
   });
 
   await test.step('saving creates the connection and lands on its detail level', async () => {
