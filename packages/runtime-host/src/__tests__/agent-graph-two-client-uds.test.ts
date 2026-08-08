@@ -26,6 +26,9 @@ import { SessionContinuityCoordinator } from '../server/session-continuity-coord
 
 const ROOT_SESSION_ID = 'root-1';
 const GRAPH_ID = agentGraphIdForRootSession(ROOT_SESSION_ID);
+// Injected client liveness cadence: the fake authority's slow stop() holds a
+// request past probe cycles measured in this unit instead of the real 2s one.
+const LIVENESS_INTERVAL_MS = 100;
 const PROTOCOL = {
   min: RUNTIME_HOST_PROTOCOL_VERSION,
   max: RUNTIME_HOST_PROTOCOL_VERSION,
@@ -71,6 +74,20 @@ test('two Clients query and control one Agent graph through Session invalidation
       };
     },
   });
+  // Two probe round-trips observed while the stop request is pending resolve
+  // the fake's stopGate. The observer is wired only onto the final TUI
+  // connection that issues agent.graph.stop, so no other connection's slow
+  // query could ever satisfy the counter.
+  let livenessProbes = 0;
+  let markProbesCrossed!: () => void;
+  const probeWindowCrossed = new Promise<void>((resolve) => {
+    markProbesCrossed = resolve;
+  });
+  const onLivenessProbe = () => {
+    livenessProbes += 1;
+    if (livenessProbes >= 2) markProbesCrossed();
+  };
+  authority.stopGate = probeWindowCrossed;
   let desktop: RuntimeHostConnection | undefined;
   let tui: RuntimeHostConnection | undefined;
   let subscription: RuntimeHostSessionSubscription | undefined;
@@ -100,7 +117,7 @@ test('two Clients query and control one Agent graph through Session invalidation
       'active',
     );
 
-    tui = await connect(root, 'tui');
+    tui = await connect(root, 'tui', onLivenessProbe);
     const stopped = await tui.request('agent.graph.stop', { rootSessionId: ROOT_SESSION_ID });
     assert.deepEqual(stopped, { rootSessionId: ROOT_SESSION_ID, graphId: GRAPH_ID });
     assert.equal(authority.stopCount, 1);
@@ -149,8 +166,13 @@ class FakeAgentGraphAuthority implements GraphAuthority {
     return inspection(this.#snapshot);
   }
 
+  /** Resolved by the test once two client liveness probes have observably
+   *  round-tripped, so the pending agent.graph.stop request provably crosses
+   *  probe cycles — causal ordering, no fixed timing at all. */
+  stopGate: Promise<void> = Promise.resolve();
+
   async stop(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    await this.stopGate;
     this.stopCount += 1;
     this.#snapshot.status = 'stopped';
     for (const listener of this.#listeners) {
@@ -172,8 +194,15 @@ class FakeAgentGraphAuthority implements GraphAuthority {
 async function connect(
   rootPath: string,
   surface: 'desktop' | 'tui',
+  onLivenessProbe?: () => void,
 ): Promise<RuntimeHostConnection> {
-  const result = await connectRuntimeHost({ rootPath, surface, protocol: PROTOCOL });
+  const result = await connectRuntimeHost({
+    rootPath,
+    surface,
+    protocol: PROTOCOL,
+    livenessIntervalMs: LIVENESS_INTERVAL_MS,
+    onLivenessProbe,
+  });
   assert.equal(result.kind, 'connected');
   if (result.kind !== 'connected') throw new Error('Runtime Host did not accept the Client');
   return result.connection;
