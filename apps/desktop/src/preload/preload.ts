@@ -14,6 +14,7 @@ import type {
   WindowCommand,
   PetPackChangedEvent,
 } from './bridge-contract.js';
+import type { ExternalSessionImportIpcResult } from './external-session-import-result.js';
 import type {
   ConnectionEvent,
   ConnectionTestResult,
@@ -53,6 +54,7 @@ import type {
   UsageRange,
   UsageStats,
   E2eFixtureState,
+  ExternalSessionSummary,
   GitReviewReadResult,
   GitReviewMutationAction,
   GitReviewMutationResult,
@@ -395,6 +397,25 @@ const makaBridge = {
     },
     abandonSessionCopy(sessionId: string): Promise<void> {
       return ipcRenderer.invoke('sessions:abandonSessionCopy', sessionId);
+    },
+  },
+  externalSessions: {
+    listSources(): Promise<{ adapterIds: string[] }> {
+      return ipcRenderer.invoke('external-sessions:listSources');
+    },
+    list(input: {
+      adapterId: string;
+      includeArchived?: boolean;
+      cwd?: string;
+      cursor?: string;
+    }): Promise<{ sessions: ExternalSessionSummary[]; nextCursor: string | null }> {
+      return ipcRenderer.invoke('external-sessions:list', input);
+    },
+    import(input: {
+      adapterId: string;
+      sourceSessionId: string;
+    }): Promise<ExternalSessionImportIpcResult> {
+      return ipcRenderer.invoke('external-sessions:import', input);
     },
   },
   projects: {

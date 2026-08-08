@@ -45,6 +45,7 @@ import {
   isSessionNotFoundError,
   openInteractiveExecutionStoresForWrite,
 } from '@maka/storage/execution-stores';
+import { createExternalSessionAdapterRegistry } from '@maka/storage/external-sessions';
 import { createGitWorktreeChildExecutor } from '@maka/storage/git-worktree-child-executor';
 import {
   type InteractiveLongTermMemoryWriter,
@@ -91,6 +92,7 @@ import {
   createHostSessionEffectModel,
 } from './execution-model-authority.js';
 import { HostExecutionInspectCoordinator } from './execution-inspect-coordinator.js';
+import { HostExternalSessionCoordinator } from './external-session-coordinator.js';
 import { HostGoalCoordinator } from './goal-coordinator.js';
 import type { RuntimeHostComposition, RuntimeHostCompositionContext } from './host-kernel.js';
 import { HostInteractionCoordinator } from './interaction-coordinator.js';
@@ -1038,6 +1040,12 @@ export async function createExecutionRuntimeHostComposition(
       continuity: continuityCoordinator,
       requestDrain: context.requestDrain,
     });
+    const externalSessions = new HostExternalSessionCoordinator({
+      adapters: createExternalSessionAdapterRegistry(),
+      sessions: stores.sessionStore,
+      resolveTarget: () => sessionCatalog.resolveExternalSessionImportTarget(),
+      requestDrain: context.requestDrain,
+    });
     const plans = new HostPlanCoordinator({
       store: openedPlanStore,
       sessions: stores.sessionStore,
@@ -1098,6 +1106,7 @@ export async function createExecutionRuntimeHostComposition(
       ...coordinator.handlers,
       ...requireGoal(goal).handlers,
       ...sessionCatalog.handlers,
+      ...externalSessions.handlers,
       ...executionInspect.handlers,
       ...graphClient.handlers,
       ...sessionRevisions.handlers,

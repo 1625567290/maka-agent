@@ -41,6 +41,7 @@ export * from './configuration-change.js';
 export * from './goal.js';
 export * from './plan.js';
 export * from './execution-inspect.js';
+export * from './external-session.js';
 export * from './message.js';
 export * from './operations.js';
 export * from './runtime-resource.js';
@@ -55,7 +56,8 @@ export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // The wire version remains v0 before the first release. This independent epoch
 // lets a new Client retire a stale same-version Host whose closed schema is no
 // longer safe to use.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 7 as const;
+// 8: external Session discovery and import added three closed operation keys.
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 8 as const;
 // A legal sandbox-boundary expansion can consume 64 KiB before its Interaction
 // envelope and independently bounded justification are added. Keep transport
 // capacity large enough to represent that domain value; narrower surfaces such

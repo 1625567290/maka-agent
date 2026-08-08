@@ -303,6 +303,7 @@ async function withE2eWindow(
 
 export const test = base.extend<{
   window: Page;
+  externalSessionImportWindow: Page;
   firstRunWindow: Page;
   modelPickerLongWindow: Page;
   sandboxBoundaryWindow: Page;
@@ -318,6 +319,17 @@ export const test = base.extend<{
   // Used by chat / session / settings / attachment specs.
   window: async ({}, use) => {
     await withE2eWindow({ seed: true, readinessSelector: COMPOSER_INPUT, locale: 'zh' }, use);
+  },
+  // External Session import runs through the production Runtime Host owner.
+  externalSessionImportWindow: async ({}, use) => {
+    await withE2eWindow(
+      {
+        seed: true,
+        readinessSelector: '.maka-session-panel',
+        locale: 'zh',
+      },
+      use,
+    );
   },
   // No connection: the real main process derives `needs_connection`, and the
   // renderer replaces the empty chat with the first-task activation card.
