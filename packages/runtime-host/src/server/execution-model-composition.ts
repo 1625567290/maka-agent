@@ -20,6 +20,7 @@ import {
   buildDefaultContextBudgetPolicy,
   buildHostCapabilitiesFromBinding,
   buildLlmHistorySummarizer,
+  assembleMainSessionSystemPrompt,
   buildPersonalizationPromptFragment,
   buildCancelPlanTool,
   buildParentAgentTools,
@@ -220,7 +221,11 @@ export function createHostExecutionModelComposition(
           childInstruction,
         ]);
       }
-      return joinFragments([
+      // Fragment order is load-bearing: the Deep Research mode contract
+      // (deepResearch) is a trailing assertion that constrains the fragments
+      // before it, so it must stay last. Keep this order in sync with the
+      // entry-level prompt-order test.
+      return assembleMainSessionSystemPrompt([
         buildPersonalizationPromptFragment(promptState.policy.personalization).text,
         skills.text,
         workspaceInstructions,
