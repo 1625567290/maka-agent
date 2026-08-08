@@ -82,6 +82,9 @@ function handle(msg) {
     if (AFTER_HELLO) {
       setTimeout(function () {
         for (const line of AFTER_HELLO.split('|')) process.stdout.write(line + '\n');
+        // Observable marker: the stray lines are on stdout once this lands in
+        // the log, so a test can order its next round trip after them.
+        logRec({ kind: 'after-hello' });
       }, 30);
     }
     return;
@@ -216,13 +219,20 @@ describe('maka-cu supervisor: what the child may put on stdout', () => {
       // no caller is on the stack, and took the host process down. A Rust
       // executor serialising `Option::None` on an error path emits those five
       // bytes.
-      const { service } = makeService({ afterHello: 'null' });
+      const { service, logPath } = makeService({ afterHello: 'null' });
       const handshake = await service.ensureStarted();
       assert.equal(handshake.executor.name, 'maka-cu-mock');
-      // Still usable: one stray line is not a dead executor. The round-trip is
-      // also the ordering anchor for the uncaught check below: the stray line
-      // sits on stdout ahead of this response, so it was processed (and would
-      // have thrown in the data listener) before the call returned.
+      // The mock emits the stray line from a timer after the handshake, so
+      // first wait for its marker: once logged, `null` is on stdout ahead of
+      // the next response. The round trip below is then a true causal anchor —
+      // the stray line was processed (and would have thrown in the data
+      // listener) before the call returned.
+      await waitForRecord(
+        logPath,
+        (record) => record.kind === 'after-hello',
+        'the mock never emitted its post-hello stray line',
+      );
+      // Still usable: one stray line is not a dead executor.
       const envelope = await service.call('window.list', {});
       assert.equal(envelope.ok, true);
       assert.deepEqual(uncaught, [], 'a null stdout line must not reach uncaughtException');
