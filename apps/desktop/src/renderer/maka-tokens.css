@@ -69,7 +69,31 @@
      A wash wide enough to be the whole boundary reads as a gray slab pasted
      next to the content rather than a second panel, which is the note
      PR-UI-FRAME-4 left here and the reason this lands at 0.025 and not higher. */
-  --surface-canvas: oklch(from var(--background) calc(l - 0.025) c h);
+  --surface-canvas: var(--surface-base);
+
+  /* -- Surface ladder (visual system 2.0, T1) --------------------------
+     Four rungs; height maps monotonically to lightness, and the READING
+     surface always occupies this mode's brightest rung: pure white in light,
+     the lightest gray in dark.
+
+     The middle of this ladder is not new. The owner's 2026-06-20 decision
+     above already put a gray plate behind pure-white content, and that IS
+     this model -- `--background` was always the CARD, never the page. What
+     was missing were the two ends: nothing below the canvas for a sidebar to
+     recede to, and no surface of its own for overlays, which had been pinned
+     to the card white.
+
+     The semantic names are canonical; the older names around them are
+     aliases that keep resolving to exactly what they resolved to before.
+     Nothing is forced to migrate here -- see DESIGN.md, Surface ladder. */
+  --surface-sunken: oklch(from var(--background) calc(l - 0.055) c h);
+  --surface-base: oklch(from var(--background) calc(l - 0.025) c h);
+  --surface-raised: var(--background);
+  /* Light has no room above white, so overlay carries the same FILL as raised
+     and is told apart by the overlay recipe (border-soft + elevation).
+     Unpinning it from `--background` is what gives dark a rung to climb and
+     the recipe something to hang on: a semantic split, not a colour change. */
+  --surface-overlay: var(--surface-raised);
   /* PR-GRAY-CARD-LIFT-3 (WAWQAQ msg `053ca971`): in the new
      gray-plate / white-card hierarchy, "elevated" cards live on the
      same pure white as base content cards — the lift comes from the
@@ -77,7 +101,7 @@
      `--background-elevated` mixed 1.5% foreground into background,
      which read as a faint gray on the new shell. Pinning it to the
      same `--background` keeps card surfaces consistently white. */
-  --background-elevated: var(--background);
+  --background-elevated: var(--surface-overlay);
   /* PR-UI-ALIGN-0: warm near-black (#141414-like) at a faint warm hue, so
      ALL derived grays (#636261/#838280-like) pick up the reference's warm cast
      instead of reading as cold neutral. */
@@ -87,7 +111,11 @@
      built on. zinc-family hue 286 at the same chroma reads clean and
      cool like the reference sidebar. */
   --foreground: oklch(0.17 0.005 286);
-  --foreground-dimmed: color-mix(in srgb, var(--foreground) 80%, var(--background));
+  /* Alias, not a tier. It was written as "80% ink" like --foreground-secondary
+     but mixed in srgb where that one mixes in oklch, so the same words gave
+     two different colours (10.51:1 vs 12.01:1 measured). One family, one
+     colour space: derive every ink in oklch. */
+  --foreground-dimmed: var(--foreground-secondary);
 
   /* Brand accent = logo blue (oklch L0.70 C0.135 h250), sampled from
      apps/desktop/assets/icon.png (owner decision 2026-07-03). --success stays
@@ -125,9 +153,19 @@
      --warning's orange h55 (info + warning were indistinguishable). Blue is
      also consistent with the accent (h250) and unambiguously reads as
      informational, not cautionary. */
-  --info: oklch(0.68 0.13 240);         /* blue — informational / "ask" mode */
-  --success: oklch(0.55 0.17 145);      /* green — connected, ok */
-  --destructive: oklch(0.58 0.24 28);   /* red — errors, denied */
+  /* Status family, specified rather than picked (visual system 2.0, T1).
+     One lightness for all four hues, each keeping its own chroma, so the
+     family reads as one system instead of four independent choices.
+
+     Measured against white before this: info 2.82:1, warning 3.29:1, success
+     4.55:1, destructive 4.81:1 — a 1.7x spread with TWO of the four under the
+     4.5:1 AA floor. At L=0.50 they land 5.54-6.33:1 together. Residual spread
+     is hue, not drift: yellow carries more luminance than blue at equal
+     lightness, and equalising that would mean abandoning the shared L that
+     makes them a family. */
+  --info: oklch(0.50 0.13 240);         /* blue — informational / "ask" mode */
+  --success: oklch(0.50 0.17 145);      /* green — connected, ok */
+  --destructive: oklch(0.50 0.24 28);   /* red — errors, denied */
 
   /* Legacy brand affordance for a few emphasized surfaces. New checked
      control states use --control instead.
@@ -163,7 +201,7 @@
      hue (h55); info is now cool blue (h240), so the two tiers read as clearly
      different families — no longer the near-identical ambers they once were.
      Still derived nowhere else, safe across palettes. */
-  --warning: oklch(0.66 0.18 55);
+  --warning: oklch(0.50 0.18 55);
   --warning-text: color-mix(in oklab, var(--warning) 50%, var(--foreground));
 
   /* === foreground solid mix scale ===
@@ -194,7 +232,21 @@
   /* PR-UI-ALIGN-0: visible hairline borders (≈#e6e6e6) like the reference's
      card/container outlines — maka's 5% was nearly invisible, which flattened
      the floating-card hierarchy. */
---border:        oklch(from var(--foreground) l c h / 0.10);
+  /* Border tiers (visual system 2.0, T1). `--border` is the STRUCTURAL line:
+     the edge of a panel, a card, a table. `--border-soft` is the quiet one for
+     seams inside a surface — rails, row separators, the outline that only has
+     to hint at a boundary the fill has already made.
+
+     Four strengths were in play before this: 5% on the sidebar rail (declared
+     locally in sidebar.css), 8% on --card-border-color, 10% here, and 16% on
+     --border-strong. Two of those are tiers and two are drift. The soft tier
+     is what the 5% rail and the 8% card edge converge on; their call sites
+     move in T2-T4, since T1 does not touch product CSS.
+
+     Pairs with the DESIGN.md rule that one boundary picks ONE mechanism —
+     fill step, line, or shadow, never all three stacked. */
+  --border:        oklch(from var(--foreground) l c h / 0.10);
+  --border-soft:   oklch(from var(--foreground) l c h / 0.06);
   --border-strong: oklch(from var(--foreground) l c h / 0.16);
   /* === border stroke width (#520 PR4 item 14) ============================
      Border color was already tokenized; the width was bare px in every
@@ -210,8 +262,18 @@
   --border-width-thick:    2px;
   --border-width-accent:   3px;
   --muted:         oklch(from var(--foreground) l c h / 0.05);
-  --muted-foreground: color-mix(in oklch, var(--foreground) 50%, var(--background));
-  --foreground-secondary: color-mix(in oklch, var(--foreground) 80%, var(--background));
+  /* Ink ladder (visual system 2.0, T1): three tiers about 2x apart, all above
+     4.5:1. Measured against --surface-raised, light reads 19.1 / 9.8 / 4.8.
+
+     The audit asked for a 3x gap, copied from a reference that reaches 3.6x
+     with only TWO text tiers. Three tiers standing on a 4.5:1 AA floor cannot
+     span 3x without the bottom two colliding, so the rhythm is even instead:
+     roughly geometric, which is what three tiers can actually hold.
+
+     50% muted was the one real defect — 4.21:1 in light and 3.89:1 in dark,
+     already under AA in the mode nobody checked. */
+  --muted-foreground: color-mix(in oklch, var(--foreground) 54%, var(--background));
+  --foreground-secondary: color-mix(in oklch, var(--foreground) 74%, var(--background));
   --state-hover-bg:    oklch(from var(--foreground) l c h / 0.04);
   --state-selected-bg: oklch(from var(--foreground) l c h / 0.065);
   /* PR5 FOREGROUND-ALPHA-TOKEN-0: raw foreground-alpha tiers for component
@@ -247,8 +309,30 @@
      --background); it carries its darwin overrides in "DARWIN GLASS" below. */
   --color-bg-container: var(--background);
 
+  /* === elevation (visual system 2.0, T1) =============================
+     Product names for the theme's shadow scale, so the right answer is
+     findable. The generated theme ships --shadow-low/med/high and product CSS
+     had used them exactly once, reaching instead for hand-rolled shadows —
+     a scale nobody can name is a scale nobody uses.
+
+     Three names, three jobs: `raised` for a card lifting off its plate,
+     `overlay` for anything in a portal, `drag` for something under the
+     cursor. In-flow elements do not cast shadows; that rule is unchanged,
+     this only gives the legitimate path a name.
+
+     Consumers move in T2-T4 — T1 does not touch product CSS. */
+  --elevation-raised:  var(--shadow-low);
+  --elevation-overlay: var(--shadow-med);
+  --elevation-drag:    var(--shadow-high);
+
   /* === shadow recipes ===
-     Flat elevation uses a foreground-derived 1px ring in both themes. */
+     Flat elevation uses a foreground-derived 1px ring in both themes.
+
+     NOT an elevation tier and NOT dead: this is a 1px ring wearing a
+     box-shadow, and it has five live consumers (two of them in
+     packages/ui/src/styles.css). The T1 audit read its three DEFINITION
+     sites as its only mentions and called it dead; deleting it would have
+     taken two production styles with it. It stays, named for what it is. */
   --shadow-minimal-flat:
     rgba(0,0,0,0) 0 0 0 0,
     rgba(0,0,0,0) 0 0 0 0,
@@ -510,8 +594,20 @@
      It is corner-adjacent with a uniform inset. If a proposed
      shrink is neither, it is not concentric — pick the tier the
      element's ROLE calls for instead. */
+  /* Radius language (visual system 2.0, T1). Two vocabularies were running in
+     parallel and disagreeing on the card: this file said 8, Astryx's own scale
+     said 10 (--radius-element), and --radius-modal said 12. Three numbers for
+     one idea is how a radius stops meaning anything.
+
+     They land on one set: 4 inner / 6 control / 10 card / 12 modal / full.
+     The card tier resolves to 10 rather than 8 — Astryx's element rung is the
+     one its own components already round to, so meeting it there is what stops
+     our cards from disagreeing with the controls inside them.
+
+     Assignment is monotonic in box height, and `border-radius: 0` is legal
+     only on an edge-to-edge row. See DESIGN.md, Radius language. */
   --radius-control: 6px;
-  --radius-surface: 8px;
+  --radius-surface: 10px;
   --radius-modal: 12px;
   --radius-pill: 999px;
   /* Square icon plates (provider logo, about logo, feature status) are
@@ -755,9 +851,20 @@
      the shell (Astryx painted its own surface over the frame plate until this
      branch handed the columns their materials); against the product's #171719
      content it rendered a near-black #09090b rail. */
-  --surface-canvas: oklch(from var(--background) calc(l - 0.025) c h);
-  --background-elevated: color-mix(in srgb, var(--foreground) 2%, var(--background));
-  --foreground: oklch(0.92 0.004 286);
+  --surface-canvas: var(--surface-base);
+  /* Dark inverts the direction, not the rule: higher is still lighter and the
+     reading surface still takes the brightest rung. Unlike light there IS
+     room above raised, so overlay climbs a real step. */
+  --surface-sunken: oklch(from var(--background) calc(l - 0.065) c h);
+  --surface-base: oklch(from var(--background) calc(l - 0.025) c h);
+  --surface-raised: var(--background);
+  --surface-overlay: color-mix(in srgb, var(--foreground) 2%, var(--background));
+  --background-elevated: var(--surface-overlay);
+  /* 0.92 measured 14.11:1, just under the 15:1 the reading tier asks for. */
+  --foreground: oklch(0.95 0.004 286);
+  /* Dark's ink-to-surface gap differs, so one percentage cannot put secondary
+     in the 8.5-10:1 band for both modes: 74% gives 9.8 light but 8.2 dark. */
+  --foreground-secondary: color-mix(in oklch, var(--foreground) 78%, var(--background));
 
   --accent: oklch(0.74 0.15 250);
   /* Dark mode keeps the same pale-blue CTA chip + deep-blue text as light
@@ -786,6 +893,12 @@
   --info: oklch(0.74 0.13 240);         /* blue — see light-mode note */
   --success: oklch(0.60 0.17 145);
   --destructive: oklch(0.70 0.19 22);
+  /* Dark warning is stated here because --warning is the ONE status hue that
+     had no dark override: info, success and destructive each carry their own,
+     so lowering the light value to L=0.50 dragged dark down with it and put
+     dark warning at 2.83:1, well under AA. This restores its measured 5.44:1
+     and makes the family's dark half uniform in shape. */
+  --warning: oklch(0.66 0.18 55);
 
   --opacity-overlay: 0.06;
 
