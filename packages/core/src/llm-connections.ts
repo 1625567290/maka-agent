@@ -53,10 +53,20 @@ export type ConnectionAuth =
 export interface ModelInfo {
   id: string;
   displayName?: string;
+  /** Short upstream description, when the provider advertises one. */
+  description?: string;
   /** Account-advertised request wire when one provider exposes multiple model protocols. */
   apiProtocol?: 'openai-chat' | 'openai-responses' | 'anthropic-messages';
   contextWindow?: number;
+  /** Maximum provider-visible input tokens, when narrower than contextWindow. */
+  inputLimit?: number;
   maxOutputTokens?: number;
+  /** Knowledge cutoff reported by the provider or static catalog. */
+  knowledgeCutoff?: string;
+  /** Whether the model advertises structured JSON output separately from tools. */
+  structuredOutput?: boolean;
+  /** Date on which the upstream model facts were last refreshed. */
+  lastUpdated?: string;
   capabilities?: {
     chat?: boolean;
     vision?: boolean;
@@ -68,7 +78,7 @@ export interface ModelInfo {
   };
   /** Multimodal input/output support from provider catalog metadata. */
   modalities?: {
-    input: Array<'text' | 'image' | 'audio'>;
+    input: Array<'text' | 'image' | 'audio' | 'pdf'>;
     output: Array<'text' | 'image' | 'audio'>;
   };
 }

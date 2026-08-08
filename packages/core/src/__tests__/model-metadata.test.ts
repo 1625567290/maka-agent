@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import {
   lookupModelMetadata,
   openAiAdapterApiProtocol,
+  resolveModelInputModalities,
+  resolveModelPdfSupport,
   resolveModelVisionSupport,
 } from '../model-metadata.js';
 import { PROVIDER_DEFAULTS, type ModelInfo, type ProviderType } from '../llm-connections.js';
@@ -54,6 +56,21 @@ describe('model-metadata vision capability', () => {
       resolveModelVisionSupport('claude-subscription', undefined, 'claude-3-opus-20240229'),
       true,
     );
+  });
+
+  it('preserves synchronized display facts on the Claude subscription path', () => {
+    const metadata = lookupModelMetadata('claude-subscription', 'claude-sonnet-4-5');
+    assert.equal(
+      metadata.description,
+      'Balanced Claude model for coding, analysis, agent workflows, and cost control',
+    );
+    assert.equal(metadata.knowledgeCutoff, '2025-07-31');
+    assert.equal(metadata.structuredOutput, true);
+    assert.equal(metadata.lastUpdated, '2025-09-29');
+    assert.equal(metadata.modalities?.input.includes('pdf'), true);
+    // Context limits remain access-path-specific and are intentionally not
+    // copied from the API snapshot onto the subscription route.
+    assert.equal(metadata.contextWindow, undefined);
   });
 
   it('confines the default to the providers that serve Anthropic their own models', () => {
@@ -116,10 +133,14 @@ describe('model-metadata vision capability', () => {
   it('publishes the Kimi Coding Plan K3 limits and effort levels from models.dev', () => {
     assert.deepEqual(lookupModelMetadata('kimi-coding-plan', 'k3'), {
       displayName: 'Kimi K3',
+      description:
+        'Multimodal Kimi model with 1M context and toggleable max-effort thinking for long-horizon agent work',
       lifecycle: 'active',
       docsUrl: 'https://www.kimi.com/code/docs/en/third-party-tools/other-coding-agents.html',
       contextWindow: 1_048_576,
       maxOutputTokens: 131_072,
+      structuredOutput: true,
+      lastUpdated: '2026-07-16',
       capabilities: { vision: true, reasoning: true, functionCalling: true },
       thinkingOptions: { efforts: ['low', 'high', 'max'], toggle: true },
       modalities: { input: ['text', 'image'], output: ['text'] },
@@ -253,6 +274,18 @@ describe('resolveModelVisionSupport', () => {
   it('falls back to metadata when the model list is empty or missing', () => {
     assert.equal(resolveModelVisionSupport('zai' as ProviderType, [], 'glm-5v-turbo'), true);
     assert.equal(resolveModelVisionSupport('zai' as ProviderType, undefined, 'glm-5.2'), false);
+  });
+});
+
+describe('models.dev extended model facts', () => {
+  it('keeps PDF input in the generated modality facts', () => {
+    const metadata = lookupModelMetadata('anthropic', 'claude-sonnet-4-5');
+    assert.equal(metadata.modalities?.input.includes('pdf'), true);
+    assert.equal(resolveModelPdfSupport('anthropic', undefined, 'claude-sonnet-4-5'), true);
+    assert.equal(
+      resolveModelInputModalities('anthropic', undefined, 'claude-sonnet-4-5').includes('pdf'),
+      true,
+    );
   });
 });
 

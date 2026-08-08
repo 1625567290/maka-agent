@@ -502,16 +502,9 @@ describe('production Usage/Pricing UDS', () => {
         },
       ]);
 
-      const initial = requirePricingPage(
-        await desktop.request('pricing.query', { kind: 'start' }, REQUEST_TIMEOUT_MS),
-      );
-      assert.deepEqual(initial, {
-        kind: 'page',
-        revision: 0,
-        offset: 0,
-        entries: builtinPricingEntries(),
-        nextOffset: null,
-      });
+      const initial = await readPricing(desktop);
+      assert.equal(initial.revision, 0);
+      assert.deepEqual(initial.entries, builtinPricingEntries());
       const decomposedModelKey = 'e\u0301';
       const composedModelKey = '\u00e9';
       const candidates = [pricing(decomposedModelKey, 1), pricing(composedModelKey, 2)] as const;
@@ -790,7 +783,23 @@ async function readCoordinatorPricing(
   );
   assert.equal(outcome.ok, true);
   if (!outcome.ok) throw new Error('Expected an effective pricing page');
-  return requirePricingPage(outcome.result);
+  const first = requirePricingPage(outcome.result);
+  const entries = [...first.entries];
+  let nextOffset = first.nextOffset;
+  while (nextOffset !== null) {
+    const nextOutcome = await coordinator.handlers['pricing.query'](
+      { kind: 'continue', revision: first.revision, offset: nextOffset },
+      CONNECTION_CONTEXT,
+    );
+    assert.equal(nextOutcome.ok, true);
+    if (!nextOutcome.ok) throw new Error('Expected an effective pricing page');
+    const page = requirePricingPage(nextOutcome.result);
+    assert.equal(page.revision, first.revision);
+    assert.equal(page.offset, nextOffset);
+    entries.push(...page.entries);
+    nextOffset = page.nextOffset;
+  }
+  return { ...first, entries, nextOffset: null };
 }
 
 function builtinPricingEntries(): readonly EffectivePricingEntry[] {

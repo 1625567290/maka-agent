@@ -7,10 +7,15 @@ import {
 
 export interface ModelMetadata {
   displayName?: string;
-  lifecycle?: 'active' | 'deprecated' | 'retired';
+  description?: string;
+  lifecycle?: 'active' | 'beta' | 'alpha' | 'deprecated' | 'retired';
   docsUrl?: string;
   contextWindow?: number;
+  inputLimit?: number;
   maxOutputTokens?: number;
+  knowledgeCutoff?: string;
+  structuredOutput?: boolean;
+  lastUpdated?: string;
   capabilities?: ModelInfo['capabilities'];
   modalities?: ModelInfo['modalities'];
   /**
@@ -191,6 +196,30 @@ export function resolveModelVisionSupport(
     return metadata.capabilities.vision === true;
   }
   return VISION_BY_DEFAULT_PROVIDERS.has(providerType) && VISION_BY_DEFAULT.test(modelId.trim());
+}
+
+/**
+ * Resolve the input modalities for one model, preferring an explicit provider
+ * inventory and falling back to the generated models.dev facts. An empty
+ * result is intentional: unknown models must not be treated as attachment
+ * capable by default.
+ */
+export function resolveModelInputModalities(
+  providerType: ProviderType,
+  models: readonly ModelInfo[] | undefined,
+  modelId: string,
+): NonNullable<ModelInfo['modalities']>['input'] {
+  const stored = models?.find((entry) => entry.id === modelId)?.modalities?.input;
+  if (stored !== undefined) return stored;
+  return lookupModelMetadata(providerType, modelId).modalities?.input ?? [];
+}
+
+export function resolveModelPdfSupport(
+  providerType: ProviderType,
+  models: readonly ModelInfo[] | undefined,
+  modelId: string,
+): boolean {
+  return resolveModelInputModalities(providerType, models, modelId).includes('pdf');
 }
 
 export function curatedCatalogFallbackModelsForProvider(
@@ -470,9 +499,18 @@ function displayMetadataOnly(
       id,
       {
         displayName: metadata.displayName,
+        ...(metadata.description !== undefined ? { description: metadata.description } : {}),
         lifecycle: metadata.lifecycle,
         docsUrl: metadata.docsUrl,
+        ...(metadata.knowledgeCutoff !== undefined
+          ? { knowledgeCutoff: metadata.knowledgeCutoff }
+          : {}),
+        ...(metadata.structuredOutput !== undefined
+          ? { structuredOutput: metadata.structuredOutput }
+          : {}),
+        ...(metadata.lastUpdated !== undefined ? { lastUpdated: metadata.lastUpdated } : {}),
         capabilities: metadata.capabilities,
+        ...(metadata.modalities !== undefined ? { modalities: metadata.modalities } : {}),
         thinkingOptions: overrides[id]?.thinkingOptions ?? metadata.thinkingOptions,
       },
     ]),

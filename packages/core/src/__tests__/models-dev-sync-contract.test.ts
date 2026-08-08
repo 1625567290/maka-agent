@@ -28,6 +28,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
   GENERATED_MODELS_DEV_DIRECTORY,
+  GENERATED_MODELS_DEV_METADATA,
   GENERATED_MODELS_DEV_PROVIDER_FACTS,
 } from '../model-metadata.generated.js';
 import { PROVIDER_REGISTRY, type ProviderType } from '../provider-registry.js';
@@ -61,6 +62,10 @@ const NOT_IN_MODELS_DEV: Readonly<Record<string, string>> = {
   'openai-responses-compatible': 'user-configured endpoint, no upstream catalog entry',
   'anthropic-compatible': 'user-configured endpoint, no upstream catalog entry',
 };
+
+const GENERATED_LIFECYCLES = new Set(['active', 'beta', 'alpha', 'deprecated', 'retired']);
+const GENERATED_INPUT_MODALITIES = new Set(['text', 'image', 'audio', 'pdf']);
+const GENERATED_OUTPUT_MODALITIES = new Set(['text', 'image', 'audio']);
 
 function expectedSegmentId(providerType: ProviderType): string | undefined {
   const facts = GENERATED_MODELS_DEV_PROVIDER_FACTS as Partial<
@@ -114,6 +119,76 @@ describe('models.dev sync contract', () => {
       }
     }
     assert.deepEqual(gaps, []);
+  });
+
+  it('preserves the extended model facts and only supported modalities', () => {
+    const gaps: string[] = [];
+    let inputLimitCount = 0;
+    let knowledgeCutoffCount = 0;
+    let structuredOutputCount = 0;
+    let pdfCount = 0;
+
+    for (const [providerType, models] of Object.entries(GENERATED_MODELS_DEV_METADATA)) {
+      for (const [modelId, metadata] of Object.entries(models)) {
+        const label = `${providerType}:${modelId}`;
+        if (metadata.description !== undefined && typeof metadata.description !== 'string') {
+          gaps.push(`${label} has a non-string description`);
+        }
+        if (
+          metadata.inputLimit !== undefined &&
+          (typeof metadata.inputLimit !== 'number' || !Number.isFinite(metadata.inputLimit))
+        ) {
+          gaps.push(`${label} has an invalid inputLimit`);
+        } else if (metadata.inputLimit !== undefined) {
+          inputLimitCount += 1;
+        }
+        if (
+          metadata.knowledgeCutoff !== undefined &&
+          typeof metadata.knowledgeCutoff !== 'string'
+        ) {
+          gaps.push(`${label} has a non-string knowledgeCutoff`);
+        } else if (metadata.knowledgeCutoff !== undefined) {
+          knowledgeCutoffCount += 1;
+        }
+        if (
+          metadata.structuredOutput !== undefined &&
+          typeof metadata.structuredOutput !== 'boolean'
+        ) {
+          gaps.push(`${label} has a non-boolean structuredOutput`);
+        } else if (metadata.structuredOutput !== undefined) {
+          structuredOutputCount += 1;
+        }
+        if (metadata.lastUpdated !== undefined && typeof metadata.lastUpdated !== 'string') {
+          gaps.push(`${label} has a non-string lastUpdated`);
+        }
+        if (metadata.lifecycle !== undefined && !GENERATED_LIFECYCLES.has(metadata.lifecycle)) {
+          gaps.push(`${label} has an invalid lifecycle ${metadata.lifecycle}`);
+        }
+        for (const modality of metadata.modalities?.input ?? []) {
+          if (!GENERATED_INPUT_MODALITIES.has(modality)) {
+            gaps.push(`${label} has unsupported input modality ${modality}`);
+          }
+          if (modality === 'pdf') pdfCount += 1;
+        }
+        for (const modality of metadata.modalities?.output ?? []) {
+          if (!GENERATED_OUTPUT_MODALITIES.has(modality)) {
+            gaps.push(`${label} has unsupported output modality ${modality}`);
+          }
+        }
+      }
+    }
+
+    assert.deepEqual(gaps, []);
+    assert.ok(inputLimitCount > 0, 'input limits must be present in the generated snapshot');
+    assert.ok(
+      knowledgeCutoffCount > 0,
+      'knowledge cutoffs must be present in the generated snapshot',
+    );
+    assert.ok(
+      structuredOutputCount > 0,
+      'structured output facts must be present in the generated snapshot',
+    );
+    assert.ok(pdfCount > 0, 'PDF input support must be preserved in the generated snapshot');
   });
 
   it('a whitelisted provider whose base URL matches a directory provider must declare it', () => {

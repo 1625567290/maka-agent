@@ -113,6 +113,8 @@ describe('createOnboardingService.getSnapshot', () => {
         providerLabel: 'Anthropic',
         model: 'claude-sonnet-4-5-20250929',
         label: 'Claude Sonnet 4.5',
+        description: 'Balanced Claude model for coding, analysis, agent workflows, and cost control',
+        knowledgeCutoff: '2025-07-31',
         connectionName: 'Anthropic Live',
         isDefault: true,
         thinkingLevels: ['off'],

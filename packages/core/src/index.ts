@@ -1540,6 +1540,8 @@ export {
 // model-metadata.ts
 export {
   modelMetadataIdsForProvider,
+  resolveModelInputModalities,
+  resolveModelPdfSupport,
   resolveModelVisionSupport,
 } from './model-metadata.js';
 export type {

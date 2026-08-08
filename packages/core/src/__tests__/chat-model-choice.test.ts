@@ -19,7 +19,7 @@ function connection(overrides: Partial<LlmConnection> = {}): LlmConnection {
   };
 }
 
-test('projects only enabled chat models with display, default, and thinking metadata', () => {
+test('projects enabled chat models with display, models.dev facts, and thinking metadata', () => {
   assert.deepEqual(buildChatModelChoices([connection()]), [
     {
       connectionSlug: 'openai-main',
@@ -27,6 +27,8 @@ test('projects only enabled chat models with display, default, and thinking meta
       providerLabel: 'OpenAI',
       model: 'gpt-5.5',
       label: 'GPT-5.5',
+      description: 'Default frontier GPT for coding, computer use, research, and knowledge work',
+      knowledgeCutoff: '2025-12-01',
       connectionName: 'Work API',
       isDefault: true,
       thinkingLevels: ['off', 'low', 'medium', 'high', 'xhigh'],

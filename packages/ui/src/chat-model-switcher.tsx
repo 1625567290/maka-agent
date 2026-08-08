@@ -24,6 +24,7 @@ import { Check, Settings } from './icons.js';
 import {
   type ChatModelChoice,
   type ModelMenuGroup,
+  modelChoiceDescription,
   modelMenuGroups,
   modelChoiceValue,
 } from './chat-model-helpers.js';
@@ -64,6 +65,7 @@ function ModelMenuItems(props: {
   disabled?: boolean;
   onPick(input: { llmConnectionSlug: string; model: string }): void | Promise<void>;
 }) {
+  const locale = useUiLocale();
   return (
     <>
       {props.leadingOption ? (
@@ -89,6 +91,7 @@ function ModelMenuItems(props: {
                 key={value}
                 icon={providerMarkIcon(choice.providerType, props.renderProviderMark)}
                 label={choice.label}
+                description={modelChoiceDescription(choice, locale)}
                 endContent={value === props.currentValue ? currentCheck : undefined}
                 isDisabled={props.disabled}
                 onClick={() => {

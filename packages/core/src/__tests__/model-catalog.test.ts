@@ -63,6 +63,31 @@ test('provider facts override static metadata while missing facts are enriched',
   assert.deepEqual(enriched?.capabilities, { reasoning: true, functionCalling: true });
 });
 
+test('catalog entries expose generated model facts beyond capabilities', () => {
+  const [entry] = buildModelCatalogEntries({
+    providerType: 'anthropic',
+    defaultModel: 'claude-sonnet-4-5',
+    models: [{ id: 'claude-sonnet-4-5' }],
+    modelSource: 'fetched',
+  });
+  assert.equal(
+    entry?.description,
+    'Balanced Claude model for coding, analysis, agent workflows, and cost control',
+  );
+  assert.equal(entry?.knowledgeCutoff, '2025-07-31');
+  assert.equal(entry?.inputLimit, undefined);
+  assert.equal(entry?.modalities?.input.includes('pdf'), true);
+  assert.equal(entry?.structuredOutput, true);
+  assert.equal(entry?.lastUpdated, '2025-09-29');
+
+  const [inputLimited] = buildModelCatalogEntries({
+    providerType: 'openai',
+    models: [{ id: 'gpt-5.5-pro' }],
+    modelSource: 'fetched',
+  });
+  assert.equal(inputLimited?.inputLimit, 922_000);
+});
+
 test('live inventory blocks missing defaults and preserves higher-priority failures', () => {
   const input = {
     providerType: 'zai-coding-plan' as const,
