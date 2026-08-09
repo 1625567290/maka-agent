@@ -13,15 +13,15 @@ import type {
   PlanReminder,
   QuoteRef,
   SessionSummary,
+  SlashCommandIdForSurface,
   UiLocale,
   UiLocalePreference,
 } from '@maka/core';
 import {
   collapseSessionRevisions,
   isLinkedSubagentSession,
-  parseGraphCommand,
-  parseSwarmCommand,
   resolveUiLocale,
+  slashCommandsForSurface,
 } from '@maka/core';
 import { hasSettledInitialOnboarding } from '@maka/core/onboarding-milestone';
 import {
@@ -29,6 +29,7 @@ import {
   DailyReviewPage,
   ChatSurfaceLayout,
   type ComposerHandle,
+  type ComposerSendMetadata,
   type ComposerSlashCommandOption,
   type MakaUriDest,
   MakaUriContext,
@@ -52,7 +53,7 @@ import {
   getSharedUiCopy,
   reconcileInteractions,
 } from '@maka/ui';
-import { MessageCircleQuestion } from '@maka/ui/icons';
+import { GitBranch, MessageCircleQuestion, Minimize2, Network } from '@maka/ui/icons';
 import { useKeyboardHelp } from './keyboard-help';
 import { useCommandPalette } from './command-palette';
 import { ChatMessageSurface } from './chat-message-surface';
@@ -85,10 +86,8 @@ import {
   removeStagedCompanionQuote,
   stageCompanionQuote,
 } from './quote-companion-panel-state';
-import {
-  parseSideChatCommand,
-  sideChatTitleFromPrompt,
-} from './side-chat-command';
+import { sideChatTitleFromPrompt } from './side-chat-command';
+import { parseDesktopSlashCommand } from './desktop-slash-command';
 import {
   applyCompanionForkVisibilityEvent,
   reconcileCompanionForkVisibility,
@@ -1371,25 +1370,42 @@ function AppShellContent({
     (initialPrompt?: string) => openNewSideConversation('right', initialPrompt),
     [openNewSideConversation],
   );
-  const openSideConversationRef = useRef(openSideConversation);
-  openSideConversationRef.current = openSideConversation;
-  const sideChatSlashCommands = useMemo<
-    readonly ComposerSlashCommandOption[]
-  >(
-    () =>
-      activeId
-        ? [
-            {
-              id: 'side',
-              name: workbarCopy.sideChat,
-              description: workbarCopy.launcher.sideChat,
-              keywords: ['side', 'btw', '侧聊', '追问'],
-              Icon: MessageCircleQuestion,
-              onSelect: () => openSideConversationRef.current(),
-            },
-          ]
-        : [],
-    [activeId, workbarCopy],
+  const desktopSlashCommands = useMemo<readonly ComposerSlashCommandOption[]>(
+    () => {
+      const streaming = turnActive || activeStreamingLive;
+      const availableCommands = slashCommandsForSurface('desktop').filter(
+        ({ id, session }) =>
+          (session === 'none' || Boolean(activeId))
+          && !(streaming && id === 'compact'),
+      );
+      const presentation: Record<
+        SlashCommandIdForSurface<'desktop'>,
+        Omit<ComposerSlashCommandOption, 'id'>
+      > = {
+        compact: {
+          ...shellCopy.slashCommands.compact,
+          keywords: ['compact', 'context', '压缩', '上下文'],
+          Icon: Minimize2,
+        },
+        side: {
+          ...shellCopy.slashCommands.side,
+          keywords: ['side', 'btw', '侧聊', '追问'],
+          Icon: MessageCircleQuestion,
+        },
+        swarm: {
+          ...shellCopy.slashCommands.swarm,
+          keywords: ['swarm', 'multi-agent', '多智能体'],
+          Icon: Network,
+        },
+        graph: {
+          ...shellCopy.slashCommands.graph,
+          keywords: ['graph', 'agent graph', '智能体图'],
+          Icon: GitBranch,
+        },
+      };
+      return availableCommands.map(({ id }) => ({ id, ...presentation[id] }));
+    },
+    [activeId, activeStreamingLive, shellCopy.slashCommands, turnActive],
   );
   const openSideConversationWithQuote = useCallback(
     (quote: QuoteRef) => {
@@ -1893,15 +1909,13 @@ function AppShellContent({
 
   async function sendWithAttachments(
     text: string,
-    metadata?: { workspaceFileReferences?: readonly WorkspaceFileReferencePosition[] },
+    metadata?: ComposerSendMetadata,
   ): Promise<boolean | void> {
     const revision = revisionDraftRef.current;
     const revisionSend = Boolean(
       revision && activeIdRef.current === revision.draftSessionId,
     );
-    const sideChatCommand = parseSideChatCommand(text);
-    const swarmCommand = parseSwarmCommand(text);
-    const graphCommand = parseGraphCommand(text);
+    const slashCommand = parseDesktopSlashCommand(text);
     if (
       revisionSend &&
       revision &&
@@ -1918,13 +1932,13 @@ function AppShellContent({
         toastApi.info(actionCopy.revisionUnavailableTitle, actionCopy.revisionAttachmentsUnsupported);
         return false;
       }
-      if (text.trim() === '/compact' || sideChatCommand || swarmCommand || graphCommand) {
+      if (slashCommand) {
         toastApi.info(actionCopy.revisionUnavailableTitle, actionCopy.revisionCommandUnsupported);
         return false;
       }
       if (!(await prepareRevisionSend(text))) return false;
     }
-    if (text.trim() === '/compact') {
+    if (slashCommand?.kind === 'compact') {
       const sessionId = activeIdRef.current;
       if (!sessionId) return true;
       try {
@@ -1943,7 +1957,7 @@ function AppShellContent({
         return false;
       }
     }
-    if (sideChatCommand) {
+    if (slashCommand?.kind === 'side') {
       if (!activeIdRef.current) {
         toastApi.info(
           shellCopy.sideChatUnavailableTitle,
@@ -1962,10 +1976,11 @@ function AppShellContent({
         );
         return false;
       }
-      openSideConversation(sideChatCommand.prompt || undefined);
+      openSideConversation(slashCommand.command.prompt || undefined);
       return true;
     }
-    if (swarmCommand) {
+    if (slashCommand?.kind === 'swarm') {
+      const swarmCommand = slashCommand.command;
       if (swarmCommand.kind === 'status') {
         const active = activeIdRef.current
           ? (activeSessionForView?.orchestrationMode ?? 'default') === 'swarm'
@@ -2007,7 +2022,8 @@ function AppShellContent({
       if (ok !== false && quotes) clearQuotes();
       return ok;
     }
-    if (graphCommand) {
+    if (slashCommand?.kind === 'graph') {
+      const graphCommand = slashCommand.command;
       if (graphCommand.kind === 'status') {
         const active = activeIdRef.current
           ? (activeSessionForView?.orchestrationMode ?? 'default') === 'graph'
@@ -2091,6 +2107,15 @@ function AppShellContent({
       }
       return false;
     }
+  }
+
+  function submitWhileStreaming(
+    text: string,
+    metadata?: ComposerSendMetadata,
+  ): Promise<boolean | void> {
+    return parseDesktopSlashCommand(text)
+      ? sendWithAttachments(text, metadata)
+      : steerWithText(text);
   }
 
   const stop = createAppShellStopAction({
@@ -2712,7 +2737,7 @@ function AppShellContent({
                   processing={showProcessingIndicator && !activeStreamingLive}
                   continuing={showContinuingIndicator && !activeStreamingLive}
                   onSend={sendWithAttachments}
-                  onSteer={steerWithText}
+                  onStreamingSubmit={submitWhileStreaming}
                   onStop={stop}
                   revisionNotice={
                     revisionDraft && activeId === revisionDraft.draftSessionId
@@ -2725,7 +2750,7 @@ function AppShellContent({
                       : undefined
                   }
                   mentionSkills={mentionSkills}
-                  slashCommands={sideChatSlashCommands}
+                  slashCommands={desktopSlashCommands}
                   onSearchMentionFiles={searchMentionFiles}
                   pendingAttachments={pendingAttachments}
                   onRemoveAttachment={removeAttachment}
