@@ -13,7 +13,7 @@ import {
   type SessionSummary,
 } from '@maka/core';
 import { Spinner, useUiLocale } from '@maka/ui';
-import { Upload } from '@maka/ui/icons';
+import { ICON_SIZE, Upload } from '@maka/ui/icons';
 import { getExternalSessionImportCopy } from './locales/external-session-import-copy.js';
 import { localizedShellErrorMessage } from './locales/shell-copy.js';
 import { ExternalSessionImportLifecycle } from './external-session-import-lifecycle.js';
@@ -214,7 +214,7 @@ export function ExternalSessionImportDialog(props: {
         height="fill"
         header={
           <DialogHeader
-            startContent={<Upload aria-hidden="true" />}
+            startContent={<Upload size={ICON_SIZE.chrome} aria-hidden="true" />}
             title={copy.title}
             onOpenChange={handleOpenChange}
           />
@@ -258,7 +258,7 @@ export function ExternalSessionImportDialog(props: {
 
               {sourceLoading && (
                 <div className="maka-external-session-import-loading" role="status" aria-live="polite">
-                  <Spinner size="md" />
+                  <Spinner size="lg" />
                   <Text type="supporting" color="secondary">
                     {copy.loading}
                   </Text>
@@ -275,11 +275,8 @@ export function ExternalSessionImportDialog(props: {
               )}
 
               {noSource && (
-                <EmptyState
-                  isCompact
-                  title={copy.unavailableTitle}
-                  description={copy.unavailableDescription}
-                />
+                /* Section-local absence (DESIGN.md §10 tier 1): title only. */
+                <EmptyState isCompact title={copy.unavailableTitle} />
               )}
 
               {catalogError && (
@@ -309,7 +306,7 @@ export function ExternalSessionImportDialog(props: {
 
               {catalogLoading && (
                 <div className="maka-external-session-import-loading" role="status" aria-live="polite">
-                  <Spinner size="md" />
+                  <Spinner size="lg" />
                   <Text type="supporting" color="secondary">
                     {copy.loading}
                   </Text>
@@ -317,11 +314,8 @@ export function ExternalSessionImportDialog(props: {
               )}
 
               {catalogEmpty && (
-                <EmptyState
-                  isCompact
-                  title={copy.emptyTitle}
-                  description={copy.emptyDescription}
-                />
+                /* Section-local absence (DESIGN.md §10 tier 1): title only. */
+                <EmptyState isCompact title={copy.emptyTitle} />
               )}
 
               {catalog.sessions.length > 0 && (

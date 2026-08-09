@@ -177,14 +177,52 @@ The palette is cool-neutral and quiet; color is generated to spec, not picked by
 
 Use Astryx primitives as the default seam. New work composes product meaning through published props, tokens, and stable `themeProps` extension points; internal-DOM overrides are acknowledged transitional states, not precedent.
 
-- **Controls:** Maka uses a 20/24/28/32/36/40px height ruler with 32px as the default; Astryx owns the 28/32/36px variants. Hover is restrained; press may use `scale(0.98)`; keyboard focus is always visible. At most one inverted (filled) element per control.
+- **Controls:** Maka uses a 20/24/28/32/36/40px height ruler with 32px as the default; Astryx owns the 28/32/36px variants. Hover is restrained; press may use `scale(0.98)`; keyboard focus is always visible. At most one inverted (filled) element per control. Hover washes come in exactly two lanes: product rows and controls take `--state-hover-bg`; chrome that must stay in lockstep with Astryx internals takes `--color-overlay-hover`. Hand-mixed hover alphas are drift.
 - **Fields:** labels, descriptions, and validation belong to the field primitive; input focus belongs to its control. Keep disabled reasons discoverable through the owning control's tooltip; do not rebuild field chrome around a bare input.
 - **Badges and status:** Badge is 20px high and pill-shaped. Choose semantic variants by meaning, not hue; use status dots for success, active, attention, error, or neutral.
+- **Counters:** a count is one step smaller and quieter than its label (supporting role, muted ink, `tabular-nums`) and follows its parent's active state back to full ink. Never bolder than the label it counts.
+- **Scrollbars:** one app-wide recipe — a 6px pill (10px hit area, 2px transparent inset), thumb at `--border-strong`, one step darker on hover, no painted track. Surfaces may hide their own bars; none may restyle them.
 - **Cards:** Astryx Card uses container radius, 12px default padding, and no resting elevation. Astryx components own their geometry.
 - **Workspace:** conversation, tool activity, artifacts, browser state, and generated files stay connected to the task that produced them. Assistant messages remain quiet and avatar-free.
 - **Custom companion:** a desktop pet is the sole mascot exception: user-supplied, disabled by default, decorative, pointer-transparent, hidden from assistive technology, and reduced-motion aware. It never conveys required status or speaks for the agent.
 
-## 10. Do's and Don'ts
+## 10. Empty & Loading States
+
+An absence and a wait are both states of real content, and both are composed from Astryx primitives — never hand-rolled.
+
+### Empty states: three tiers, one component
+
+Every empty state is Astryx `EmptyState`; the tiers are parameter combinations, not new components, wrappers, or product CSS re-creating its layout. The tier count is three and not arbitrary, because the component's props offer exactly two real steps — adding a description and adding an action. That is the spec's anti-inflation lock: a fourth tier is a component-change proposal, not a casual decision.
+
+| Tier | Use | `icon` | `description` | `actions` | `isCompact` |
+|---|---|---|---|---|---|
+| 1 inline | a section's local absence | no | no | no | yes |
+| 2 panel | a whole list/panel/inspector is empty | yes | yes | no | no |
+| 3 first-run | the page's reason to exist has not happened yet | yes | yes | exactly one | no |
+
+- **Tier 1 carries no icon.** Both reference systems converged on this independently: a local absence must not be amplified into an event — and it is what keeps three tiers three (an icon on tier 1 leaves only a description between it and tier 2).
+- **There is no tier 4.** No second button, no extra link, no help caption below the action. Anything else worth saying goes in `description`.
+- **No illustrations.** The `icon` slot takes an icon glyph only — never an illustration, large graphic, or brand mark.
+- **Search/filter empties always carry a clear action** (`ghost` + `sm`), on any tier. This is usability, not decoration: the user is in a state they caused themselves and must be able to exit. The canonical example is the MCP market's no-match state. Ghost/small because clearing is an exit, not the page's main action.
+- **Titles are noun phrases without a period**; `description` holds the full sentence and may echo the user's query. `headingLevel` follows the document-outline ladder (§9-adjacent; ratified in the typography chapter's hierarchy), never a pinned number.
+- The chat first-run hero is the sanctioned exception: a prompt-suggestion hero exceeds tier 3's single action by design and owns its layout; nothing else does.
+
+### Loading: reserve the ready geometry
+
+The loading state occupies the same box the ready content will occupy — loading is the same box in an unready state, not filler. The hard criterion: switching from loading to ready causes zero layout shift. This is screenshot-verifiable and reviewed as such.
+
+Three mutually exclusive forms, chosen by structural predictability — never by expected speed:
+
+| Form | When | Geometry |
+|---|---|---|
+| skeleton | structure predictable (known rows/cards) | bar heights encode type (10/12/16); row count is that surface's measured ready-state constant, never a global default — a one-row skeleton grows the page on arrival, which violates the criterion above |
+| spinner | structure unpredictable (single result, unknown-size body) | three placements only: inline (metadata icon size), page-centered large, or one quiet muted line inside a card (block-level unpredictable content only — lists always take skeletons) |
+| `isLoading` | busy buttons and pressable controls | the Astryx prop, always — no hand-swapped labels, icons, or disable-plus-spinner recreations |
+
+- One region never shows a skeleton and a spinner at the same time.
+- A state attribute nobody reads is worse than none — it convinces the next reader that feedback already exists. Wire state markers (`data-pending` and kin) to visible feedback or delete them.
+
+## 11. Do's and Don'ts
 
 ### Do:
 
@@ -198,6 +236,7 @@ Use Astryx primitives as the default seam. New work composes product meaning thr
 
 - **Don't** write a bare `oklch()` status color or wash at a call site — consume the generated families (§8).
 - **Don't** use `border-radius: 0` off a full-bleed row (§6).
+- **Don't** put an illustration in an empty-state icon slot, add anything past tier 3's single action, or ship a state attribute with no visible feedback (§10).
 - **Don't** hardcode `background: white` or any literal surface color — resolve a ladder tier (§2), or `--surface-paper` when the content's own contrast is not ours to control (foreign documents, QR codes) and inverting it would break the content rather than restyle it.
 - **Don't** put more than one inverted element in a single control.
 - **Don't** mix `srgb` and `oklch` derivations inside one token family (§3).

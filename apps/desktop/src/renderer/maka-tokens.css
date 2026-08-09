@@ -697,7 +697,12 @@
      different shapes). A percentage is scale-invariant, so one value
      is correct at every size, including sizes not yet added.
      27% restores the anchor ratio measured in PR-UI-13 (12px on the
-     44px plate) that the tier convergence silently reverted. */
+     44px plate) that the tier convergence silently reverted.
+
+     The plate ladder itself has five rungs — 28/32/36/44/48px boxes —
+     and its glyph sits at roughly 58-64% of the box (the fill
+     convention); a plate off the ladder or a glyph outside that band
+     is the thing to question in review. */
   --radius-plate: 27%;
 
   /* PR-SPACING-CONVERGE-0 (issue #430 PR3, 2026-07-03):
@@ -731,8 +736,15 @@
   --space-12: calc(var(--spacing) * 12);     /* 48px */
   --space-16: calc(var(--spacing) * 16);     /* 64px */
 
-  --icon-size: 16px;           /* chrome glyph size (nav + button icons); dense
-                                  meta (12-14) and hero (20+) stay call-site */
+  /* Five-rung icon scale, mirroring ICON_SIZE in @maka/ui's icons.tsx —
+     these tokens exist for the CSS-clamped sites; pick by the role the
+     glyph plays, not by eye. */
+  --icon-meta: 13px;
+  --icon-control: 14px;
+  --icon-chrome: 16px;
+  --icon-empty: 20px;
+  --icon-plate: 28px;
+  --icon-size: var(--icon-chrome); /* deprecated alias, one release */
 
   /* === motion ===
      Custom easing curves per emil-design-eng — the built-in CSS easings
@@ -914,6 +926,16 @@
      at every call site; promoted to :root so the token is canonical and the
      fallbacks are redundant. */
   --maka-chat-measure: 680px;
+
+  /* === settings ==========================================================
+     One right-edge cap for a settings row's end slot — the read-only value
+     and the control cluster share it, so the two kinds of row end stop at
+     the same edge — and one column width for the trailing selects. */
+  --settings-row-end-cap: min(320px, 62cqi);
+  --settings-control-width: 260px;
+  /* One QR frame spec for the paired dialogs (bot onboarding + WeChat QR
+     login, T5-E): both frames read this so the pair cannot drift. */
+  --qr-frame-size: 256px;
 
 }
 

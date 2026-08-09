@@ -8,7 +8,7 @@ import {
   Selector,
   VStack,
 } from '@astryxdesign/core';
-import { ChevronRight, Search } from '@maka/ui/icons';
+import { ICON_SIZE, ChevronRight, Search } from '@maka/ui/icons';
 import {
   CATALOG_PROVIDER_TYPES,
   RECOMMENDED_PROVIDER_TYPES,
@@ -16,7 +16,7 @@ import {
   type ProviderType,
 } from '@maka/core/provider-registry';
 import { PROVIDER_DEFAULTS } from '@maka/core/llm-connections';
-import { TextInput, useUiLocale } from '@maka/ui';
+import { Button, TextInput, useUiLocale } from '@maka/ui';
 import { AddProviderForm } from './provider-add-form';
 import { ProviderLogo, providerDisplay } from './provider-display';
 import { OAuthLoginPanel, useOAuthCards, type OAuthCardId } from './provider-oauth-section';
@@ -109,7 +109,20 @@ export function ProviderCatalogPage(props: {
         />
       )}
       {isEmpty ? (
-        <EmptyState isCompact title={copy.noMatch} />
+        // Filter empty (DESIGN.md §10 tier 1): a filter no-match always carries
+        // the clear action, on any tier — the user must be able to exit.
+        <EmptyState
+          isCompact
+          title={copy.noMatch}
+          actions={(
+            <Button
+              variant="ghost"
+              size="sm"
+              label={copy.clearSearch}
+              onClick={() => props.onFilterChange({ query: '', category: 'recommended' })}
+            />
+          )}
+        />
       ) : (
         <List hasDividers>
           {showsOAuth && oauth.cards.map((card) => (
@@ -123,7 +136,7 @@ export function ProviderCatalogPage(props: {
               startContent={<ProviderLogo type={card.providerType} />}
               label={/* a11y-allow: this label names the ROW, not the span. Astryx's Item puts consumer props on its outer wrapper and renders a separate invisible <button> for the click target, so an aria-label on the Item never reaches that button — measured. The button is named from its content, and this span is how the status reaches that name. Removing it drops the runtime error from the row's accessible name (settings.spec:226).*/ <span aria-label={providerCopy.oauthSection.cardAria(card.name, card.status, card.description)}>{card.name}</span>}
               description={card.description}
-              endContent={<ChevronRight size={15} aria-hidden="true" />}
+              endContent={<ChevronRight size={ICON_SIZE.chrome} aria-hidden="true" />}
               onClick={() => props.onPick({
                 method: 'account',
                 cardId: card.id,
@@ -143,7 +156,7 @@ export function ProviderCatalogPage(props: {
                 startContent={<ProviderLogo type={type} />}
                 label={/* a11y-allow: this label names the ROW, not the span. Astryx's Item puts consumer props on its outer wrapper and renders a separate invisible <button> for the click target, so an aria-label on the Item never reaches that button — measured. The button is named from its content, and this span is how the status reaches that name. Removing it drops the runtime error from the row's accessible name (settings.spec:226).*/ <span aria-label={catalogCopy.cardAria(display.name, display.description)}>{display.name}</span>}
                 description={display.description}
-                endContent={<ChevronRight size={15} aria-hidden="true" />}
+                endContent={<ChevronRight size={ICON_SIZE.chrome} aria-hidden="true" />}
                 onClick={() => props.onPick({ method: 'credentials', providerType: type, name: display.name })}
               />
             );
