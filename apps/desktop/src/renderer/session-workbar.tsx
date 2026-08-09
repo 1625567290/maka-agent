@@ -45,9 +45,12 @@ import {
   X,
 } from '@maka/ui/icons';
 import { Badge } from '@astryxdesign/core/Badge';
+import { Button } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
 import { ContextMenu } from '@astryxdesign/core/ContextMenu';
+import { Item } from '@astryxdesign/core/Item';
 import { Section } from '@astryxdesign/core/Section';
+import { Spinner } from '@astryxdesign/core/Spinner';
 import { Toolbar } from '@astryxdesign/core/Toolbar';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
 import type { SessionSummary } from '@maka/core';
@@ -95,17 +98,8 @@ const SessionTerminalPanel = lazy(() =>
 
 function WorkbarPanelLoading(props: { label: string }) {
   return (
-    <div
-      className="maka-workbar-panel-loading"
-      role="status"
-      aria-label={props.label}
-      aria-busy="true"
-    >
-      <Loader2
-        size={ICON_SIZE.chrome}
-        aria-hidden="true"
-        className="maka-workbar-tab-spinner"
-      />
+    <div className="maka-workbar-panel-loading">
+      <Spinner size="sm" shade="subtle" label={props.label} />
     </div>
   );
 }
@@ -499,9 +493,16 @@ function SortableWorkbarTab(props: {
         data-preview={props.tab.preview || undefined}
         style={style}
       >
-        <button
+        <Button
           type="button"
+          variant="ghost"
+          size="sm"
           role="tab"
+          label={
+            props.count !== undefined
+              ? `${label}, ${props.count}`
+              : label
+          }
           aria-selected={props.selected}
           aria-busy={props.busy || props.running || undefined}
           tabIndex={props.selected ? 0 : -1}
@@ -512,16 +513,16 @@ function SortableWorkbarTab(props: {
           onDoubleClick={() => {
             if (props.tab.preview) props.onPin(props.tab.id);
           }}
+          icon={tabIcon(props.tab, props.busy || props.running)}
+          endContent={props.count !== undefined ? <TabCount count={props.count} /> : undefined}
         >
-          {tabIcon(props.tab, props.busy || props.running)}
           <span
             className="maka-workbar-tab-label"
             title={props.tab.preview ? `${label} · ${copy.pinTabHint}` : label}
           >
             {label}
           </span>
-          {props.count !== undefined ? <TabCount count={props.count} /> : null}
-        </button>
+        </Button>
         {!props.busy ? (
           <Tooltip content={copy.closeTab(label)}>
             <IconButton
@@ -612,15 +613,15 @@ function WorkbarLauncher(props: {
   useLayoutEffect(() => {
     if (!props.active) return;
     menuRef.current
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
+      ?.querySelector<HTMLElement>('[role="menuitem"]:not([aria-disabled="true"])')
       ?.focus();
   }, [props.active]);
   const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const menu = menuRef.current;
     if (!menu) return;
     const items = Array.from(
-      menu.querySelectorAll<HTMLButtonElement>(
-        '[role="menuitem"]:not(:disabled)',
+      menu.querySelectorAll<HTMLElement>(
+        '[role="menuitem"]:not([aria-disabled="true"])',
       ),
     );
     const currentIndex = items.findIndex(
@@ -649,6 +650,14 @@ function WorkbarLauncher(props: {
           ?.focus();
       });
       return;
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      // Item + role="menuitem" puts onClick on the row div (parent-role mode)
+      // and does not render a keyboard-activatable button — the menu parent
+      // must activate the focused item.
+      event.preventDefault();
+      const focused = items[currentIndex >= 0 ? currentIndex : 0];
+      focused?.click();
+      return;
     }
     const target = items[targetIndex];
     if (!target) return;
@@ -665,25 +674,25 @@ function WorkbarLauncher(props: {
         onKeyDown={handleMenuKeyDown}
       >
         {actions.map((action, index) => (
-          <button
+          <Item
             key={action.kind}
-            type="button"
             role="menuitem"
-            tabIndex={index === firstEnabledActionIndex ? 0 : -1}
             className="maka-workbar-launcher-row"
             data-secondary={
               action.kind === 'tasks' || action.kind === 'inspector' || undefined
             }
-            disabled={action.disabled}
+            tabIndex={index === firstEnabledActionIndex ? 0 : -1}
+            startContent={<span className="maka-workbar-launcher-icon">{action.icon}</span>}
+            label={action.label}
             aria-description={action.description}
+            endContent={
+              action.shortcut ? (
+                <kbd className="maka-workbar-launcher-shortcut">{action.shortcut}</kbd>
+              ) : undefined
+            }
+            isDisabled={action.disabled}
             onClick={() => props.onOpen(action.kind)}
-          >
-            <span className="maka-workbar-launcher-icon">{action.icon}</span>
-            <span className="maka-workbar-launcher-label">{action.label}</span>
-            {action.shortcut ? (
-              <kbd className="maka-workbar-launcher-shortcut">{action.shortcut}</kbd>
-            ) : null}
-          </button>
+          />
         ))}
       </div>
     </div>
