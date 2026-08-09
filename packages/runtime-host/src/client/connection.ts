@@ -34,6 +34,7 @@ import {
   type HostStatusResult,
   HOST_OPERATION_SPECS,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
+  RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS,
   type OperationInput,
   type OperationKey,
   type OperationOutput,
@@ -236,7 +237,18 @@ interface PendingRequest {
   accept(value: unknown): unknown;
   resolve(value: unknown): void;
   reject(error: Error): void;
+  domainState?: 'queued' | 'in_flight';
   timer?: NodeJS.Timeout;
+}
+
+interface RetiredRequest {
+  operation: OperationKey;
+  domainState?: 'in_flight';
+}
+
+interface QueuedDomainFrame {
+  requestId: string;
+  frame: RequestFrame;
 }
 
 type RequestTimeoutScope = 'request' | 'connection';
@@ -248,7 +260,8 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   readonly closed: Promise<void>;
   readonly #transport: FramedTransport;
   readonly #pendingRequests = new Map<string, PendingRequest>();
-  readonly #retiredRequests = new Map<string, OperationKey>();
+  readonly #retiredRequests = new Map<string, RetiredRequest>();
+  readonly #queuedDomainFrames: QueuedDomainFrame[] = [];
   readonly #subscriptions = new Map<string, ClientSessionSubscription>();
   readonly #retiredSubscriptionIds = new Set<string>();
   readonly #clientCapabilities: ClientCapabilityChannel;
@@ -256,6 +269,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   readonly #sessionCatalogChangeListeners = new Set<(frame: SessionCatalogChangedFrame) => void>();
   #livenessTimer: NodeJS.Timeout | undefined;
   #livenessProbePending = false;
+  #inFlightDomainRequests = 0;
   #terminalError: Error | undefined;
   readonly #livenessIntervalMs: number;
   readonly #onLivenessProbe: (() => void) | undefined;
@@ -342,15 +356,13 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       return Promise.reject(asError(error));
     }
     const requestId = randomUUID();
+    const isDomainRequest = operation !== 'host.status';
     const result = new Promise<Result>((resolve, reject) => {
       const timer =
         boundedTimeoutMs === undefined
           ? undefined
           : setTimeout(() => {
-              const error = new RuntimeHostTransportError(
-                'read_timeout',
-                `Timed out waiting for Runtime Host ${operation} response`,
-              );
+              const error = requestTimeoutError(operation);
               if (timeoutScope === 'connection') this.#fail(error);
               else this.#retireRequest(requestId, error);
             }, boundedTimeoutMs);
@@ -363,6 +375,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
         },
         resolve: (value) => resolve(value as Result),
         reject,
+        ...(isDomainRequest ? { domainState: 'queued' as const } : {}),
         timer,
       });
       this.#scheduleLivenessCheck();
@@ -372,8 +385,30 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       operation,
       input: canonicalInput,
     } as RequestFrame;
-    void this.#transport.write(frame).catch((error: unknown) => this.#fail(asError(error)));
+    if (isDomainRequest) {
+      this.#queuedDomainFrames.push({ requestId, frame });
+      this.#drainDomainRequests();
+    } else {
+      void this.#transport.write(frame).catch((error: unknown) => this.#fail(asError(error)));
+    }
     return result;
+  }
+
+  #drainDomainRequests(): void {
+    while (
+      !this.#terminalError &&
+      this.#inFlightDomainRequests < RUNTIME_HOST_MAX_IN_FLIGHT_DOMAIN_REQUESTS
+    ) {
+      const queued = this.#queuedDomainFrames.shift();
+      if (!queued) return;
+      const pending = this.#pendingRequests.get(queued.requestId);
+      if (!pending || pending.domainState !== 'queued') continue;
+      pending.domainState = 'in_flight';
+      this.#inFlightDomainRequests += 1;
+      void this.#transport
+        .write(queued.frame)
+        .catch((error: unknown) => this.#fail(asError(error)));
+    }
   }
 
   async status(timeoutMs?: number): Promise<HostStatusResult> {
@@ -583,9 +618,10 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
   #acceptResponse(frame: ResponseFrame): void {
     const pending = this.#pendingRequests.get(frame.requestId);
     if (!pending) {
-      const retiredOperation = this.#retiredRequests.get(frame.requestId);
-      if (retiredOperation === frame.operation) {
+      const retired = this.#retiredRequests.get(frame.requestId);
+      if (retired?.operation === frame.operation) {
         this.#retiredRequests.delete(frame.requestId);
+        this.#releaseDomainSlot(retired);
         this.#scheduleLivenessCheck();
         return;
       }
@@ -601,7 +637,9 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     this.#scheduleLivenessCheck();
     if (frame.ok) {
       try {
-        pending.resolve(pending.accept(frame.result));
+        const accepted = pending.accept(frame.result);
+        this.#releaseDomainSlot(pending);
+        pending.resolve(accepted);
       } catch (error) {
         const failure = asError(error);
         pending.reject(failure);
@@ -609,6 +647,7 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
       }
       return;
     }
+    this.#releaseDomainSlot(pending);
     pending.reject(
       new RuntimeHostOperationError(frame.operation, frame.error.code, frame.error.message),
     );
@@ -638,9 +677,26 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     const pending = this.#pendingRequests.get(requestId);
     if (!pending) return;
     this.#pendingRequests.delete(requestId);
-    this.#retiredRequests.set(requestId, pending.operation);
+    if (pending.domainState === 'queued') {
+      const index = this.#queuedDomainFrames.findIndex((queued) => queued.requestId === requestId);
+      if (index !== -1) this.#queuedDomainFrames.splice(index, 1);
+      pending.reject(error);
+      this.#scheduleLivenessCheck();
+      return;
+    }
+    this.#retiredRequests.set(requestId, {
+      operation: pending.operation,
+      ...(pending.domainState === 'in_flight' ? { domainState: pending.domainState } : {}),
+    });
     pending.reject(error);
     this.#scheduleLivenessCheck();
+  }
+
+  #releaseDomainSlot(request: PendingRequest | RetiredRequest): void {
+    if (request.domainState !== 'in_flight') return;
+    request.domainState = undefined;
+    this.#inFlightDomainRequests -= 1;
+    this.#drainDomainRequests();
   }
 
   #resetLivenessCheck(): void {
@@ -769,6 +825,8 @@ class RuntimeHostConnectionImpl implements RuntimeHostConnection {
     this.#terminalError = error;
     if (this.#livenessTimer) clearTimeout(this.#livenessTimer);
     this.#livenessTimer = undefined;
+    this.#queuedDomainFrames.length = 0;
+    this.#inFlightDomainRequests = 0;
     for (const pending of this.#pendingRequests.values()) {
       if (pending.timer) clearTimeout(pending.timer);
       pending.reject(error);
@@ -1100,4 +1158,11 @@ function readRegistrationBeforeDeadline(
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function requestTimeoutError(operation: OperationKey): RuntimeHostTransportError {
+  return new RuntimeHostTransportError(
+    'read_timeout',
+    `Timed out waiting for Runtime Host ${operation} response`,
+  );
 }
