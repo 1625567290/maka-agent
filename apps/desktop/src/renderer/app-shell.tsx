@@ -56,6 +56,12 @@ import { MessageCircleQuestion } from '@maka/ui/icons';
 import { useKeyboardHelp } from './keyboard-help';
 import { useCommandPalette } from './command-palette';
 import { ChatMessageSurface } from './chat-message-surface';
+import { useTaskSubmissionReadiness } from './use-task-submission-readiness';
+import {
+  deriveTaskReadinessNotice,
+  isTaskSubmissionHardBlocked,
+  resolveTaskReadinessModelTarget,
+} from './task-readiness-notice';
 import { deriveWorkspaceReadinessRecovery } from './workspace-readiness-recovery';
 import { LiveTurnReconciler } from './live-turn-reconciler';
 import { useAppShellSessionUiReads } from './use-app-shell-session-ui-reads';
@@ -730,6 +736,9 @@ function AppShellContent({
   // live in useShellChatModel (pure derivation of the snapshot + active session);
   // openSettingsSection is injected so the notice can wrap the derived click
   // target.
+  const activeSessionSendOutcome = activeSession
+    ? onboarding.snapshot?.sessionSendOutcomes[activeSession.id]
+    : undefined;
   const {
     chatModelChoices,
     activeConnection,
@@ -750,9 +759,7 @@ function AppShellContent({
     uiLocale,
     connections,
     snapshotChoices: onboarding.snapshot?.chatModelChoices,
-    sessionSendOutcome: activeSession
-      ? onboarding.snapshot?.sessionSendOutcomes[activeSession.id]
-      : undefined,
+    sessionSendOutcome: activeSessionSendOutcome,
     defaultConnection,
     activationCandidate: onboardingActivationCandidate,
     activeSession,
@@ -1716,6 +1723,20 @@ function AppShellContent({
     },
     onSelectNoProject: selectNoProject,
   };
+  const taskReadinessRequest = {
+    ...resolveTaskReadinessModelTarget(activeSession, activeSessionSendOutcome, newChatModel),
+    cwd: activeSession?.cwd ?? projectInfo?.projectPath,
+  };
+  const taskReadiness = useTaskSubmissionReadiness(
+    taskReadinessRequest,
+    onboarding.snapshot,
+  );
+  const taskReadinessNotice = deriveTaskReadinessNotice(taskReadiness.snapshot, uiLocale);
+  const ignoreTaskReadinessModelTarget =
+    activeSession !== undefined && activeSessionSendOutcome?.kind !== 'blocked';
+  const taskSubmissionHardBlocked = isTaskSubmissionHardBlocked(taskReadiness.snapshot, {
+    ignoreModelTarget: ignoreTaskReadinessModelTarget,
+  });
   // The titlebar names the directory the ACTIVE session runs in, so it reads
   // the same projected project state the picker does — `projectInfo` already
   // resolves to the session's own cwd once a session owns it.
@@ -1799,6 +1820,7 @@ function AppShellContent({
     activeIdRef,
     addPendingSessionAction,
     captureComposerImportOwner,
+    checkTaskSubmissionReadiness: taskSubmissionReadyAtSend,
     clearPendingSessionAction,
     isNewChatSendSurfaceActive,
     isShellSurfaceOwnerActive,
@@ -1861,6 +1883,13 @@ function AppShellContent({
     toastApi,
     upsertSessionSummary,
   });
+
+  async function taskSubmissionReadyAtSend(): Promise<boolean> {
+    const snapshot = await taskReadiness.checkNow();
+    return !isTaskSubmissionHardBlocked(snapshot, {
+      ignoreModelTarget: ignoreTaskReadinessModelTarget,
+    });
+  }
 
   async function sendWithAttachments(
     text: string,
@@ -2738,7 +2767,9 @@ function AppShellContent({
                   onOpenModelSettings={() => openSettingsSection('models')}
                   noModelConnection={connections.length === 0}
                   sendBlocked={
-                    Boolean(workspaceReadinessRecovery) || sessionHealthNotice?.tone === 'destructive'
+                    Boolean(workspaceReadinessRecovery) ||
+                    sessionHealthNotice?.tone === 'destructive' ||
+                    taskSubmissionHardBlocked
                   }
                   permissionMode={activePermissionMode}
                   permissionModePending={activeId ? pendingPermissionModeBySession[activeId] === true : false}
@@ -2919,6 +2950,16 @@ function AppShellContent({
                 }}
                 sessionHealthNotice={sessionHealthNotice}
                 workspaceReadinessRecovery={workspaceReadinessRecovery}
+                taskReadinessNotice={taskReadinessNotice}
+                onTaskReadinessAction={
+                  taskReadinessNotice?.action === 'workspace_picker'
+                    ? activeSession
+                      ? openNewTaskSurface
+                      : () => {
+                          void addProject();
+                        }
+                    : taskReadiness.refresh
+                }
                 showOnboardingHero={showOnboardingHero}
                 onboardingState={onboardingState}
                 isOnboardingLoading={isOnboardingLoading}
