@@ -121,3 +121,55 @@ The run initially failed closed when the user's foreground ChatGPT window
 occluded the synthetic target. The fixture host now settles and raises its
 layer-0 window with `showInactive()` and `moveTop()` before declaring readiness,
 without focusing it or using an always-on-top overlay layer.
+
+## Native WebContent Qualification
+
+The executor pinned by `apps/desktop/bundled-tools.json` now carries source
+commit `058ee57604cf40b021bfb8642ac9bd884e71cd3f`, the merge commit of
+`maka-agent/maka-cu#2` on `maka/base`.
+
+The shared synthetic CUA Lab was run ten consecutive times before integration:
+
+- observation exposed one OOP button after unique mirror removal;
+- slider requested/readback/business oracle: `42 / 42 / 42`;
+- scroll path: semantic `ax_action`, oracle offset `76`;
+- OOP click path: `skylight_pid`;
+- DOM `MouseEvent.isTrusted`: `true`;
+- host local mouse events: one down and one up;
+- stale wrong-target count: `0`;
+- target application never became frontmost.
+
+A separate live retained-element probe exercised the three refetch outcomes:
+
+- unique replacement: action completed once, wrong target `0`;
+- missing replacement: `element_released`, no side effect;
+- ambiguous replacement: `element_changed`, no side effect.
+
+This is native executor evidence, not a provider-model qualification cell. A
+future `real-runtime` web scenario must still pass the report contract above.
+
+The same source commit adds `doctor --json`. A release-binary smoke on the
+locked-screen state correctly reported permissions granted, all required native
+SPIs available, an ad-hoc non-hardened signature, and
+`metadataObservation / screenshotObservation / trustedWebContentClick = false`.
+
+Modal routing now has deterministic contract evidence: app targets select the
+frontmost sheet inventory entry, exact window targets retain the requested
+secondary window ID, and AX frame matching prefers a direct `AXWindow` before
+looking through `AXSheet` / `AXDrawer` children. The screen remained locked, so
+open/close/button/scroll oracle qualification is still pending and is not
+classified as a real-runtime pass.
+
+The same pin now carries stable AX observation revisions:
+
+- the first tree receives depth-first stable ids;
+- matched siblings preserve ids across fresh snapshot tokens;
+- new ids begin above the previous maximum;
+- post-action observations can render no-change, ordered insert/update changes,
+  compressed removed-id ranges, or a full-tree fallback;
+- explicit observe continues to render the complete tree.
+
+This is hermetic protocol/static contract evidence, not a provider-model
+qualification cell. The native source suite passed 320 tests with 26 explicit
+live-test skips, and the host Computer Use suite passed 124 tests. The
+screen was locked, so no modal or long-trajectory live claim was added.
