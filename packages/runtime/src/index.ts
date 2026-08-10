@@ -1535,20 +1535,17 @@ export {
 } from './system-prompt/main-session-prompt.js';
 
 // ───────────────────────────────────────────────────────────────────────────
-// Unified Automation (Codex-style: heartbeat + cron, single tool).
+// Session-scoped heartbeat Automation.
 // ───────────────────────────────────────────────────────────────────────────
 export {
   AutomationManager,
   computeNextCronFire,
   computeJitter,
-  matchesCronField,
   settleAutomationAttempt,
 } from './automation-state.js';
 export type {
   AutomationAttemptOutcome,
   AutomationDefinition,
-  AutomationExecutionTemplate,
-  AutomationKind,
   AutomationSchedule,
   AutomationStatus,
   AutomationManagerDeps,
@@ -1563,6 +1560,14 @@ export type {
   AutomationAuthorityToolDeps,
   AutomationToolAuthority,
 } from './automation-tools.js';
+export {
+  buildScheduledTaskTool,
+  buildAgentScheduledTaskCreatePayload,
+  SCHEDULED_TASK_AUTHORITY_SERVICE_ID,
+  SCHEDULED_TASK_AUTHORITY_SERVICE_VERSION,
+  SCHEDULED_TASK_TOOL_NAME,
+} from './scheduled-task-tools.js';
+export type { ScheduledTaskToolAuthority } from './scheduled-task-tools.js';
 export { evaluateAutomationCanFire, HEARTBEAT_IDLE_STATUSES } from './automation-can-fire.js';
 export type { CanFireSessionHeader, EvaluateAutomationCanFireDeps } from './automation-can-fire.js';
 

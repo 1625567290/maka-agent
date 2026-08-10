@@ -57,10 +57,10 @@ import type {
   AuthorizationUrlPayload,
   SubscriptionAccountState,
   SubscriptionActionResult,
-  PlanReminder,
+  CreateScheduledTaskInput,
+  ScheduledTask,
+  UpdateScheduledTaskInput,
   ProjectRecord,
-  PlanReminderDeliveryTarget,
-  PlanReminderRecurrence,
   DailyReviewArchive,
   QueueEnqueueOutcome,
   DailyReviewArchiveSummary,
@@ -673,22 +673,22 @@ export interface MakaBridge {
     refreshTokens(): Promise<SubscriptionActionResult>;
     logout(): Promise<SubscriptionActionResult>;
   };
-  plans: {
-    list(): Promise<PlanReminder[]>;
-    create(input: { title: string; note?: string; runAt: number | string; recurrence?: PlanReminderRecurrence; cronExpression?: string; delivery?: PlanReminderDeliveryTarget }): Promise<PlanReminder>;
+  scheduledTasks: {
+    list(): Promise<ScheduledTask[]>;
+    create(input: Omit<CreateScheduledTaskInput, 'createdBy'>): Promise<ScheduledTask>;
     update(
       id: string,
-      patch: { title?: string; note?: string; runAt?: number | string; recurrence?: PlanReminderRecurrence; cronExpression?: string; delivery?: PlanReminderDeliveryTarget; enabled?: boolean },
-    ): Promise<PlanReminder>;
-    setEnabled(id: string, enabled: boolean): Promise<PlanReminder>;
-    triggerNow(id: string): Promise<PlanReminder>;
-    snooze(id: string): Promise<PlanReminder>;
-    clearRunHistory(id: string): Promise<PlanReminder>;
+      patch: UpdateScheduledTaskInput,
+    ): Promise<ScheduledTask>;
+    setEnabled(id: string, enabled: boolean): Promise<ScheduledTask>;
+    triggerNow(id: string): Promise<ScheduledTask>;
+    snooze(id: string): Promise<ScheduledTask>;
+    clearRunHistory(id: string): Promise<ScheduledTask>;
     delete(id: string): Promise<void>;
     subscribeChanges(
-      handler: (event: { type: 'plans_changed'; reason: string; reminderId?: string; ts: number }) => void,
+      handler: (event: { type: 'scheduled_tasks_changed'; reason: string; taskId?: string; ts: number }) => void,
     ): () => void;
-    subscribeDue(handler: (reminder: PlanReminder) => void): () => void;
+    subscribeDue(handler: (task: ScheduledTask) => void): () => void;
   };
   inspector: {
     /** Read-only per-session causal trace (#1625). */

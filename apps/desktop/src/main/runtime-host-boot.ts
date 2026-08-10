@@ -16,6 +16,8 @@ import {
 } from "@maka/core/llm-connections";
 import {
   BotRegistry,
+  SCHEDULED_TASK_AUTHORITY_SERVICE_ID,
+  SCHEDULED_TASK_AUTHORITY_SERVICE_VERSION,
   buildMcpTools,
   type BotIncomingMessage,
 } from "@maka/runtime";
@@ -25,7 +27,7 @@ import { McpClientManager } from "@maka/mcp";
 import {
   createSettingsStore,
   createMcpConfigStore,
-  createSqlitePlanReminderStore,
+  createSqliteScheduledTaskStore,
 } from "@maka/storage";
 import { resolveStorageRoot } from "@maka/storage/root-authority";
 import { registerAppIpc } from "./app-ipc-main.js";
@@ -69,8 +71,8 @@ import {
   type DesktopModelTargetResolution,
 } from "./task-submission-readiness-main.js";
 import { registerNotificationsIpc } from "./notifications-ipc-main.js";
-import { registerPlanReminderIpc } from "./plan-reminders-ipc-main.js";
-import { createPlanReminderMainService } from "./plan-reminders-main.js";
+import { registerScheduledTaskIpc } from "./scheduled-tasks-ipc-main.js";
+import { createScheduledTaskMainService } from "./scheduled-tasks-main.js";
 import { registerPetPackIpc } from "./pet-pack-import.js";
 import {
   createPermissionOverlayMain,
@@ -186,7 +188,7 @@ function ensureMcpReady(): Promise<void> {
   }
   return mcpStartup;
 }
-const planReminderStore = createSqlitePlanReminderStore(workspaceRoot);
+const scheduledTaskStore = createSqliteScheduledTaskStore(workspaceRoot);
 const keepSystemAwake = createKeepSystemAwakeController(powerSaveBlocker);
 const startHidden =
   (Boolean(e2eFixture) || isIsolatedE2e) &&
@@ -345,8 +347,8 @@ const updateService = createAppUpdateService({
     return hasRuntimeHostInterruptibleWork(runtimePolicyClient);
   },
 });
-const planReminders = createPlanReminderMainService({
-  store: planReminderStore,
+const scheduledTasks = createScheduledTaskMainService({
+  store: scheduledTaskStore,
   getPrivacyContext: async () => {
     if (!runtimePolicyClient) {
       throw new Error("Runtime Host policy is unavailable");
@@ -358,15 +360,83 @@ const planReminders = createPlanReminderMainService({
   },
   sendBotMessage: (platform, chatId, text) =>
     botRegistry.sendMessage(platform, chatId, text),
-  emitChanged: (reason, reminder) => {
-    mainWindowController.send("plans:changed", {
-      type: "plans_changed",
+  startAgentRun: async ({ task, sessionId, turnId }) => {
+    if (!runtimePolicyClient) throw new Error("Runtime Host client is unavailable");
+    if (task.effect.kind !== "agent_run") {
+      throw new Error("Task effect is not agent_run");
+    }
+    const execution = task.effect.execution;
+    const hostClient = runtimePolicyClient;
+    const workspace =
+      execution.projectId != null && execution.projectId !== ""
+        ? ({ kind: "project" as const, projectId: execution.projectId })
+        : ({ kind: "host_path" as const, path: execution.cwd });
+    await hostClient.createSession({
+      sessionId,
+      workspace,
+      name: task.title,
+      labels: ["scheduled-task"],
+      modelTarget: {
+        kind: "explicit",
+        connectionSlug: execution.llmConnectionSlug,
+        model: execution.model,
+      },
+      ...(execution.thinkingLevel === undefined
+        ? {}
+        : { thinkingLevel: execution.thinkingLevel }),
+      permissionMode: execution.permissionMode,
+      collaborationMode: execution.collaborationMode,
+      orchestrationMode: execution.orchestrationMode,
+    } as never);
+    const started = await hostClient.startTurn({
+      sessionId,
+      turnId,
+      content: { text: task.intent.body },
+    });
+    if (started.kind !== "started") {
+      throw new Error("Scheduled task agent turn was blocked");
+    }
+    return { sessionId, runId: started.turn.runId };
+  },
+  resolveDefaultAgentExecution: async () => {
+    if (!runtimePolicyClient) return null;
+    const sessions = await runtimePolicyClient.listSessions();
+    const live = sessions.find((session) => !session.isArchived);
+    if (!live) return null;
+    const cwd =
+      "workspace" in live && live.workspace && typeof live.workspace === "object"
+        ? (live.workspace as { hostCwd?: string }).hostCwd
+        : undefined;
+    if (!cwd || typeof live.llmConnectionSlug !== "string" || typeof live.model !== "string") {
+      return null;
+    }
+    const projectId =
+      "projectId" in live && typeof (live as { projectId?: unknown }).projectId === "string"
+        ? (live as { projectId: string }).projectId
+        : undefined;
+    return {
+      cwd,
+      ...(projectId ? { projectId } : {}),
+      backend: (live.backend as "ai-sdk" | "fake" | "pi-agent" | undefined) ?? "ai-sdk",
+      llmConnectionSlug: live.llmConnectionSlug,
+      model: live.model,
+      ...(live.thinkingLevel === undefined
+        ? {}
+        : { thinkingLevel: live.thinkingLevel }),
+      permissionMode: live.permissionMode,
+      collaborationMode: live.collaborationMode ?? "agent",
+      orchestrationMode: live.orchestrationMode ?? "default",
+    };
+  },
+  emitChanged: (reason, task) => {
+    mainWindowController.send("scheduled-tasks:changed", {
+      type: "scheduled_tasks_changed",
       reason,
-      reminderId: reminder.id,
+      taskId: task.id,
       ts: Date.now(),
     });
   },
-  emitDue: (reminder) => mainWindowController.send("plans:due", reminder),
+  emitFired: (task) => mainWindowController.send("scheduled-tasks:fired", task),
 });
 mcpManager.onChange(() => {
   mainWindowController.send("mcp:changed", mcpManager.statuses());
@@ -436,6 +506,26 @@ owner = await startRuntimeHostDesktopOwner(
               ]),
         ];
       },
+      additionalServices: () => [
+        {
+          serviceId: SCHEDULED_TASK_AUTHORITY_SERVICE_ID,
+          version: SCHEDULED_TASK_AUTHORITY_SERVICE_VERSION,
+          async call(method, input) {
+            if (method === "list") return { tasks: await scheduledTasks.list() };
+            if (method === "create") {
+              return { task: await scheduledTasks.create(input.payload) };
+            }
+            if (method !== "pause" && method !== "resume" && method !== "delete") {
+              throw new Error(`Unknown ScheduledTask authority method: ${method}`);
+            }
+            const id = requireScheduledTaskServiceId(input.id);
+            if (method === "pause") return { task: await scheduledTasks.pause(id) };
+            if (method === "resume") return { task: await scheduledTasks.resume(id) };
+            await scheduledTasks.remove(id);
+            return { ok: true };
+          },
+        },
+      ],
       oauthPresentation,
       releaseComputerUseSession,
     },
@@ -514,7 +604,7 @@ const stopComputerUseSession = (sessionId: string): void => {
 native.computerUsePip.setStopHandler(stopComputerUseSession);
 native.computerUseStatusItem.setStopHandler(stopComputerUseSession);
 
-await planReminders.refreshTimers();
+await scheduledTasks.refreshTimers();
 updateService.start();
 void ensureMcpReady()
   .then(() => mcpCapabilityPublisher.refreshIfChanged())
@@ -674,11 +764,9 @@ function registerHostClientIpc(
   });
   registerRuntimeHostWebSearchIpc({ ipcMain: scopedIpc, client });
   registerRuntimeHostWorkspaceIpc({ ipcMain: scopedIpc, client });
-  registerPlanReminderIpc({
+  registerScheduledTaskIpc({
     ipcMain: scopedIpc,
-    planReminders,
-    runtimeHostClient: client,
-    workspaceRoot,
+    scheduledTasks,
     getWorkspacePrivacyContext: async () => ({
       incognitoActive: (await client.queryRuntimePolicy()).policy.privacy
         .incognitoActive,
@@ -791,6 +879,13 @@ function registerHostClientIpc(
     capabilityBinding.dispose();
     await capabilityBinding.aligned.catch(() => undefined);
   };
+}
+
+function requireScheduledTaskServiceId(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("ScheduledTask authority requires an id");
+  }
+  return value;
 }
 
 function registerPersistentClientIpc(): void {
@@ -907,7 +1002,7 @@ function wireLifecycle(): void {
 
 async function closeRuntimeHostDesktop(): Promise<void> {
   clientSettingsWatcher.stop();
-  planReminders.stopTimers();
+  scheduledTasks.stopTimers();
   updateService.dispose();
   settingsBotsIpc?.dispose();
   permissionOverlay.dismiss();
@@ -921,7 +1016,7 @@ async function closeRuntimeHostDesktop(): Promise<void> {
     Promise.resolve().then(() => native.computerUseStatusItem.destroy()),
     Promise.resolve().then(() => native.computerUseScreenLock.dispose()),
     Promise.resolve().then(() => native.computerUse.backend?.dispose?.()),
-    planReminderStore.ready().then(() => planReminderStore.close()),
+    scheduledTaskStore.ready().then(() => scheduledTaskStore.close()),
   ]);
   for (const result of results) {
     if (result.status === "rejected")

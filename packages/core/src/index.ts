@@ -1056,73 +1056,50 @@ export {
 export type {
   CompiledCronExpression,
   CompileCronExpressionResult,
-  CronCompatibilityProfile,
   CronCompileError,
   CronCompileErrorCode,
   CronFieldName,
   CronSearchBounds,
 } from './cron-expression.js';
-export {
-  CRON_COMPATIBILITY_PROFILES,
-  compileCronExpression,
-  matchesCronField,
-} from './cron-expression.js';
+export { compileCronExpression } from './cron-expression.js';
 
-// plan-reminders.ts (PR-PLAN-REMINDER-MVP-0)
+// scheduled-task.ts — the only 定时任务 domain contract
 export type {
-  CreatePlanReminderInput,
-  PlanReminder,
-  PlanReminderAgentOrigin,
-  PlanReminderBlockReason,
-  PlanReminderBotDeliveryTarget,
-  PlanReminderCronSchedule,
-  PlanReminderDeliveryTarget,
-  PlanReminderLocalDeliveryTarget,
-  PlanReminderNormalizeResult,
-  PlanReminderOnceSchedule,
-  PlanReminderRecurrence,
-  PlanReminderRecurringFrequency,
-  PlanReminderRecurringSchedule,
-  PlanReminderRunRecord,
-  PlanReminderRunStatus,
-  PlanReminderSchedule,
-  PlanReminderStatus,
-  UpdatePlanReminderInput,
-} from './plan-reminders.js';
+  CreateScheduledTaskInput,
+  ScheduledTask,
+  ScheduledTaskCreatedBy,
+  ScheduledTaskCreatedByKind,
+  ScheduledTaskEffect,
+  ScheduledTaskExecutionTemplate,
+  ScheduledTaskNormalizeResult,
+  ScheduledTaskRun,
+  ScheduledTaskRunOutcome,
+  ScheduledTaskSchedule,
+  ScheduledTaskStatus,
+  UpdateScheduledTaskInput,
+} from './scheduled-task.js';
 export {
-  PLAN_REMINDER_CRON_EXPRESSION_MAX_CHARS,
-  PLAN_REMINDER_DELIVERY_CHAT_ID_MAX_CHARS,
-  PLAN_REMINDER_MAX_DELAY_MS,
-  PLAN_REMINDER_NOTE_MAX_CHARS,
-  PLAN_REMINDER_RECURRENCES,
-  PLAN_REMINDER_RUN_STATUSES,
-  PLAN_REMINDER_STATUSES,
-  PLAN_REMINDER_TITLE_MAX_CHARS,
-  createPlanReminderSchedule,
-  formatPlanReminderDeliveryMessage,
-  formatPlanReminderDeliveryTarget,
-  isPlanReminderDue,
-  isPlanReminderStatus,
-  nextPlanReminderRunAtAfter,
-  nextPlanReminderStateAfterTrigger,
-  normalizeCreatePlanReminderInput,
-  normalizePlanReminderCronExpression,
-  normalizePlanReminderDeliveryChatId,
-  normalizePlanReminderDeliveryTarget,
-  normalizePlanReminderNote,
-  normalizePlanReminderRunAt,
-  normalizePlanReminderTitle,
-  normalizeUpdatePlanReminderInput,
-} from './plan-reminders.js';
-// agent-automation-projection.ts — agent Automation → scheduled-tasks list rows
-export type { AgentAutomationProjectionSource } from './agent-automation-projection.js';
-export {
-  agentAutomationReminderId,
-  isAgentAutomationPlanReminder,
-  mergePlanRemindersWithAgentAutomations,
-  parseAgentAutomationReminderId,
-  projectAgentAutomationAsPlanReminder,
-} from './agent-automation-projection.js';
+  SCHEDULED_TASK_CHAT_ID_MAX_CHARS,
+  SCHEDULED_TASK_CRON_MAX_CHARS,
+  SCHEDULED_TASK_INTENT_MAX_CHARS,
+  SCHEDULED_TASK_MAX_DELAY_MS,
+  SCHEDULED_TASK_MAX_INTERVAL_SECONDS,
+  SCHEDULED_TASK_MIN_INTERVAL_SECONDS,
+  SCHEDULED_TASK_RUN_HISTORY_LIMIT,
+  SCHEDULED_TASK_RUN_OUTCOMES,
+  SCHEDULED_TASK_STATUSES,
+  SCHEDULED_TASK_TITLE_MAX_CHARS,
+  appendScheduledTaskRun,
+  compareScheduledTasksForList,
+  computeNextFireAt,
+  isScheduledTaskDue,
+  isScheduledTaskStatus,
+  nextScheduledTaskStateAfterFire,
+  normalizeCreateScheduledTaskInput,
+  normalizeUpdateScheduledTaskInput,
+  pauseScheduledTask,
+  resumeScheduledTask,
+} from './scheduled-task.js';
 // foreign-session.ts (#1057) — untrusted Claude Code / Codex session
 // contracts + defensive parsing. Subpath @maka/core/foreign-session preferred.
 export type {
@@ -1937,8 +1914,6 @@ export type { AttachmentByteReader } from './attachments.js';
 export type {
   AutomationAuthoritySnapshot,
   AutomationDefinition,
-  AutomationExecutionTemplate,
-  AutomationKind,
   AutomationPendingFire,
   AutomationSchedule,
   AutomationStatus,
