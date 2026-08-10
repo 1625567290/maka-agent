@@ -248,6 +248,7 @@ export function AppShell({ initialOnboardingSnapshot = null }: AppShellProps = {
             surface: 'toast',
             title: input.title,
             ...(input.description ? { description: input.description } : {}),
+            ...(input.diagnosticDetails ? { details: input.diagnosticDetails } : {}),
             rendererUserAgent: navigator.userAgent,
             rendererLocale: navigator.language,
           })
@@ -1189,6 +1190,16 @@ function AppShellContent({
       cancelled = true;
     };
   }, [activeId, setInteractionBySession]);
+  useEffect(
+    () =>
+      window.maka.sessions.subscribeActiveInteractions(({ sessionId, interactions }) => {
+        markInteractionChanged(sessionId);
+        setInteractionBySession((current) =>
+          reconcileInteractions(current, sessionId, interactions),
+        );
+      }),
+    [markInteractionChanged, setInteractionBySession],
+  );
   const activeBoundarySurface = deriveDesktopExecutionBoundarySurface(
     activeId,
     activeExecutionBoundary,

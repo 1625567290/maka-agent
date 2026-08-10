@@ -1,5 +1,6 @@
 import type { IpcMain } from "electron";
 import type {
+  ActiveInteractionRequestEvent,
   CreateSessionRequestInput,
   SessionChangedEvent,
   SessionChangedReason,
@@ -300,6 +301,15 @@ export async function createDesktopRuntimeHostCandidate(
   let capabilitiesRegistered = false;
   try {
     let domains: RuntimeHostSessionDomainsIpcHandle | undefined;
+    const emitActiveInteractionsChanged = (
+      sessionId: string,
+      interactions: readonly ActiveInteractionRequestEvent[],
+    ): void => {
+      deps.sendToRenderer?.('sessions:active-interactions-changed', {
+        sessionId,
+        interactions,
+      });
+    };
     const sessionObserver = new RuntimeHostSessionObserver({
       client,
       emitSessionsChanged: (reason, sessionId, extra) =>
@@ -307,6 +317,9 @@ export async function createDesktopRuntimeHostCandidate(
       emitSessionDomainChanged: (change) => domains?.sessionDomainChanged(change),
       emitRuntimeResourcePtyData: (event) => domains?.runtimeResourcePtyData(event),
       emitAgentGraphChanged: (event) => domains?.agentGraphChanged(event),
+      emitActiveInteractionsChanged,
+      emitSubscriptionRecovered: (sessionId) =>
+        domains?.sessionSubscriptionRecovered(sessionId),
       onWatchedTurnFinished: (sessionId, outcome) =>
         outcome === "completed"
           ? deps.completeComputerUseTurn(sessionId)
@@ -332,6 +345,12 @@ export async function createDesktopRuntimeHostCandidate(
     observationsAttached = true;
     for (const sessionId of restoredSessionIds) {
       deps.emitSessionsChanged("message-appended", sessionId);
+      deps.emitSessionsChanged("goal-change", sessionId);
+      domains.sessionSubscriptionRecovered(sessionId);
+      emitActiveInteractionsChanged(
+        sessionId,
+        sessionObserver.listActiveInteractions(sessionId) ?? [],
+      );
     }
     const watchComputerUseTurn = (sessionId: string, turnId: string): void => {
       void sessionObserver
