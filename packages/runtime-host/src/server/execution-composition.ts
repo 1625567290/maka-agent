@@ -883,6 +883,18 @@ export async function createExecutionRuntimeHostComposition(
     graphClient = new HostAgentGraphCoordinator({
       authority: graphCoordinator,
       continuity: continuityCoordinator,
+      stopExecution: (rootSessionId) =>
+        requireGraphCoordinator(graphCoordinator).stopExecution(rootSessionId, {
+          stopRoot: () =>
+            requireRootCoordinator(rootCoordinator).stopSession(rootSessionId, {
+              source: 'stop_button',
+            }),
+          withSupervisorWakesSuppressed: (operation) =>
+            requireGraphSupervisorWake(graphSupervisorWake).runWithSessionWakesSuppressed(
+              rootSessionId,
+              operation,
+            ),
+        }),
     });
     const observeBackendInvalidation = (completion: Promise<void>) => {
       void completion.catch(() => {
