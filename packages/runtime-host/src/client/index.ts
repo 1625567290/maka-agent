@@ -47,9 +47,16 @@ export {
 } from './catalog-reader.js';
 export {
   connectOrSpawnRuntimeHost,
+  connectOwnedRuntimeHost,
   type ConnectOrSpawnRuntimeHostInput,
   type ConnectOrSpawnRuntimeHostResult,
+  type ConnectOwnedRuntimeHostResult,
 } from './connect-or-spawn.js';
+export { runHostedExecution, type RunHostedExecutionInput } from './hosted-execution.js';
+export {
+  configureHostedExecutionTarget,
+  type HostedExecutionTargetInput,
+} from './hosted-execution-target.js';
 export { type ClientCapabilityProvider } from './client-capability.js';
 export {
   startRuntimeHostCapabilityProviderService,
