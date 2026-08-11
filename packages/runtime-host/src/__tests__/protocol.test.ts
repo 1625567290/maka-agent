@@ -33,6 +33,7 @@ import {
   TURN_MESSAGE_QUOTE_LABEL_MAX_LENGTH,
   TURN_MESSAGE_QUOTE_MAX_COUNT,
   TURN_MESSAGE_QUOTE_TEXT_MAX_LENGTH,
+  TURN_FAILURE_MESSAGE_MAX_BYTES,
   TURN_SKILL_ID_MAX_COUNT,
   TURN_SKILL_ID_MAX_LENGTH,
 } from '../protocol/turn.js';
@@ -1544,6 +1545,36 @@ describe('Runtime Host bootstrap protocol', () => {
             status: 'completed',
             terminalEventId: 'event-1',
             abortSource: 'user',
+          },
+        }),
+      isInvalidFrame,
+    );
+  });
+
+  test('carries a bounded failed Turn message without opening the snapshot shape', () => {
+    const response = {
+      requestId: 'request-failed-turn',
+      operation: 'turn.query' as const,
+      ok: true as const,
+      result: {
+        sessionId: 'session-1',
+        turnId: 'turn-1',
+        runId: 'run-1',
+        status: 'failed' as const,
+        terminalEventId: 'event-1',
+        failureClass: 'unknown',
+        failureMessage: 'Provider request failed',
+      },
+    };
+
+    assert.deepEqual(decodeHostFrame(response), response);
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          ...response,
+          result: {
+            ...response.result,
+            failureMessage: '界'.repeat(TURN_FAILURE_MESSAGE_MAX_BYTES),
           },
         }),
       isInvalidFrame,

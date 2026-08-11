@@ -816,6 +816,15 @@ function registerPersistentClientIpc(): void {
       if (!runtimePolicyClient) throw new Error("Runtime Host is unavailable");
       return runtimePolicyClient.queryHostDiagnostics();
     },
+    getRuntimeHostTurnTrace: async (sessionId, turnId) => {
+      if (!runtimePolicyClient) throw new Error("Runtime Host is unavailable");
+      const result = await runtimePolicyClient.queryExecutionInspect({
+        kind: "turn_trace",
+        sessionId,
+        turnId,
+      });
+      return result.kind === "turn_trace" ? result.turn : undefined;
+    },
     writeClipboard: (report) => clipboard.writeText(report),
   });
   ipcMain.handle("attachments:pickFiles", async (event) => {
