@@ -753,7 +753,6 @@ Use host tools.`,
       assert.equal(result.ok, false);
       if (result.ok) return;
       assert.equal(result.reason, 'host_incompatible');
-
     });
   });
 
@@ -786,7 +785,6 @@ Use host tools.`,
         toolNames: new Set(['Read', 'ImaginaryTool']),
       });
       assert.equal(ok.ok, true);
-
     });
   });
 
@@ -866,7 +864,6 @@ Plain work.`,
       assert.ok(full);
       assert.match(full, /<available-skill id="plain-helper"/);
       assert.match(full, /<available-skill id="gated-helper"/);
-
     });
   });
 
@@ -1295,8 +1292,6 @@ Body.`,
       assert.deepEqual(searched.matches, []);
     });
   });
-
-
 
   it('re-evaluates zero-match schema v2 bare preferences after multi-scope discovery changes', async () => {
     await withWorkspace(async (workspaceRoot) => {
