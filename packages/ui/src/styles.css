@@ -524,7 +524,7 @@
  }
 .maka-sandbox-blocked-copy { align-self: start; }
 .maka-sandbox-blocked-copy[data-pending="true"] { cursor: progress; }
-.maka-sandbox-blocked-copy[data-copy-feedback="copied"] { border-color: oklch(from var(--link) l c h / 0.35); color: var(--link); }
+.maka-sandbox-blocked-copy[data-copy-feedback="copied"] { border-color: oklch(from var(--accent) l c h / 0.35); color: var(--link); }
 .maka-sandbox-blocked-copy[data-copy-feedback="failed"] { border-color: oklch(from var(--destructive) l c h / 0.35); color: var(--destructive); }
 .maka-turn-status-icon { flex: 0 0 auto; }
 
@@ -738,7 +738,7 @@
 .maka-tool-diff-line[data-line="del"] { background: oklch(from var(--destructive) l c h / 0.1); color: var(--destructive); }
 .maka-tool-diff-line[data-line="hunk"] {
   font: var(--maka-text-heading-5);
- background: oklch(from var(--link) l c h / 0.08); color: var(--foreground-secondary); }
+ background: oklch(from var(--accent) l c h / 0.08); color: var(--foreground-secondary); }
 .maka-tool-diff-line[data-line="meta"] { color: var(--muted-foreground); }
 .maka-tool-diff-line[data-line="ctx"] { color: var(--foreground-secondary); }
 .maka-tool-terminal-cwd { color: var(--muted-foreground); background: transparent; }
@@ -816,7 +816,7 @@
 .maka-agent-preview-section span {
   font: var(--maka-text-supporting);
  margin: 0; color: var(--foreground-secondary); white-space: pre-wrap; word-break: break-word; }
-.maka-agent-preview-copy[data-copied="true"] { border-color: oklch(from var(--link) l c h / 0.35); color: var(--link); }
+.maka-agent-preview-copy[data-copied="true"] { border-color: oklch(from var(--accent) l c h / 0.35); color: var(--link); }
 
 .maka-web-search-preview { display: grid; gap: var(--space-2); padding: var(--space-2-5) var(--space-3); border: 1px solid var(--foreground-10); border-radius: var(--radius-surface); background: var(--foreground-3); }
 .maka-web-search-preview > header { display: flex; flex-direction: column; gap: var(--space-0-5); padding-bottom: var(--space-1-5); border-bottom: 1px solid var(--foreground-10); }

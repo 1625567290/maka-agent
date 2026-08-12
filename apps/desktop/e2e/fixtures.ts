@@ -337,6 +337,7 @@ export const test = base.extend<{
   window: Page;
   gitReviewWindow: { page: Page; projectRoot: string };
   invocableSkillsWindow: Page;
+  linkColorWindow: Page;
 }>({
   // Seeded: a pre-staged connection clears onboarding so the composer is ready.
   window: async ({}, use) => {
@@ -365,6 +366,13 @@ export const test = base.extend<{
       readinessSelector: COMPOSER_INPUT,
       locale: 'zh',
       invocableSkills: true,
+    }, use);
+  },
+  linkColorWindow: async ({}, use) => {
+    await withE2eWindow({
+      seed: false,
+      readinessSelector: '.settingsBotConfigDocLink',
+      e2eFixtureScenario: 'settings-bots-onboarding',
     }, use);
   },
 });
