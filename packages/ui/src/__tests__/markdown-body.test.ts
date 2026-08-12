@@ -26,6 +26,15 @@ it('keeps raw HTML inert instead of expanding the Markdown trust surface', () =>
   assert.doesNotMatch(markup, /<details/);
 });
 
+it('keeps a lazy live stream behind the display cursor', () => {
+  const markup = renderToStaticMarkup(createElement(Markdown, {
+    text: 'live output that has not reached the display cursor',
+    streaming: true,
+  }));
+
+  assert.doesNotMatch(markup, /live output/);
+});
+
 it('redacts secrets before even the lazy Markdown fallback reaches the rendered tree', () => {
   const markup = renderToStaticMarkup(createElement(Markdown, {
     text: 'Authorization: Bearer sk-live-1234567890abcdef',
@@ -189,20 +198,44 @@ it('pins Mermaid security and complexity limits for untrusted assistant output',
   assert.equal(config.theme, 'dark');
 });
 
-it('does not reveal the unreached tail on the first streaming render', () => {
+it('keeps a new stream behind the display cursor on its first render', () => {
   const markup = renderToStaticMarkup(createElement(MarkdownBody, {
-    text: 'visible start and unreached tail',
+    text: 'new output that has not been presented yet',
     streaming: true,
   }));
 
-  assert.doesNotMatch(markup, /unreached tail/);
+  assert.doesNotMatch(markup, /new output that has not been presented yet/);
 });
 
-it('keeps the lazy fallback behind the streaming display cursor', () => {
-  const markup = renderToStaticMarkup(createElement(Markdown, {
-    text: 'visible start and lazy unreached tail',
+it('shows only the restored prefix on its first streaming render', () => {
+  const markup = renderToStaticMarkup(createElement(MarkdownBody, {
+    text: '**output restored** with a new delta',
     streaming: true,
+    settledText: '**output restored**',
   }));
 
-  assert.doesNotMatch(markup, /lazy unreached tail/);
+  assert.match(markup, /<strong[^>]*>output restored<\/strong>/);
+  assert.doesNotMatch(markup, /new delta/);
+});
+
+it('settles only the verified prefix when restored content was rewritten', () => {
+  const markup = renderToStaticMarkup(createElement(MarkdownBody, {
+    text: 'prefix <redacted> NEW',
+    streaming: true,
+    settledText: 'prefix sk-123456789012345',
+  }));
+
+  assert.match(markup, />prefix </);
+  assert.doesNotMatch(markup, /redacted|NEW/);
+});
+
+it('never settles half of a rewritten Unicode code point', () => {
+  const markup = renderToStaticMarkup(createElement(MarkdownBody, {
+    text: 'same 😃 NEW',
+    streaming: true,
+    settledText: 'same 😀 old',
+  }));
+
+  assert.match(markup, />same </);
+  assert.doesNotMatch(markup, /😃|NEW|�/u);
 });

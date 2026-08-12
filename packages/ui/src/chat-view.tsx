@@ -39,10 +39,17 @@ import { SessionContextLayer } from './session-context-layer.js';
 // inside; module scope only saves threading it through the shell.
 const turnSizeIndex = createTurnSizeIndex();
 
+export interface LiveContentActivationSnapshot {
+  turnId: string;
+  entries: ReadonlyMap<string, string>;
+}
+
 export function ChatView(props: {
   messages: StoredMessage[];
   messageLoading?: boolean;
   liveTurn?: LiveTurnProjection;
+  /** Live display content already present when the host activated this conversation surface. */
+  initialLiveContentSnapshot?: LiveContentActivationSnapshot;
   shellRunUpdates?: readonly ShellRunUpdate[];
   /** Called once the streaming bubble has displayed the final text and can hand off to history. */
   onStreamingSettled?(messageId?: string): void;
@@ -655,6 +662,10 @@ export function ChatView(props: {
                               onStreamingSettled: props.onStreamingSettled,
                               runningStatus: props.runningStatus,
                               providerRetry: props.liveTurn?.providerRetry,
+                              initialLiveContent: props.liveTurn?.turnId
+                                === props.initialLiveContentSnapshot?.turnId
+                                ? props.initialLiveContentSnapshot?.entries
+                                : undefined,
                             }
                           : undefined
                       }

@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { encodeIngestItems } from './attachment-ingest-payload.js';
+import { notifyWhenSeeded } from './seed-completion.js';
 import type {
   MakaBridge,
   OnboardingSnapshot,
@@ -602,13 +603,21 @@ const makaBridge = {
     > {
       return ipcRenderer.invoke('chat:saveConversationToFile', input);
     },
-    subscribeEvents(sessionId: string, handler: (event: SessionEvent) => void): () => void {
+    subscribeEvents(
+      sessionId: string,
+      handler: (event: SessionEvent) => void,
+      onSeeded?: () => void,
+    ): () => void {
       const channel = `sessions:event:${sessionId}`;
       const listener = (_event: Electron.IpcRendererEvent, payload: SessionEvent) => handler(payload);
       ipcRenderer.on(channel, listener);
       const observerId = crypto.randomUUID();
-      void ipcRenderer.invoke('sessions:observe', sessionId, observerId).catch(() => undefined);
+      const disposeSeedNotification = notifyWhenSeeded(
+        ipcRenderer.invoke('sessions:observe', sessionId, observerId),
+        onSeeded,
+      );
       return () => {
+        disposeSeedNotification();
         ipcRenderer.off(channel, listener);
         void ipcRenderer.invoke('sessions:unobserve', observerId).catch(() => undefined);
       };
