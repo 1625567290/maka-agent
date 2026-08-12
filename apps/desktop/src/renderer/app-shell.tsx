@@ -101,6 +101,7 @@ import {
 } from './app-update-install';
 import { ProviderLogo } from './settings/provider-display';
 import { ProviderBrandMark } from './settings/provider-brand-marks';
+import { RuntimeHostSshTerminalDialog } from './settings/runtime-host-ssh-terminal-dialog.js';
 import { getShellCopy, localizedShellErrorMessage } from './locales/shell-copy';
 import { getDesktopConversationCopy } from './locales/conversation-copy';
 import {
@@ -1742,6 +1743,9 @@ function AppShellContent({
     sessionCwd: activeSession?.cwd,
     sessionProjectId: activeSession?.projectId,
     onProjectSelected: (ownerSessionId) => {
+      void refreshSkills();
+      void refreshManagedSkillSources();
+      void refreshBundledSkillCatalog();
       if (ownerSessionId && activeIdRef.current === ownerSessionId) openNewTaskSurface();
     },
     toastApi,
@@ -1772,9 +1776,10 @@ function AppShellContent({
       ? { onSelectNoProject: selectNoProject }
       : {}),
   };
+  const taskReadinessWorkspace = activeSession?.cwd ?? projectInfo?.projectPath;
   const taskReadinessRequest = {
     ...resolveTaskReadinessModelTarget(activeSession, activeSessionSendOutcome, newChatModel),
-    cwd: activeSession?.cwd ?? projectInfo?.projectPath,
+    ...(taskReadinessWorkspace ? { cwd: taskReadinessWorkspace } : {}),
   };
   const taskReadiness = useTaskSubmissionReadiness(
     taskReadinessRequest,
@@ -3178,6 +3183,8 @@ function AppShellContent({
           closeWorkbarTabsImmediately('bottom', byPlacement.bottom);
         }}
       />
+
+      <RuntimeHostSshTerminalDialog />
 
       <AppShellOverlays
         settingsOpen={settingsOpen}

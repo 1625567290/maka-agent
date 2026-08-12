@@ -102,6 +102,7 @@ import {
   RuntimeHostUpgradeCancelledError,
   startRuntimeHostDesktopOwner,
   type RuntimeHostDesktopOwner,
+  type RuntimeHostDesktopTargetState,
 } from "./runtime-host-desktop-owner.js";
 import { runtimeHostUpgradePrompts } from "./runtime-host-upgrade-dialog.js";
 import { registerRuntimeHostMemoryIpc } from "./runtime-host-memory-ipc-main.js";
@@ -111,6 +112,7 @@ import {
   resolveSelectedDesktopRuntimeHostProfile,
   selectDesktopRuntimeHostProfile,
 } from "./runtime-host-profile-service.js";
+import { createDesktopRuntimeHostSshTerminal } from "./runtime-host-ssh-terminal.js";
 import { registerRuntimeHostOAuthIpc } from "./runtime-host-oauth-ipc-main.js";
 import { RuntimeHostOAuthPresentation } from "./runtime-host-oauth-presentation.js";
 import { registerRuntimeHostPermissionsIpc } from "./runtime-host-permissions-ipc-main.js";
@@ -186,6 +188,8 @@ if (runtimeHostStartupSelection.kind === "unavailable") {
 const startupRuntimeHostProfileId = runtimeHostStartupSelection.selectedProfileId;
 let startupRuntimeHost = runtimeHostStartupSelection.target;
 let lastRuntimeHostTarget = startupRuntimeHost;
+let runtimeHostReadiness: RuntimeHostDesktopTargetState["readiness"] =
+  "connecting";
 let lastPublishedRuntimeHostTargetEpoch: string | undefined;
 let owner: RuntimeHostDesktopOwner | undefined;
 const currentRuntimeHost = (): ResolvedRuntimeHostProfile | undefined =>
@@ -255,6 +259,10 @@ const mainWindowController = createMainWindowController({
   startHidden,
   onClose: () => onMainWindowClose(),
 });
+const runtimeHostSshTerminal = createDesktopRuntimeHostSshTerminal({
+  ipcMain,
+  send: (channel, event) => mainWindowController.send(channel, event),
+});
 const native = assembleDesktopNativeCapabilities({
   isComputerUseRealModelE2e,
   settings: settingsStore,
@@ -295,6 +303,7 @@ const runtimeHostProfileService = createDesktopRuntimeHostProfileService({
   clientDataRoot: userDataDir,
   selectedProfileId: startupRuntimeHostProfileId,
   getActiveTarget: currentRuntimeHost,
+  getRuntimeHostReadiness: () => runtimeHostReadiness,
   activate: async (target) => {
     try {
       if (target.profile.kind === "local" && !localStorageRootReady) {
@@ -306,7 +315,13 @@ const runtimeHostProfileService = createDesktopRuntimeHostProfileService({
       if (owner) {
         await owner.switchTarget(
           target.profile.kind === "remote"
-            ? { profile: target.profile, credential: target.credential! }
+            ? {
+                profile: target.profile,
+                credential: target.credential!,
+                ...(target.profile.transport.kind === "ssh"
+                  ? { sshInteraction: "terminal" as const }
+                  : {}),
+              }
             : undefined,
         );
       } else {
@@ -327,18 +342,25 @@ let runtimePolicyTarget:
       readonly isActive: () => boolean;
     }
   | undefined;
-const currentDesktopWorkspaceTarget = async (
+const selectedDesktopWorkspaceTarget = async (
   target: DesktopRuntimeHostTargetPolicy,
-): Promise<WorkspaceTarget> => {
+): Promise<WorkspaceTarget | undefined> => {
   const currentTarget = requireRuntimePolicyTarget(target);
   const current = await currentTarget.projectManagement.current();
   if (typeof current.projectId === "string") {
     return { kind: "project", projectId: current.projectId };
   }
-  if (target.kind === "remote") {
+  if (target.kind === "remote") return undefined;
+  return { kind: "host_path", path: current.path };
+};
+const currentDesktopWorkspaceTarget = async (
+  target: DesktopRuntimeHostTargetPolicy,
+): Promise<WorkspaceTarget> => {
+  const workspace = await selectedDesktopWorkspaceTarget(target);
+  if (!workspace) {
     throw new Error("Select a project from the remote Runtime Host first");
   }
-  return { kind: "host_path", path: current.path };
+  return workspace;
 };
 const mcpCapabilityPublisher = createCapabilityRevisionPublisher(() =>
   mcpManager.toolSnapshot().revision,
@@ -436,6 +458,10 @@ const sessionCopyOwnerProcessId = randomUUID();
 let remoteHostFailurePromptOpen = false;
 const runtimeHostAtOwnerStart = currentRuntimeHost();
 if (!runtimeHostAtOwnerStart) throw new Error("No Runtime Host target is selected");
+const needsInteractiveSshStartup =
+  runtimeHostAtOwnerStart.profile.kind === "remote" &&
+  runtimeHostAtOwnerStart.profile.transport.kind === "ssh";
+if (needsInteractiveSshStartup) wireLifecycle();
 owner = await startRuntimeHostDesktopOwner(
   {
     rootPath: workspaceRoot,
@@ -446,6 +472,9 @@ owner = await startRuntimeHostDesktopOwner(
           remote: {
             profile: runtimeHostAtOwnerStart.profile,
             credential: runtimeHostAtOwnerStart.credential!,
+            ...(runtimeHostAtOwnerStart.profile.transport.kind === "ssh"
+              ? { sshInteraction: "terminal" as const }
+              : {}),
           },
         }
       : {}),
@@ -563,10 +592,12 @@ owner = await startRuntimeHostDesktopOwner(
     onError: (error) =>
       console.error("[runtime-host] projection refresh failed:", error),
     registerClientIpc: registerHostClientIpc,
+    openSshTunnel: runtimeHostSshTerminal.openSshTunnel,
   },
   {
     upgradePrompts: runtimeHostUpgradePrompts,
     onTargetStateChanged: ({ epoch, target, readiness }) => {
+      runtimeHostReadiness = readiness;
       const targetChanged = lastPublishedRuntimeHostTargetEpoch !== epoch;
       lastPublishedRuntimeHostTargetEpoch = epoch;
       lastRuntimeHostTarget = target;
@@ -604,6 +635,7 @@ owner = await startRuntimeHostDesktopOwner(
   }
   throw error;
 });
+if (!needsInteractiveSshStartup) wireLifecycle();
 
 async function handleRemoteRuntimeHostFailure(error: unknown): Promise<never> {
   if (remoteHostFailurePromptOpen) return new Promise<never>(() => undefined);
@@ -661,8 +693,6 @@ void clientSettingsEffects
   .catch((error) =>
     console.error("[runtime-host] Client settings startup failed:", error),
   );
-
-wireLifecycle();
 
 function registerHostClientIpc(
   client: DesktopRuntimeHostClient,
@@ -867,7 +897,7 @@ function registerHostClientIpc(
     client,
     workspaceRoot,
     mainWindowController,
-    getCurrentWorkspaceTarget: () => currentDesktopWorkspaceTarget(target),
+    getSelectedWorkspaceTarget: () => selectedDesktopWorkspaceTarget(target),
     getDefaultPermissionMode: () =>
       resolveDefaultPermissionMode(() => loadRuntimeHostSettings(settingsIpcDeps)),
     openPath: (path) => shell.openPath(path),
@@ -1147,6 +1177,7 @@ async function closeRuntimeHostDesktop(): Promise<void> {
   permissionOverlay.dismiss();
   const results = await Promise.allSettled([
     owner?.close(),
+    runtimeHostSshTerminal.close(),
     botRegistry.stopAll(),
     mcpManager.close(),
     mainWindowController.disposeBrowserViews(),

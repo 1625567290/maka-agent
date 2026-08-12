@@ -149,6 +149,7 @@ test("rolls back a failed new remote profile without changing the active Host", 
     snapshot: {
       profiles: [{ id: "local", name: "Local", kind: "local" }],
       selectedProfileId: "local",
+      runtimeHostReadiness: "ready",
       activeProfile: { id: "local", name: "Local", kind: "local" },
       activeProfileId: "local",
     },
@@ -388,7 +389,7 @@ test("reconnects when another process rotates the active profile credential", as
     activate: async (target) => {
       activations.push(
         target.profile.kind === "remote"
-          ? `${target.profile.transport.url}|${target.credential}`
+          ? `${target.profile.transport.kind === "ssh" ? target.profile.transport.destination : target.profile.transport.url}|${target.credential}`
           : "local",
       );
       return { ok: true, activeTarget: target };
@@ -507,6 +508,7 @@ function createProfileService(
     clientDataRoot,
     selectedProfileId: options.selectedProfileId ?? activeTarget.profile.id,
     getActiveTarget: () => activeTarget,
+    getRuntimeHostReadiness: () => "ready",
     activate: async (target) => {
       const result = options.activate
         ? await options.activate(target)

@@ -219,6 +219,7 @@ export type AppUpdateInstallResult =
 export interface DesktopRuntimeHostProfileSnapshot {
   readonly profiles: readonly RuntimeHostProfile[];
   readonly selectedProfileId: string;
+  readonly runtimeHostReadiness: 'connecting' | 'ready' | 'reconnecting' | 'unavailable';
   readonly activeProfile?: RuntimeHostProfile;
   readonly activeProfileId?: string;
   readonly unavailable?: {
@@ -250,6 +251,30 @@ export interface DesktopRuntimeHostProfileChangedEvent {
   readonly targetChanged: boolean;
   readonly readiness: 'connecting' | 'ready' | 'reconnecting' | 'unavailable';
 }
+
+export type DesktopRuntimeHostSshTerminalEvent =
+  | { readonly kind: 'opened'; readonly revision: number; readonly sessionId: string }
+  | { readonly kind: 'data'; readonly revision: number; readonly sessionId: string; readonly data: string }
+  | { readonly kind: 'connected'; readonly revision: number; readonly sessionId: string }
+  | {
+      readonly kind: 'closed';
+      readonly revision: number;
+      readonly sessionId: string;
+      readonly code: number | null;
+      readonly signal: string | null;
+    };
+
+export type DesktopRuntimeHostSshTerminalSnapshot =
+  | { readonly kind: 'idle'; readonly revision: number }
+  | { readonly kind: 'connecting'; readonly revision: number; readonly sessionId: string; readonly output: string }
+  | {
+      readonly kind: 'closed';
+      readonly revision: number;
+      readonly sessionId: string;
+      readonly output: string;
+      readonly code: number | null;
+      readonly signal: string | null;
+    };
 
 export interface DesktopProjectCapabilities {
   readonly chooseClientDirectory: boolean;
@@ -298,6 +323,14 @@ export interface MakaBridge {
     subscribeChanges(
       handler: (event: DesktopRuntimeHostProfileChangedEvent) => void,
     ): () => void;
+  };
+
+  runtimeHostSshTerminal: {
+    getSnapshot(): Promise<DesktopRuntimeHostSshTerminalSnapshot>;
+    write(sessionId: string, data: string): Promise<void>;
+    resize(sessionId: string, cols: number, rows: number): Promise<void>;
+    cancel(sessionId: string): Promise<void>;
+    subscribe(handler: (event: DesktopRuntimeHostSshTerminalEvent) => void): () => void;
   };
 
   pets: {
