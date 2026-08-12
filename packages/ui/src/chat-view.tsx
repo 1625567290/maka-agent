@@ -159,7 +159,7 @@ export function ChatView(props: {
    * chat view only scrolls/highlights the already-rendered turn.
    */
   scrollTargetTurn?: { turnId: string; nonce: number };
-  scrollBehavior?: ScrollBehavior;
+  scrollBehavior: ScrollBehavior;
   /**
    * PR109f: when the active session is a branched session
    * (`parentSessionId` set on its summary), show a banner above the
@@ -409,6 +409,7 @@ export function ChatView(props: {
     sessionId,
     turnIds: orderedTurnIds,
     scrollRef,
+    scrollBehavior: props.scrollBehavior,
     targetTurnId: props.scrollTargetTurn?.turnId,
     seededGeometry,
   });
@@ -593,6 +594,7 @@ export function ChatView(props: {
         <PromptAnchorRail
           turns={promptRailTurns}
           scrollRef={scrollRef}
+          scrollBehavior={props.scrollBehavior}
           onNavigateFallback={revealTurn}
           mountedTurnsRevision={mountStart}
         />
