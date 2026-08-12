@@ -8,14 +8,74 @@ import {
   overlayLiveTurn,
   type TurnTimelineItem,
 } from "../materialize.js";
-import { applyLiveTurnEvent, armLiveTurn } from "../live-turn-projection.js";
+import {
+  applyLiveTurnEvent,
+  armLiveTurn,
+} from "../live-turn-projection.js";
 
-describe("materializeChat attachments", () => {
-  test("overlays a steering message immediately and deduplicates its persisted row", () => {
-    const settled = materializeTurns([
-      { type: "user", id: "original", turnId: "t1", ts: 1, text: "original request" },
+const originalUser = {
+  type: "user" as const,
+  id: "original",
+  turnId: "t1",
+  ts: 1,
+  text: "request",
+};
+const beforeAssistant = {
+  type: "assistant" as const,
+  id: "before-steer",
+  turnId: "t1",
+  ts: 2,
+  text: "before",
+  modelId: "fixture",
+};
+const steeringUser = {
+  type: "user" as const,
+  id: "steer-1",
+  turnId: "t1",
+  ts: 3,
+  text: "steer",
+};
+
+function timelineText(turn: ReturnType<typeof materializeTurns>[number] | undefined): string[] {
+  return turn?.timeline.map((item) =>
+    item.kind === "user" ? `user:${item.message.text}` : `${item.kind}:${"text" in item ? item.text : ""}`,
+  ) ?? [];
+}
+
+describe("steering timeline", () => {
+  test("keeps a steering message at its conversational position", () => {
+    const [turn] = materializeTurns([
+      originalUser,
+      beforeAssistant,
+      steeringUser,
+      {
+        type: "assistant",
+        id: "after-steer",
+        turnId: "t1",
+        ts: 4,
+        text: "after",
+        modelId: "fixture",
+      },
     ]);
-    const live = applyLiveTurnEvent(armLiveTurn("t1"), {
+
+    assert.deepEqual(timelineText(turn), [
+      "text:before",
+      "user:steer",
+      "text:after",
+    ]);
+  });
+
+  test("renders one live steering message while its persisted row catches up", () => {
+    const settled = materializeTurns([originalUser]);
+    const before = applyLiveTurnEvent(armLiveTurn("t1"), {
+      type: "text_complete",
+      id: "event-before",
+      messageId: "before-steer",
+      turnId: "t1",
+      ts: 1,
+      text: "before",
+    });
+    const live = applyLiveTurnEvent(before, {
       type: "steering_message",
       id: "event-steer",
       messageId: "steer-1",
@@ -25,22 +85,69 @@ describe("materializeChat attachments", () => {
     });
 
     const [overlaid] = overlayLiveTurn(settled, live);
-    assert.deepEqual(overlaid?.userInterjections?.map((message) => message.text), [
-      "inserted instruction",
-    ]);
+    assert.deepEqual(timelineText(overlaid), ["text:before", "user:inserted instruction"]);
 
     const persisted = materializeTurns([
-      { type: "user", id: "original", turnId: "t1", ts: 1, text: "original request" },
+      originalUser,
+      beforeAssistant,
       { type: "user", id: "steer-1", turnId: "t1", ts: 2, text: "inserted instruction" },
     ]);
     const [deduplicated] = overlayLiveTurn(persisted, live);
-    assert.equal(deduplicated?.user?.text, "original request");
-    assert.deepEqual(deduplicated?.userInterjections?.map((message) => message.text), [
-      "inserted instruction",
-    ]);
+    assert.deepEqual(timelineText(deduplicated), ["text:before", "user:inserted instruction"]);
   });
 
+  test("keeps a persisted tool before live steering during handoff", () => {
+    const persisted = materializeTurns([
+      originalUser,
+      {
+        type: "tool_call",
+        id: "tool-1",
+        turnId: "t1",
+        stepId: "tool-step",
+        ts: 2,
+        toolName: "Read",
+        args: {},
+      },
+      steeringUser,
+    ]);
+    const tool = applyLiveTurnEvent(armLiveTurn("t1"), {
+      type: "tool_start",
+      id: "tool-event",
+      turnId: "t1",
+      stepId: "tool-step",
+      toolUseId: "tool-1",
+      toolName: "Read",
+      args: {},
+      ts: 2,
+    });
+    const steering = applyLiveTurnEvent(tool, {
+      type: "steering_message",
+      id: "steer-event",
+      messageId: "steer-1",
+      turnId: "t1",
+      ts: 3,
+      content: { text: "steer" },
+    });
+    const live = applyLiveTurnEvent(steering, {
+      type: "text_delta",
+      id: "text-event",
+      messageId: "after-steer",
+      turnId: "t1",
+      ts: 4,
+      text: "after",
+    });
 
+    const [overlaid] = overlayLiveTurn(persisted, live);
+    assert.deepEqual(timelineText(overlaid), ["tools:", "user:steer", "text:after"]);
+    assert.deepEqual(
+      overlaid?.timeline.flatMap((item) =>
+        item.kind === "tools" ? item.items.map((tool) => tool.toolUseId) : []),
+      ["tool-1"],
+    );
+  });
+});
+
+describe("materializeChat message metadata", () => {
   test("preserves an explicit empty reference projection as the new-format marker", () => {
     const messages: StoredMessage[] = [
       {
@@ -55,8 +162,6 @@ describe("materializeChat attachments", () => {
     assert.deepEqual(materializeChat(messages)[0]?.inlineReferences, []);
     assert.deepEqual(materializeTurns(messages)[0]?.user?.inlineReferences, []);
   });
-
-
 
   test("preserves Host provenance on a Goal continuation", () => {
     const messages: StoredMessage[] = [
@@ -79,9 +184,6 @@ describe("materializeChat attachments", () => {
       goalId: "goal-1",
     });
   });
-
-
-
 });
 
 // ── #1307: the timeline model stays flat (fold is a render concern) ──────────
