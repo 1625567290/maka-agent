@@ -12,6 +12,7 @@ import {
 import {
   connectRemoteRuntimeHost,
   normalizeRemoteRuntimeHostUrl,
+  type ConnectRemoteRuntimeHostResult,
   type RuntimeHostConnection,
 } from './connection.js';
 import { RuntimeHostPermanentReconnectError } from './reconnect-lifecycle.js';
@@ -58,8 +59,16 @@ export interface ResolvedRuntimeHostProfile {
 export interface RuntimeHostProfileCatalog {
   read(): Promise<RuntimeHostProfileDocument>;
   resolve(profileId?: string): Promise<ResolvedRuntimeHostProfile>;
+  create(
+    profile: RemoteRuntimeHostProfile,
+    credential: string,
+  ): Promise<RuntimeHostProfileDocument>;
   save(profile: RemoteRuntimeHostProfile, credential?: string): Promise<RuntimeHostProfileDocument>;
   remove(profileId: string): Promise<RuntimeHostProfileDocument>;
+  removeIfCurrent(target: ResolvedRuntimeHostProfile): Promise<{
+    readonly removed: boolean;
+    readonly document: RuntimeHostProfileDocument;
+  }>;
 }
 
 export interface RuntimeHostProfileCredentialStore {
@@ -158,21 +167,13 @@ export async function connectRemoteRuntimeHostProfile(
       `Runtime Host profile ${input.profile.id} is incompatible with this Maka Client`,
     );
   }
-  if (
-    connected.kind === 'unavailable' &&
-    (connected.reason === 'root_mismatch' || connected.reason === 'composition_mismatch')
-  ) {
-    throw new RuntimeHostPermanentReconnectError(
-      connected.reason === 'root_mismatch'
-        ? `Runtime Host profile ${input.profile.id} connected to an unexpected State Root`
-        : `Runtime Host profile ${input.profile.id} has an incompatible Host composition`,
-    );
-  }
   if (connected.kind !== 'connected') {
-    throw new Error(
-      connected.kind === 'draining'
-        ? `Runtime Host profile ${input.profile.id} is draining`
-        : `Runtime Host profile ${input.profile.id} is unavailable (${connected.reason})`,
+    if (connected.kind === 'draining') {
+      throw new Error(`Runtime Host profile ${input.profile.id} is draining`);
+    }
+    throw remoteRuntimeHostUnavailableError(
+      `Runtime Host profile ${input.profile.id}`,
+      connected.reason,
     );
   }
   try {
@@ -187,6 +188,34 @@ export async function connectRemoteRuntimeHostProfile(
     await connected.connection.close().catch(() => undefined);
     throw error;
   }
+}
+
+export function remoteRuntimeHostUnavailableError(
+  subject: string,
+  reason: Extract<ConnectRemoteRuntimeHostResult, { kind: 'unavailable' }>['reason'],
+): Error {
+  let message: string;
+  switch (reason) {
+    case 'authentication_failed':
+      return new RuntimeHostPermanentReconnectError(`${subject} rejected its access credential`);
+    case 'root_mismatch':
+      return new RuntimeHostPermanentReconnectError(
+        `${subject} connected to an unexpected State Root`,
+      );
+    case 'composition_mismatch':
+      return new RuntimeHostPermanentReconnectError(
+        `${subject} has an incompatible Host composition`,
+      );
+    case 'tls_failed':
+      message = `${subject} could not verify the TLS connection`;
+      break;
+    case 'unreachable':
+      message = `${subject} could not reach its endpoint`;
+      break;
+    default:
+      message = `${subject} is unavailable (${reason})`;
+  }
+  return new Error(message);
 }
 
 export function decodeRuntimeHostProfileDocument(value: unknown): RuntimeHostProfileDocument {
@@ -263,10 +292,28 @@ class FileRuntimeHostProfileCatalog implements RuntimeHostProfileCatalog {
     value: RemoteRuntimeHostProfile,
     suppliedCredential?: string,
   ): Promise<RuntimeHostProfileDocument> {
+    return this.#save(value, suppliedCredential, false);
+  }
+
+  create(
+    value: RemoteRuntimeHostProfile,
+    suppliedCredential: string,
+  ): Promise<RuntimeHostProfileDocument> {
+    return this.#save(value, suppliedCredential, true);
+  }
+
+  #save(
+    value: RemoteRuntimeHostProfile,
+    suppliedCredential: string | undefined,
+    requireNew: boolean,
+  ): Promise<RuntimeHostProfileDocument> {
     const profile = decodeRemoteRuntimeHostProfile(value);
     return this.#exclusive(async () => {
       const current = await this.read();
       const previousProfile = current.profiles.find((candidate) => candidate.id === profile.id);
+      if (requireNew && previousProfile) {
+        throw new Error('A new Runtime Host profile must use a new profile id');
+      }
       const targetChanged = previousProfile
         ? profileCredentialBinding(previousProfile) !== profileCredentialBinding(profile)
         : false;
@@ -320,26 +367,55 @@ class FileRuntimeHostProfileCatalog implements RuntimeHostProfileCatalog {
       const current = await this.read();
       const profile = current.profiles.find((candidate) => candidate.id === id);
       if (!profile) return current;
-      const next = decodeRuntimeHostProfileDocument({
-        schemaVersion: PROFILE_SCHEMA_VERSION,
-        profiles: current.profiles.filter((candidate) => candidate.id !== id),
-      });
-      await writeProfileDocument(this.path, next);
-      try {
-        await this.credentials.delete(profile);
-      } catch (error) {
-        try {
-          await writeProfileDocument(this.path, current);
-        } catch (rollbackError) {
-          throw new AggregateError(
-            [error, rollbackError],
-            'Runtime Host profile credential removal failed and the profile could not be restored',
-          );
-        }
-        throw error;
-      }
-      return next;
+      return this.#removeProfile(current, profile);
     });
+  }
+
+  removeIfCurrent(target: ResolvedRuntimeHostProfile): Promise<{
+    readonly removed: boolean;
+    readonly document: RuntimeHostProfileDocument;
+  }> {
+    if (target.profile.kind !== 'remote' || target.credential === undefined) {
+      return Promise.reject(new Error('Expected a resolved remote Runtime Host profile'));
+    }
+    const expectedProfile = decodeRemoteRuntimeHostProfile(target.profile);
+    return this.#exclusive(async () => {
+      const current = await this.read();
+      const profile = current.profiles.find((candidate) => candidate.id === expectedProfile.id);
+      if (
+        !profile ||
+        !sameRemoteRuntimeHostProfile(profile, expectedProfile) ||
+        (await this.credentials.get(profile)) !== target.credential
+      ) {
+        return { removed: false, document: current };
+      }
+      return { removed: true, document: await this.#removeProfile(current, profile) };
+    });
+  }
+
+  async #removeProfile(
+    current: RuntimeHostProfileDocument,
+    profile: RemoteRuntimeHostProfile,
+  ): Promise<RuntimeHostProfileDocument> {
+    const next = decodeRuntimeHostProfileDocument({
+      schemaVersion: PROFILE_SCHEMA_VERSION,
+      profiles: current.profiles.filter((candidate) => candidate.id !== profile.id),
+    });
+    await writeProfileDocument(this.path, next);
+    try {
+      await this.credentials.delete(profile);
+    } catch (error) {
+      try {
+        await writeProfileDocument(this.path, current);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          'Runtime Host profile credential removal failed and the profile could not be restored',
+        );
+      }
+      throw error;
+    }
+    return next;
   }
 
   #exclusive<T>(operation: () => Promise<T>): Promise<T> {
@@ -405,6 +481,17 @@ function profileCredentialBinding(profile: RemoteRuntimeHostProfile): string {
     .update('\0')
     .update(normalized.rootId)
     .digest('hex');
+}
+
+function sameRemoteRuntimeHostProfile(
+  left: RemoteRuntimeHostProfile,
+  right: RemoteRuntimeHostProfile,
+): boolean {
+  return (
+    left.id === right.id &&
+    left.name === right.name &&
+    profileCredentialBinding(left) === profileCredentialBinding(right)
+  );
 }
 
 function restoreCredential(

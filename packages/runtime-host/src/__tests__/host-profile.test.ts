@@ -135,6 +135,37 @@ describe('Runtime Host profiles', () => {
     ]);
   });
 
+  test('conditionally removes only the exact profile target it created', async () => {
+    const path = await profilePath();
+    const credentials = memoryCredentials();
+    const desktop = createFileRuntimeHostProfileCatalog(path, credentials);
+    const cli = createFileRuntimeHostProfileCatalog(path, credentials);
+    const profile = remoteProfile('office', 'wss://runtime.example.com', ROOT_A);
+
+    await desktop.create(profile, 'desktop-token');
+    const created = await desktop.resolve(profile.id);
+    await assert.rejects(() => cli.create(profile, 'duplicate-token'), /new profile id/u);
+    await cli.save({ ...profile, name: 'Rotated' }, 'rotated-token');
+
+    assert.deepEqual(await desktop.removeIfCurrent(created), {
+      removed: false,
+      document: {
+        schemaVersion: 1,
+        profiles: [
+          {
+            ...profile,
+            name: 'Rotated',
+            transport: { kind: 'tls', url: 'wss://runtime.example.com/' },
+          },
+        ],
+      },
+    });
+    const rotated = await desktop.resolve(profile.id);
+    assert.equal(rotated.credential, 'rotated-token');
+    assert.equal((await desktop.removeIfCurrent(rotated)).removed, true);
+    assert.deepEqual(await desktop.read(), { schemaVersion: 1, profiles: [] });
+  });
+
   test('resolves an atomic profile snapshot without waiting for the writer lock', async () => {
     const path = await profilePath();
     const catalog = createFileRuntimeHostProfileCatalog(path, memoryCredentials());
@@ -349,6 +380,53 @@ describe('Runtime Host profiles', () => {
         ),
       RuntimeHostPermanentReconnectError,
     );
+  });
+
+  test('treats rejected remote credentials as a terminal profile failure', async () => {
+    await assert.rejects(
+      () =>
+        connectRemoteRuntimeHostProfile(
+          {
+            profile: remoteProfile('office', 'wss://runtime.example.com/', ROOT_A),
+            credential: 'revoked-token',
+            surface: 'run',
+            clientInstanceId: 'client-1',
+          },
+          { connect: async () => ({ kind: 'unavailable', reason: 'authentication_failed' }) },
+        ),
+      (error: unknown) => {
+        assert.ok(error instanceof RuntimeHostPermanentReconnectError);
+        assert.match(error.message, /rejected its access credential/u);
+        return true;
+      },
+    );
+  });
+
+  test('reports retryable remote connection failure categories', async () => {
+    const reasons = [
+      ['tls_failed', /could not verify the TLS connection/],
+      ['unreachable', /could not reach its endpoint/],
+    ] as const;
+    for (const [reason, expected] of reasons) {
+      await assert.rejects(
+        () =>
+          connectRemoteRuntimeHostProfile(
+            {
+              profile: remoteProfile('office', 'wss://runtime.example.com/', ROOT_A),
+              credential: 'opaque-token',
+              surface: 'run',
+              clientInstanceId: 'client-1',
+            },
+            { connect: async () => ({ kind: 'unavailable', reason }) },
+          ),
+        (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.equal(error instanceof RuntimeHostPermanentReconnectError, false);
+          assert.match(error.message, expected);
+          return true;
+        },
+      );
+    }
   });
 });
 
