@@ -741,7 +741,11 @@ export class ShellRunProcessManager
             args: [...input.argv.slice(1)],
             useShellOption: false,
           }
-        : buildShellSpawnPlan(input.shell ?? defaultShellPlan(), input.command);
+        : buildShellSpawnPlan(
+            input.shell ?? defaultShellPlan(),
+            input.command,
+            input.env ?? process.env,
+          );
       startingRecord = await this.createStartingRecord(
         input,
         shellRunId,
@@ -753,7 +757,7 @@ export class ShellRunProcessManager
       const driver = new PipeProcessDriver({
         plan,
         cwd: input.cwd,
-        ...(input.env ? { env: input.env } : {}),
+        ...((plan.env ?? input.env) ? { env: plan.env ?? input.env } : {}),
         ...(input.fdInputs ? { fdInputs: input.fdInputs } : {}),
         outputDrainMs: this.pipeOutputDrainMs,
         onData: (stream, data) => dispatch((target) => this.onPipeData(target, stream, data)),
@@ -822,7 +826,11 @@ export class ShellRunProcessManager
         onDirty: () => dispatch((target) => this.scheduleAutomaticFlush(target)),
         onFailure: (error) => dispatch((target) => this.handleIntegrityFailure(target, error)),
       });
-      const plan = buildPtyShellSpawnPlan(input.shell ?? defaultShellPlan(), input.command);
+      const plan = buildPtyShellSpawnPlan(
+        input.shell ?? defaultShellPlan(),
+        input.command,
+        input.env ?? process.env,
+      );
       startingRecord = await this.createStartingRecord(
         input,
         shellRunId,
@@ -835,7 +843,7 @@ export class ShellRunProcessManager
         file: plan.file,
         args: plan.args,
         cwd: input.cwd,
-        env: input.env ?? process.env,
+        env: plan.env ?? input.env ?? process.env,
         cols: PTY_INITIAL_COLS,
         rows: PTY_INITIAL_ROWS,
         onData: (data) => dispatch((target) => this.onPtyData(target, data)),
