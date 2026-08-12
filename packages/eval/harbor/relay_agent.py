@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import os
+import re
 import shlex
 import tempfile
 from pathlib import Path
@@ -100,24 +101,41 @@ async def _prepare_command(
     environment: Any, request: dict[str, Any], token: str, scope_path: str
 ) -> str:
     credentials = request.get("credentials")
+    public_environment = request.get("environment")
     if not isinstance(credentials, dict) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in credentials.items()
     ):
         raise RuntimeError("invalid Maka Eval credentials")
+    if not isinstance(public_environment, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in public_environment.items()
+    ):
+        raise RuntimeError("invalid Maka Eval environment")
+    if set(credentials) & set(public_environment):
+        raise RuntimeError("Maka Eval environment overlaps credentials")
+    capture_stdout = request.get("captureStdout")
+    if not isinstance(capture_stdout, bool):
+        raise RuntimeError("invalid Maka Eval stdout policy")
+    for label, values in (("environment", public_environment), ("credential", credentials)):
+        if any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) is None for key in values):
+            raise RuntimeError(f"invalid Maka Eval {label} name")
+
     container_path = f"/tmp/maka-eval-{token}.env"
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as secret:
-        secret_path = Path(secret.name)
-        os.chmod(secret_path, 0o600)
-        for key, value in credentials.items():
-            if not key or not key.replace("_", "a").isalnum() or key[0].isdigit():
-                raise RuntimeError("invalid Maka Eval credential name")
-            secret.write(f"export {key}={shlex.quote(value)}\n")
+    secret_path = None
     try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as secret:
+            secret_path = Path(secret.name)
+            os.chmod(secret_path, 0o600)
+            for key, value in {**public_environment, **credentials}.items():
+                secret.write(f"export {key}={shlex.quote(value)}\n")
         await environment.upload_file(secret_path, container_path)
     finally:
-        secret_path.unlink(missing_ok=True)
+        if secret_path is not None:
+            secret_path.unlink(missing_ok=True)
     subject = shlex.join([request["command"], *request["args"]])
-    inner = f"echo $$ > {shlex.quote(scope_path)}; . {shlex.quote(container_path)}; rm -f {shlex.quote(container_path)}; exec {subject}"
+    if not capture_stdout:
+        subject = f"{subject} >/dev/null"
+    inner = f"echo $$ > {shlex.quote(scope_path)}; . {shlex.quote(container_path)}; command -p rm -f {shlex.quote(container_path)}; exec {subject}"
     return f"setsid sh -c {shlex.quote(inner)}"
 
 
