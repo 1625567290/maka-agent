@@ -128,6 +128,13 @@ export interface MakaPiTuiInput {
   /** Maximum context tokens for the active model, for the statusline ctx segment. */
   modelContextWindow?: number;
   terminal?: Terminal;
+  /**
+   * Whether turns and control actions publish terminal taskbar progress.
+   * Defaults off on native Windows and Windows Terminal sessions because its
+   * OSC 9;4 keepalive can make Explorer's taskbar unresponsive. Injectable so
+   * tests cross the same policy seam without depending on their host platform.
+   */
+  taskbarProgress?: boolean;
   /** Starts the CLI process-exit deadline after terminal restore, before outer cleanup. */
   onProcessExit?: (exitCode: number, error?: Error) => void;
   /**
@@ -194,8 +201,33 @@ export interface MakaPiTuiInput {
   clientPathAuthority?: 'local' | 'none';
 }
 
+interface TaskbarProgressEnvironment {
+  readonly platform: NodeJS.Platform;
+  readonly override?: string;
+  readonly windowsTerminalSession?: string;
+}
+
+export function resolveTaskbarProgress(
+  setting: boolean | undefined,
+  environment: TaskbarProgressEnvironment = {
+    platform: process.platform,
+    override: process.env.MAKA_TASKBAR_PROGRESS,
+    windowsTerminalSession: process.env.WT_SESSION,
+  },
+): boolean {
+  if (setting !== undefined) return setting;
+  const forced = environment.override?.trim().toLowerCase();
+  if (forced === '1' || forced === 'true') return true;
+  if (forced === '0' || forced === 'false') return false;
+  return environment.platform !== 'win32' && environment.windowsTerminalSession === undefined;
+}
+
 export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   const terminal = input.terminal ?? new ProcessTerminal();
+  const taskbarProgress = resolveTaskbarProgress(input.taskbarProgress);
+  const setTaskbarProgress = (active: boolean): void => {
+    if (taskbarProgress) terminal.setProgress(active);
+  };
   const tui = new TUI(terminal);
   const state = createMakaPiTranscriptState();
   let cwd = input.cwd;
@@ -520,7 +552,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     busy = true;
     const activity = beginActivity();
     editor.disableSubmit = true;
-    terminal.setProgress(true);
+    setTaskbarProgress(true);
     attention.controlStarted();
     requestRender();
     let sessionActivity: SessionActivityLease | undefined;
@@ -536,7 +568,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       busy = false;
       activity.finish();
       editor.disableSubmit = false;
-      terminal.setProgress(false);
+      setTaskbarProgress(false);
       attention.controlEnded();
       requestRender();
       startPendingAttachedTurn();
@@ -561,7 +593,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     shellRunElapsedTicker.dispose();
     stopTurnElapsedTicker();
     stopFallbackRetry();
-    terminal.setProgress(false);
+    setTaskbarProgress(false);
     // Drop the busy / attention title marker so the tab is not handed back to
     // the shell still marked busy when the session exits.
     attention.reset();
@@ -988,7 +1020,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     interruptRequested = false;
     lastTurnEscapeAt = 0;
     editor.disableSubmit = false;
-    terminal.setProgress(true);
+    setTaskbarProgress(true);
     attention.promptTurnStarted();
     requestRender();
 
@@ -1000,7 +1032,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
       stopTurnElapsedTicker();
       interruptRequested = false;
       editor.disableSubmit = false;
-      terminal.setProgress(false);
+      setTaskbarProgress(false);
       attention.promptTurnEnded();
       // A turn ending is activity too — resets the idle clock the next
       // submission's auto-recap check measures against.
