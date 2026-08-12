@@ -14,6 +14,9 @@ import type {
   AppUpdateStatus,
   WindowCommand,
   PetPackChangedEvent,
+  DesktopRuntimeHostProfileSaveInput,
+  DesktopRuntimeHostProfileChangedEvent,
+  DesktopProjectSnapshot,
 } from './bridge-contract.js';
 import type { ExternalSessionImportIpcResult } from './external-session-import-result.js';
 import type {
@@ -373,6 +376,28 @@ async function bridgeResult<T>(operation: () => Promise<T>, code: string): Promi
 
 const makaBridge = {
   runtimeHost,
+  runtimeHostProfiles: {
+    getSnapshot() {
+      return ipcRenderer.invoke('runtime-host-profiles:getSnapshot');
+    },
+    save(input: DesktopRuntimeHostProfileSaveInput) {
+      return ipcRenderer.invoke('runtime-host-profiles:save', input);
+    },
+    remove(profileId: string) {
+      return ipcRenderer.invoke('runtime-host-profiles:remove', profileId);
+    },
+    select(profileId: string) {
+      return ipcRenderer.invoke('runtime-host-profiles:select', profileId);
+    },
+    subscribeChanges(handler: (event: DesktopRuntimeHostProfileChangedEvent) => void) {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: DesktopRuntimeHostProfileChangedEvent,
+      ) => handler(payload);
+      ipcRenderer.on('runtime-host-profiles:changed', listener);
+      return () => ipcRenderer.off('runtime-host-profiles:changed', listener);
+    },
+  },
   pets: {
     list() {
       return ipcRenderer.invoke('pets:list');
@@ -686,8 +711,8 @@ const makaBridge = {
     },
   },
   projects: {
-    list(): Promise<ProjectRecord[]> {
-      return ipcRenderer.invoke('projects:list');
+    getSnapshot(): Promise<DesktopProjectSnapshot> {
+      return ipcRenderer.invoke('projects:getSnapshot');
     },
     subscribeChanges(handler: () => void): () => void {
       const listener = () => handler();
