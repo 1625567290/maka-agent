@@ -342,6 +342,7 @@ export const test = base.extend<{
   gitReviewWindow: { page: Page; projectRoot: string };
   invocableSkillsWindow: Page;
   linkColorWindow: Page;
+  projectSidebarWindow: Page;
   promptRailWindow: Page;
   promptRailMotionWindow: Page;
 }>({
@@ -379,6 +380,17 @@ export const test = base.extend<{
       seed: false,
       readinessSelector: '.settingsBotConfigDocLink',
       e2eFixtureScenario: 'settings-bots-onboarding',
+    }, use);
+  },
+  // A real project with several sessions. Shown because the contract under
+  // test is native focus order across independently interactive row controls.
+  projectSidebarWindow: async ({}, use) => {
+    await withE2eWindow({
+      seed: false,
+      readinessSelector: '[data-maka-contract="search-modal"]',
+      e2eFixtureScenario: 'sidebar-search-modal-open',
+      locale: 'zh',
+      showWindow: true,
     }, use);
   },
   // A multi-prompt transcript for the prompt anchor rail. Shown, because every
