@@ -2097,6 +2097,9 @@ export class SessionManager {
     input: UserMessageInput,
     options: TurnStartOptions = {},
   ): AsyncIterable<SessionEvent> {
+    if (input.origin?.kind === 'legacy_automation') {
+      throw new Error('Live Turn cannot use removed Automation authority');
+    }
     const repair = input.agentId ? undefined : this.runtimeLedgerRepair;
     const admitTurn = repair
       ? async () => {
@@ -4737,6 +4740,13 @@ export class SessionManager {
       diagnostic = {
         executionKind: input.execution.kind,
         goalId: input.execution.goalId,
+      };
+    } else if (input.execution.kind === 'legacy_automation') {
+      headerExtras.legacyAutomationId = input.execution.automationId;
+      recoveryReason = 'legacy_automation_authority_removed';
+      diagnostic = {
+        executionKind: input.execution.kind,
+        automationId: input.execution.automationId,
       };
     } else if (input.execution.kind === 'agent_graph_supervisor_wake') {
       headerExtras.agentGraphWakeId = input.execution.wakeId;

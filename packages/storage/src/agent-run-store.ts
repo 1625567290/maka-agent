@@ -1095,13 +1095,17 @@ function normalizeAdmitRootTurnInput(input: AdmitRootTurnInput): RootTurnAdmissi
     input.skillInvocation === undefined
       ? undefined
       : decodeSkillInvocationResult(input.skillInvocation);
+  const execution = normalizeRootExecutionDescriptor(input.execution);
+  if (execution.kind === 'legacy_automation') {
+    throw new Error('New root admission cannot use removed Automation authority');
+  }
   const admission: RootTurnAdmission = {
     schemaVersion: ROOT_TURN_ADMISSION_SCHEMA_VERSION,
     sessionId: input.sessionId,
     turnId: input.turnId,
     runId: input.proposedRunId,
     userMessageId: input.proposedUserMessageId,
-    execution: normalizeRootExecutionDescriptor(input.execution),
+    execution,
     previousRootTurnId: input.previousRootTurnId,
     normalizedInput,
     ...(turnOrchestration ? { turnOrchestration } : {}),
@@ -1785,6 +1789,16 @@ function normalizeRootExecutionDescriptor(value: unknown): RootExecutionDescript
       throw new Error('Invalid root execution descriptor');
     }
     return Object.freeze({ kind: 'scheduled_task', scheduledTaskId: value.scheduledTaskId });
+  }
+  if (value.kind === 'automation' || value.kind === 'legacy_automation') {
+    if (
+      !hasExactKeys(value, ['kind', 'automationId']) ||
+      typeof value.automationId !== 'string' ||
+      !isSafeId(value.automationId)
+    ) {
+      throw new Error('Invalid root execution descriptor');
+    }
+    return Object.freeze({ kind: 'legacy_automation', automationId: value.automationId });
   }
   if (value.kind === 'goal') {
     if (
