@@ -277,7 +277,7 @@ function isRecoverableSubscriptionFailure(error: unknown): boolean {
     error.reason === "slow_consumer" ||
     error.reason === "sequence_gap" ||
     error.reason === "projection_revision_invalid" ||
-    error.reason === "transcript_expired"
+    error.reason === "transcript_release_failed"
   );
 }
 

@@ -152,6 +152,41 @@ export type ProbeStableSessionCreateResult =
 
 export type UpdateSessionConfigurationRequest = SessionConfigurationMetadataUpdate;
 
+export interface SessionTranscriptStorageFragment {
+  readonly sequence: number;
+  readonly byteOffset: number;
+  readonly totalBytes: number;
+  readonly payloadDigest: `sha256:${string}` | null;
+  readonly data: Buffer;
+}
+
+export interface SessionTranscriptMessageLookupRequest {
+  readonly messageIds: readonly string[];
+  readonly throughSequence: number | null;
+  readonly maxBytes: number;
+  readonly maxMessages: number;
+}
+
+export interface SessionTranscriptPageRequest {
+  readonly direction: 'older' | 'newer';
+  /** Inclusive durable high-water mark. Omit only for the first read. */
+  readonly throughSequence?: number | null;
+  /** Inclusive sequence position for this read. Defaults to the watermark edge. */
+  readonly position?: number;
+  /** Continuation byte offset within position. */
+  readonly byteOffset?: number;
+  readonly maxBytes: number;
+  readonly maxMessages: number;
+}
+
+export interface SessionTranscriptStoragePage {
+  readonly throughSequence: number | null;
+  /** Returned in traversal order for the requested direction. */
+  readonly fragments: readonly SessionTranscriptStorageFragment[];
+  readonly rawBytes: number;
+  readonly next: { readonly position: number; readonly byteOffset: number | null } | null;
+}
+
 export interface SessionStore {
   create(input: CreateSessionInput, initialBoundary?: ExecutionBoundary): Promise<SessionHeader>;
   list(filter?: SessionListFilter): Promise<SessionSummary[]>;
@@ -162,6 +197,12 @@ export interface SessionStore {
   readHeaderSnapshot(sessionId: string): Promise<SessionHeader>;
   /** Read durable messages without triggering connection-lock self-healing. */
   readMessagesSnapshot(sessionId: string): Promise<StoredMessage[]>;
+  /** Read one byte-bounded page directly from the durable append-only ledger. */
+  readTranscriptPageSnapshot(
+    sessionId: string,
+    request: SessionTranscriptPageRequest,
+  ): Promise<SessionTranscriptStoragePage>;
+  readTranscriptHighWaterSnapshot(sessionId: string): Promise<number | null>;
   /** Read durable messages for startup recovery. */
   readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]>;
   /** Derive durable turns without triggering connection-lock self-healing. */
@@ -183,6 +224,13 @@ export interface SessionStore {
 }
 
 export interface SessionAuthorityStore extends SessionStore {
+  /** Read a bounded set of durable messages at an inclusive transcript watermark. */
+  readTranscriptMessagesSnapshot(
+    sessionId: string,
+    request: SessionTranscriptMessageLookupRequest,
+  ): Promise<StoredMessage[]>;
+  /** Observe successful durable ledger appends. Listeners must not throw. */
+  subscribeTranscriptChanges(listener: (sessionId: string) => void): () => void;
   /** Wait until the SQLite authority is ready for cross-domain transactions. */
   ready(): Promise<void>;
   /** Atomically create a Session from already-converted Maka raw messages. */
@@ -270,6 +318,7 @@ export function createSessionStore(workspaceRoot: string): SessionAuthorityStore
 class SqliteSessionStore implements SessionAuthorityStore {
   private readonly metadata: SqliteSessionMetadataStore;
   private readonly workspaceRoot: string;
+  private readonly transcriptChangeListeners = new Set<(sessionId: string) => void>();
   private closePromise: Promise<void> | null = null;
 
   constructor(workspaceRoot: string) {
@@ -593,6 +642,27 @@ class SqliteSessionStore implements SessionAuthorityStore {
     return this.metadata.readMessages(sessionId);
   }
 
+  async readTranscriptPageSnapshot(
+    sessionId: string,
+    request: SessionTranscriptPageRequest,
+  ): Promise<SessionTranscriptStoragePage> {
+    await this.ensureReady();
+    return this.metadata.readTranscriptPage(sessionId, request);
+  }
+
+  async readTranscriptMessagesSnapshot(
+    sessionId: string,
+    request: SessionTranscriptMessageLookupRequest,
+  ): Promise<StoredMessage[]> {
+    await this.ensureReady();
+    return this.metadata.readTranscriptMessages(sessionId, request);
+  }
+
+  async readTranscriptHighWaterSnapshot(sessionId: string): Promise<number | null> {
+    await this.ensureReady();
+    return this.metadata.readTranscriptHighWater(sessionId);
+  }
+
   async readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]> {
     await this.ensureReady();
     return this.metadata.readMessagesForRecovery(sessionId);
@@ -626,6 +696,12 @@ class SqliteSessionStore implements SessionAuthorityStore {
       messages,
       projectSessionCatalogMessages(messages),
     );
+    for (const listener of this.transcriptChangeListeners) listener(sessionId);
+  }
+
+  subscribeTranscriptChanges(listener: (sessionId: string) => void): () => void {
+    this.transcriptChangeListeners.add(listener);
+    return () => this.transcriptChangeListeners.delete(listener);
   }
 
   async updateHeader(sessionId: string, patch: Partial<SessionHeader>): Promise<SessionHeader> {

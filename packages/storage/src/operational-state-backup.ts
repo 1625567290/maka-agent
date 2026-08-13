@@ -25,7 +25,11 @@ import {
 import { SQLITE_ARTIFACT_SCHEMA_VERSION } from './sqlite-artifact-schema.js';
 import { SQLITE_CORE_EXECUTION_SCHEMA_VERSION } from './sqlite-core-execution-schema.js';
 import { SQLITE_RUNTIME_SCHEMA_VERSION } from './sqlite-runtime-schema.js';
-import { SQLITE_SESSION_METADATA_SCHEMA_VERSION } from './sqlite-session-metadata-schema.js';
+import {
+  SQLITE_SESSION_MESSAGE_CHUNK_BYTES,
+  SQLITE_SESSION_MESSAGE_CHUNK_MARKER,
+  SQLITE_SESSION_METADATA_SCHEMA_VERSION,
+} from './sqlite-session-metadata-schema.js';
 import { SQLITE_USAGE_SCHEMA_VERSION } from './sqlite-usage-schema.js';
 import { SQLITE_WORKFLOW_SCHEMA_VERSION } from './sqlite-workflow-schema.js';
 import { syncDirectory, syncDirectoryChain, syncFile } from './stable-storage.js';
@@ -392,6 +396,8 @@ function validateSqlite(path: string, files: readonly OperationalBackupFile[]): 
         'session_catalog_projection',
         'session_catalog_label_projection',
         'session_messages',
+        'session_message_payloads',
+        'session_message_chunks',
         'projects',
         'project_locations',
         'project_aliases',
@@ -469,9 +475,13 @@ function validateSqlite(path: string, files: readonly OperationalBackupFile[]): 
 
       const messageRows = database
         .prepare(`
-          SELECT session_id, sequence, message_id, message_type, message_ts, record_json
-          FROM session_messages
-          ORDER BY session_id, sequence
+          SELECT message.session_id, message.sequence, message.message_id,
+            message.message_type, message.message_ts, message.record_json,
+            payload.record_bytes, payload.sha256
+          FROM session_messages AS message
+          LEFT JOIN session_message_payloads AS payload
+            ON payload.session_id = message.session_id AND payload.sequence = message.sequence
+          ORDER BY message.session_id, message.sequence
         `)
         .all() as Array<{
         session_id?: unknown;
@@ -480,17 +490,72 @@ function validateSqlite(path: string, files: readonly OperationalBackupFile[]): 
         message_type?: unknown;
         message_ts?: unknown;
         record_json?: unknown;
+        record_bytes?: unknown;
+        sha256?: unknown;
       }>;
+      const readMessageChunks = database.prepare(`
+        SELECT chunk_index, data, sha256
+        FROM session_message_chunks
+        WHERE session_id = ? AND sequence = ?
+        ORDER BY chunk_index
+      `);
       for (const row of messageRows) {
         if (
           typeof row.session_id !== 'string' ||
           !Number.isSafeInteger(row.sequence) ||
           (row.sequence as number) < 0 ||
-          typeof row.record_json !== 'string'
+          typeof row.record_json !== 'string' ||
+          (row.record_bytes !== null && !Number.isSafeInteger(row.record_bytes))
         ) {
           throw new Error('session message index is invalid');
         }
-        const message = decodeStoredMessage(JSON.parse(row.record_json));
+        const chunks = readMessageChunks.all(row.session_id, row.sequence as number) as Array<{
+          chunk_index?: unknown;
+          data?: unknown;
+          sha256?: unknown;
+        }>;
+        const chunked = row.record_bytes !== null;
+        let encoded: Buffer;
+        if (chunked) {
+          if (
+            row.record_json !== SQLITE_SESSION_MESSAGE_CHUNK_MARKER ||
+            !Number.isSafeInteger(row.record_bytes) ||
+            (row.record_bytes as number) <= SQLITE_SESSION_MESSAGE_CHUNK_BYTES ||
+            typeof row.sha256 !== 'string'
+          ) {
+            throw new Error('session message payload is invalid');
+          }
+          if (
+            chunks.some(
+              (chunk, index) =>
+                chunk.chunk_index !== index ||
+                !(chunk.data instanceof Uint8Array) ||
+                typeof chunk.sha256 !== 'string' ||
+                chunk.sha256 !== createHash('sha256').update(chunk.data).digest('hex'),
+            )
+          ) {
+            throw new Error('session message chunks do not match payload');
+          }
+          encoded = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk.data as Uint8Array)));
+          if (
+            encoded.byteLength !== row.record_bytes ||
+            createHash('sha256').update(encoded).digest('hex') !== row.sha256
+          ) {
+            throw new Error('session message chunks do not match payload');
+          }
+        } else {
+          if (row.record_json === SQLITE_SESSION_MESSAGE_CHUNK_MARKER || chunks.length !== 0) {
+            throw new Error('session message payload is invalid');
+          }
+          encoded = Buffer.from(row.record_json, 'utf8');
+        }
+        const expectedChunks = chunked
+          ? Math.ceil(encoded.byteLength / SQLITE_SESSION_MESSAGE_CHUNK_BYTES)
+          : 0;
+        if (chunks.length !== expectedChunks) {
+          throw new Error('session message chunks do not match payload');
+        }
+        const message = decodeStoredMessage(JSON.parse(encoded.toString('utf8')));
         if (
           message.id !== row.message_id ||
           message.type !== row.message_type ||

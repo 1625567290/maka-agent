@@ -202,7 +202,25 @@ export interface ConversationCopyRuntimeEventBatch {
   readonly events: readonly RuntimeEvent[];
 }
 
+export interface RuntimeEventScanBudget {
+  readonly maxBatchBytes: number;
+  readonly maxRecordBytes: number;
+  readonly maxImmutableRecords: number;
+  readonly maxImmutableBytes: number;
+  readonly maxPartialRecords: number;
+  readonly maxPartialBytes: number;
+}
+
+export type RuntimeEventScanResult = { readonly status: 'complete' | 'limit_exceeded' };
+
 export interface DurableRuntimeEventStore extends RuntimeEventStore {
+  /** Visit one ordered, bounded SQLite snapshot without retaining the immutable ledger. */
+  scanRuntimeEvents(
+    sessionId: string,
+    runId: string,
+    budget: RuntimeEventScanBudget,
+    visit: (events: readonly RuntimeEvent[]) => void,
+  ): Promise<RuntimeEventScanResult>;
   readRuntimeEventsBounded(
     sessionId: string,
     runId: string,
