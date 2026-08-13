@@ -55,6 +55,7 @@ import {
   type SessionSummary,
   type StoredMessage,
   type TurnRecord,
+  type TurnStateMessage,
   type UserMessage,
 } from '@maka/core/session';
 
@@ -185,7 +186,42 @@ export interface SessionTranscriptStoragePage {
   /** Returned in traversal order for the requested direction. */
   readonly fragments: readonly SessionTranscriptStorageFragment[];
   readonly rawBytes: number;
-  readonly next: { readonly position: number; readonly byteOffset: number | null } | null;
+  readonly next: {
+    readonly position: number;
+    readonly byteOffset: number | null;
+  } | null;
+}
+
+export interface SessionTurnContribution {
+  readonly turnId: string;
+  readonly firstSequence: number;
+  readonly latestState: {
+    readonly sequence: number;
+    readonly message: TurnStateMessage;
+  } | null;
+  readonly userPromptPreview: string | null;
+  readonly hasAssistantMessage: boolean;
+  readonly hasAssistantOutput: boolean;
+  readonly hasToolResult: boolean;
+  readonly hasFailedToolResult: boolean;
+  readonly hasAbortNote: boolean;
+}
+
+export interface SessionTurnContributionPage {
+  readonly throughSequence: number | null;
+  readonly contributions: readonly SessionTurnContribution[];
+  readonly nextPosition: number | null;
+}
+
+export interface SessionTurnLandmark {
+  readonly turnId: string;
+  readonly sequence: number;
+  readonly label: string;
+}
+
+export interface SessionTurnLandmarkSnapshot {
+  readonly throughSequence: number | null;
+  readonly landmarks: readonly SessionTurnLandmark[];
 }
 
 export interface SessionStore {
@@ -204,6 +240,16 @@ export interface SessionStore {
     request: SessionTranscriptPageRequest,
   ): Promise<SessionTranscriptStoragePage>;
   readTranscriptHighWaterSnapshot(sessionId: string): Promise<number | null>;
+  readTurnContributionsSnapshot(
+    sessionId: string,
+    throughSequence: number | null,
+    position: number,
+    maxContributions: number,
+  ): Promise<SessionTurnContributionPage>;
+  readTurnLandmarksSnapshot(
+    sessionId: string,
+    maxLandmarks: number,
+  ): Promise<SessionTurnLandmarkSnapshot>;
   /** Read durable messages for startup recovery. */
   readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]>;
   /** Derive durable turns without triggering connection-lock self-healing. */
@@ -662,6 +708,29 @@ class SqliteSessionStore implements SessionAuthorityStore {
   async readTranscriptHighWaterSnapshot(sessionId: string): Promise<number | null> {
     await this.ensureReady();
     return this.metadata.readTranscriptHighWater(sessionId);
+  }
+
+  async readTurnContributionsSnapshot(
+    sessionId: string,
+    throughSequence: number | null,
+    position: number,
+    maxContributions: number,
+  ): Promise<SessionTurnContributionPage> {
+    await this.ensureReady();
+    return this.metadata.readTurnContributions(
+      sessionId,
+      throughSequence,
+      position,
+      maxContributions,
+    );
+  }
+
+  async readTurnLandmarksSnapshot(
+    sessionId: string,
+    maxLandmarks: number,
+  ): Promise<SessionTurnLandmarkSnapshot> {
+    await this.ensureReady();
+    return this.metadata.readTurnLandmarks(sessionId, maxLandmarks);
   }
 
   async readMessagesForRecovery(sessionId: string): Promise<StoredMessage[]> {
@@ -1169,7 +1238,9 @@ function toSummary(header: SessionHeader, messages: StoredMessage[] = []): Sessi
     ...(header.branchOfTurnId ? { branchOfTurnId: header.branchOfTurnId } : {}),
     ...(header.subagentParent ? { subagentParent: header.subagentParent } : {}),
     ...(header.subagentRuntime
-      ? { subagentRuntime: subagentSessionRuntimeSummary(header.subagentRuntime) }
+      ? {
+          subagentRuntime: subagentSessionRuntimeSummary(header.subagentRuntime),
+        }
       : {}),
     ...(header.subagentWorkspace ? { subagentWorkspace: header.subagentWorkspace } : {}),
     ...(header.revisionRootSessionId

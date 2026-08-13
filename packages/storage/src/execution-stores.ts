@@ -234,7 +234,9 @@ export async function openInteractiveExecutionStoresForWrite(
   lease: StorageRootLease<'interactive', 'write'>,
 ): Promise<ExecutionStoresWriter<'interactive'>> {
   const interactionStore = await openSqliteInteractiveInteractionStoreForWrite(lease);
-  return openExecutionStoresForWrite(lease, 'interactive', { interactionStore });
+  return openExecutionStoresForWrite(lease, 'interactive', {
+    interactionStore,
+  });
 }
 
 async function openExecutionStoresForWrite<K extends StorageRootKind, E extends object>(
@@ -364,6 +366,17 @@ async function createExecutionStoresForWrite<K extends StorageRootKind, E extend
         run(() => sessionStore.readTranscriptMessagesSnapshot(sessionId, request)),
       readTranscriptHighWaterSnapshot: (sessionId) =>
         run(() => sessionStore.readTranscriptHighWaterSnapshot(sessionId)),
+      readTurnContributionsSnapshot: (sessionId, throughSequence, position, maxContributions) =>
+        run(() =>
+          sessionStore.readTurnContributionsSnapshot(
+            sessionId,
+            throughSequence,
+            position,
+            maxContributions,
+          ),
+        ),
+      readTurnLandmarksSnapshot: (sessionId, maxLandmarks) =>
+        run(() => sessionStore.readTurnLandmarksSnapshot(sessionId, maxLandmarks)),
       readMessagesForRecovery: (sessionId) =>
         run(() => sessionStore.readMessagesForRecovery(sessionId)),
       listTurnsSnapshot: (sessionId) => run(() => sessionStore.listTurnsSnapshot(sessionId)),
