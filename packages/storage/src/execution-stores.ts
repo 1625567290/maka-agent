@@ -1,4 +1,9 @@
-import type { AgentRunEvent, AgentRunEventType, AgentRunHeader } from '@maka/core/agent-run';
+import type {
+  AgentRunEvent,
+  AgentRunEventType,
+  AgentRunHeader,
+  AgentRunProjectionKey,
+} from '@maka/core/agent-run';
 import type { RuntimeEvent, ToolBoundaryProtocol } from '@maka/core/runtime-event';
 import type { RuntimeContinuationAuthorityStore } from '@maka/core/runtime-event-store';
 import type { SessionHeader, SessionSummary, StoredMessage, TurnRecord } from '@maka/core/session';
@@ -167,7 +172,7 @@ export interface ExecutionAgentRunReader {
   ): Promise<BoundedEvidenceReadResult<AgentRunEvent>>;
   readEventProjection(
     sessionId: string,
-    type: AgentRunEventType,
+    type: AgentRunProjectionKey,
   ): Promise<AgentRunEvent | null | undefined>;
   readRootTurnAdmission(sessionId: string, turnId: string): Promise<RootTurnAdmission | undefined>;
   readRootTurnSourceMessageReceipt(

@@ -110,6 +110,7 @@ import {
   isSessionTrace,
   type SessionTrace,
 } from '@maka/core/session-trace';
+import type { ContextDiagnosticsResult } from '@maka/runtime-host/protocol';
 import {
   DAILY_REVIEW_RANGES,
   normalizeDailyReviewConfig,
@@ -1421,6 +1422,20 @@ const makaBridge = {
     /** Read-only per-session causal trace (#1625). Never writes runtime state. */
     trace(sessionId: string): Promise<Result<SessionTrace>> {
       return bridgeResult(() => loadSessionTrace(sessionId), 'INSPECTOR_TRACE_FAILED');
+    },
+    /**
+     * What the session's context is made of right now (#2323).
+     *
+     * A different question from "what happened in this session", and it has
+     * its own typed owner on the Host — the same snapshot `/context` prints.
+     * The Inspector asks that owner rather than widening the trace, so the two
+     * surfaces cannot drift into two implementations of one fact.
+     */
+    context(sessionId: string): Promise<Result<ContextDiagnosticsResult>> {
+      return bridgeResult(
+        () => runtimeHost.query('context.diagnostics.query', { sessionId }),
+        'INSPECTOR_CONTEXT_FAILED',
+      );
     },
   },
   dailyReview: {

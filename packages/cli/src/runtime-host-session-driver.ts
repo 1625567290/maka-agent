@@ -612,13 +612,31 @@ class RuntimeHostMakaSessionDriverImpl implements RuntimeHostMakaSessionDriver {
     const diagnostics = await this.#request('context.diagnostics.query', {
       sessionId: this.#sessionId,
     });
-    return diagnostics.status === 'unavailable'
-      ? diagnostics
-      : {
-          ...diagnostics,
-          segments: diagnostics.segments.map((segment) => ({ ...segment })),
-          ...(diagnostics.compaction ? { compaction: { ...diagnostics.compaction } } : {}),
-        };
+    if (diagnostics.status === 'unavailable') return diagnostics;
+    // The protocol frame is readonly; the CLI's own type is not. Copied field
+    // by field rather than spread so a future protocol field cannot arrive
+    // here unnoticed.
+    const { composition, compaction, ...rest } = diagnostics;
+    return {
+      ...rest,
+      ...(composition
+        ? {
+            composition: {
+              segments: composition.segments.map((segment) => ({ ...segment })),
+              ...(composition.tools
+                ? { tools: composition.tools.map((tool) => ({ ...tool })) }
+                : {}),
+              ...(composition.remainingTools
+                ? { remainingTools: { ...composition.remainingTools } }
+                : {}),
+              ...(composition.unlabelledToolBytes !== undefined
+                ? { unlabelledToolBytes: composition.unlabelledToolBytes }
+                : {}),
+            },
+          }
+        : {}),
+      ...(compaction ? { compaction: { ...compaction } } : {}),
+    };
   }
 
   getOrchestrationMode(): OrchestrationMode {

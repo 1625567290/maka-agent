@@ -3920,7 +3920,7 @@ describe('SessionManager manual compaction and quiescent session changes', () =>
           resolveModel: () => summarizerModel,
         }),
         recordHistoryCompactCheckpoint: () => {},
-        recordModelCallAttempt: (attempt) => {
+        recordModelCallAttempt: ({ attempt }) => {
           modelCalls.push(attempt);
         },
       }),

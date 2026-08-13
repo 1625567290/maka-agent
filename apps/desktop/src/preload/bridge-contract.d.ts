@@ -87,6 +87,7 @@ import type {
   RendererRuntimeHostQueryOperation,
 } from './runtime-host-renderer-operations.js';
 import type { SessionTrace } from '@maka/core/session-trace';
+import type { ContextDiagnosticsResult } from '@maka/runtime-host/protocol';
 import type { TestProxyInput } from '@maka/core/settings/network-settings';
 import type { ExternalSessionImportIpcResult } from './external-session-import-result.js';
 import type {
@@ -803,6 +804,8 @@ export interface MakaBridge {
   inspector: {
     /** Read-only per-session causal trace (#1625). */
     trace(sessionId: string): Promise<Result<SessionTrace>>;
+    /** What the session's context is made of right now (#2323). */
+    context(sessionId: string): Promise<Result<ContextDiagnosticsResult>>;
   };
   webSearch: {
     query(input: {
