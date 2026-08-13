@@ -601,9 +601,10 @@ export function ChatView(props: {
         <PromptAnchorRail
           turns={promptRailTurns}
           scrollRef={scrollRef}
-          scrollBehavior={props.scrollBehavior}
           onNavigateFallback={revealTurn}
           mountedTurnsRevision={mountStart}
+          onNavigateStart={chatLayout.unlockAutoFollow}
+          transcriptFilled={turnsFilled}
         />
         <ChatMessageList
           className="maka-chat-message-list maka-chatContent"
