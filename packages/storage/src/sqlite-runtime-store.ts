@@ -27,6 +27,7 @@ import {
   type ToolRecoveryMode,
 } from '@maka/core/runtime-event';
 import {
+  RunSealedError,
   RUNTIME_CONTINUATION_AUTHORITY_V1,
   TOOL_RECOVERY_BUNDLE_CAPABILITY_V1,
   type ContinuationClaimResult,
@@ -2419,7 +2420,7 @@ export class SqliteRuntimeStore
       .all(event.sessionId, event.runId) as unknown as RuntimeEventStorageRow[];
     const terminal = rows.map(decodeRuntimeEventStorageRow).find(isTerminalRuntimeEvent);
     if (terminal) {
-      throw new Error(`RuntimeEvent run ${event.runId} is sealed by its terminal fact`);
+      throw new RunSealedError(event.runId);
     }
   }
 
@@ -2432,10 +2433,21 @@ export class SqliteRuntimeStore
       this.assertRunNotSealed(canonicalEvent);
       return this.upsertRuntimePartial(canonicalEvent, partial);
     }
+    const existing = this.readRuntimeEventJson(canonicalEvent.id) !== undefined;
+    // Seal before tool-ledger semantics, so every post-terminal append
+    // refuses the same way (#2311): a late tool-bearing straggler must read
+    // as the sealed-run boundary it is, not as a producer bug or ledger
+    // corruption. Continuation authority stays ahead of the seal, its
+    // refusals are more specific, and an exact-id retry keeps its dedup
+    // semantics: the event is already inside the seal, so only new events
+    // consult either.
+    if (!existing) {
+      this.assertContinuationAuthorityAllowsEvent(canonicalEvent);
+      this.assertRunNotSealed(canonicalEvent);
+    }
     if (isToolLedgerBearingEvent(canonicalEvent)) {
       this.assertToolLedgerTransition([canonicalEvent], 'generic_append');
     }
-    const existing = this.readRuntimeEventJson(canonicalEvent.id) !== undefined;
     this.insertRuntimeEvent(canonicalEvent, canonicalEvent.ts, true);
     return !existing;
   }
