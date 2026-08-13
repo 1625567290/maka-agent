@@ -108,8 +108,11 @@ import {
   thinkingLevelPickerItems,
   type MakaSlashCommand,
 } from './pi-tui-pickers.js';
+import { formatMakaResumeCommand } from './cli-invocation.js';
 
 export interface MakaPiTuiInput {
+  /** Launcher command used in resume and recovery instructions. */
+  cliCommand?: string;
   title: string;
   driver: MakaSessionDriver;
   cwd: string;
@@ -2846,7 +2849,11 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
         }
         const recoveryHint =
           input.resumeCwd === undefined && message.startsWith('Session cwd no longer exists:')
-            ? ` Retry with: maka --resume ${input.resumeSessionId} --cwd <new-path>.`
+            ? ` Retry with: ${formatMakaResumeCommand(
+                input.cliCommand ?? 'maka',
+                input.resumeSessionId!,
+                { cwd: '<new-path>' },
+              )}.`
             : '';
         state.entries.push({
           kind: 'notice',
