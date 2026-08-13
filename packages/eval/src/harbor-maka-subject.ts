@@ -3,11 +3,15 @@ import { dirname, join } from 'node:path';
 import { runHostedExecution } from '@maka/runtime-host/client';
 import type { HostedExecutionStartInput } from '@maka/runtime-host/protocol';
 import { disabledWebToolsRuntimePolicyDocument } from './maka-runtime-policy.js';
+import { takeRelayResultToken, writeRelayResult } from './relay-result-frame.js';
+
+const resultToken = takeRelayResultToken();
 
 const payload = JSON.parse(Buffer.from(process.argv[2] ?? '', 'base64url').toString()) as {
   rootPath: string;
   baseUrl: string;
   webTools: 'enabled' | 'disabled';
+  hostSettlementTimeoutMs: number;
   execution: HostedExecutionStartInput;
 };
 const abort = new AbortController();
@@ -30,6 +34,15 @@ const result = await runHostedExecution({
   baseUrl: payload.baseUrl,
   execution: payload.execution,
   signal: abort.signal,
+  hostSettlementTimeoutMs: payload.hostSettlementTimeoutMs,
 });
-process.stdout.write(`${JSON.stringify(result)}\n`);
+const failureReason = result.failureReason;
+const framedResult =
+  failureReason !== undefined && Buffer.byteLength(failureReason) > 768
+    ? {
+        ...result,
+        failureReason: new TextDecoder().decode(Buffer.from(failureReason).subarray(0, 768)),
+      }
+    : result;
+writeRelayResult(resultToken, framedResult);
 if (result.kind === 'indeterminate') process.exitCode = 1;

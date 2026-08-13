@@ -137,13 +137,29 @@ async def main() -> None:
     task = asyncio.current_task()
     assert task is not None
     loop = asyncio.get_running_loop()
+    teardown_requested = False
+
+    def request_teardown() -> None:
+        nonlocal teardown_requested
+        if teardown_requested:
+            return
+        teardown_requested = True
+        try:
+            from relay_agent import request_host_teardown
+            request_host_teardown()
+        finally:
+            task.cancel()
+
     for host_signal in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(host_signal, task.cancel)
+        loop.add_signal_handler(host_signal, request_teardown)
     try:
         try:
             await run_trial(framework, expected_version, Path(config_path))
         except FrameworkVersionMismatch:
             raise SystemExit(FRAMEWORK_VERSION_MISMATCH_EXIT_CODE) from None
+        except asyncio.CancelledError:
+            if not teardown_requested:
+                raise
     finally:
         for host_signal in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(host_signal)

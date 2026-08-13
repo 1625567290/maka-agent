@@ -33,6 +33,394 @@ test('cancellation while waiting for ready line enters bounded cleanup', {
   await verifyPreparationCancellation('ready', false);
 });
 
+test('normal verification outlives the former Eval completion deadline', {
+  timeout: 5_000,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-eval-verifier-deadline-'));
+  const executable = join(root, 'fake-python.mjs');
+  const verifying = join(root, 'verifying');
+  const release = join(root, 'release');
+  const pidPath = join(root, 'pid');
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { connect } from 'node:net';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+const config = JSON.parse(await readFile(process.argv.at(-1), 'utf8'));
+const socket = connect(config.agent.kwargs.relay_port, config.agent.kwargs.relay_host);
+socket.setEncoding('utf8');
+let buffered = '';
+const message = () => new Promise((resolve) => {
+  const read = (chunk) => {
+    buffered += chunk;
+    const boundary = buffered.indexOf('\\n');
+    if (boundary < 0) return;
+    socket.off('data', read);
+    const line = buffered.slice(0, boundary);
+    buffered = buffered.slice(boundary + 1);
+    resolve(JSON.parse(line));
+  };
+  socket.on('data', read);
+});
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve);
+  socket.once('error', reject);
+});
+await writeFile(process.env.MAKA_TEST_PID, String(process.pid));
+socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'ready', instruction: 'solve', cwd: '/workspace' }) + '\\n');
+const execute = await message();
+if ('cwd' in execute) process.exit(9);
+socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'executed', termination: 'exited', exitCode: 0, stdout: '', diagnostic: { category: 'none' } }) + '\\n');
+await message();
+await writeFile(process.env.MAKA_TEST_VERIFYING, '');
+while (true) {
+  try { await readFile(process.env.MAKA_TEST_RELEASE); break; }
+  catch { await new Promise((resolve) => setTimeout(resolve, 5)); }
+}
+const trialPath = new URL('./' + config.trial_name + '/', new URL('file://' + config.trials_dir + '/'));
+await mkdir(trialPath, { recursive: true });
+await writeFile(new URL('result.json', trialPath), JSON.stringify({ verifier_result: { rewards: { reward: 1 } } }));
+socket.end();
+`,
+  );
+  await chmod(executable, 0o755);
+  const restoreEnvironment = setEnvironment({
+    MAKA_TEST_PYTHON: executable,
+    MAKA_TEST_TRIALS: root,
+    MAKA_TEST_PID: pidPath,
+    MAKA_TEST_VERIFYING: verifying,
+    MAKA_TEST_RELEASE: release,
+  });
+  const nativeSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => nativeSetTimeout(callback, delay === 20_000 ? 0 : delay, ...args)) as typeof setTimeout;
+  try {
+    const running = runExperiment({
+      spec: experiment(),
+      store: new FileAttemptStore(join(root, 'attempts')),
+      executor: createHarborExecutor(
+        {
+          ...executorConfig(),
+          preparationEnvironment: ['MAKA_TEST_PID', 'MAKA_TEST_VERIFYING', 'MAKA_TEST_RELEASE'],
+        },
+        join(root, 'experiment.json'),
+      ),
+      subjects: [
+        {
+          kind: 'external',
+          execute: async ({ context }) => {
+            await context.execute({ command: '/bin/true', args: [], credentialEnvironment: {} });
+            return {
+              usage: null,
+              costUsd: null,
+              durationMs: 1,
+              status: 'completed',
+              failureReason: null,
+              artifacts: [],
+            };
+          },
+        },
+      ],
+    });
+    await waitForFile(verifying);
+    const pid = Number(await readFile(pidPath, 'utf8'));
+    assert.doesNotThrow(() => process.kill(pid, 0));
+    await writeFile(release, '');
+    const results = await running;
+    assert.equal(results.get('task::1::external')?.result.status, 'completed');
+  } finally {
+    await writeFile(release, '').catch(() => undefined);
+    globalThis.setTimeout = nativeSetTimeout;
+    restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('cancellation before verification settles remains replaceable after clean teardown', {
+  timeout: 5_000,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-eval-verifier-cancel-'));
+  const executable = join(root, 'fake-python.mjs');
+  const verifying = join(root, 'verifying');
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { connect } from 'node:net';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+process.on('SIGTERM', () => process.exit(0));
+const config = JSON.parse(await readFile(process.argv.at(-1), 'utf8'));
+const socket = connect(config.agent.kwargs.relay_port, config.agent.kwargs.relay_host);
+socket.setEncoding('utf8');
+let buffered = '';
+const message = () => new Promise((resolve) => {
+  const read = (chunk) => {
+    buffered += chunk;
+    const boundary = buffered.indexOf('\\n');
+    if (boundary < 0) return;
+    socket.off('data', read);
+    const line = buffered.slice(0, boundary);
+    buffered = buffered.slice(boundary + 1);
+    resolve(JSON.parse(line));
+  };
+  socket.on('data', read);
+});
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve);
+  socket.once('error', reject);
+});
+socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'ready', instruction: 'solve', cwd: '/workspace' }) + '\\n');
+await message();
+socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'executed', termination: 'exited', exitCode: 0, stdout: '', diagnostic: { category: 'none' } }) + '\\n');
+await message();
+const trialPath = new URL('./' + config.trial_name + '/', new URL('file://' + config.trials_dir + '/'));
+await mkdir(trialPath, { recursive: true });
+await writeFile(new URL('result.json', trialPath), JSON.stringify({ verifier_result: { rewards: { reward: 1 } } }));
+await writeFile(process.env.MAKA_TEST_VERIFYING, '');
+setInterval(() => {}, 1_000);
+await new Promise(() => {});
+`,
+  );
+  await chmod(executable, 0o755);
+  const restoreEnvironment = setEnvironment({
+    MAKA_TEST_PYTHON: executable,
+    MAKA_TEST_TRIALS: root,
+    MAKA_TEST_VERIFYING: verifying,
+  });
+  try {
+    const controller = new AbortController();
+    const store = new FileAttemptStore(join(root, 'attempts'));
+    const running = runExperiment({
+      spec: experiment(),
+      store,
+      executor: createHarborExecutor(
+        { ...executorConfig(), preparationEnvironment: ['MAKA_TEST_VERIFYING'] },
+        join(root, 'experiment.json'),
+      ),
+      subjects: [
+        {
+          kind: 'external',
+          execute: async ({ context }) => {
+            await context.execute({ command: '/bin/true', args: [], credentialEnvironment: {} });
+            return {
+              usage: null,
+              costUsd: null,
+              durationMs: 1,
+              status: 'completed',
+              failureReason: null,
+              artifacts: [],
+            };
+          },
+        },
+      ],
+      signal: controller.signal,
+    });
+    await waitForFile(verifying);
+    controller.abort(new Error('test cancellation'));
+    await running;
+
+    const attempt = (await store.list('task::1::external'))[0]!;
+    assert.equal(attempt.result.status, 'indeterminate');
+    assert.equal(attempt.result.score, null);
+    assert.equal(attempt.result.failureReason, 'executor cancelled before verification completed');
+    assert.equal(attempt.result.artifacts.at(-1)?.kind, 'executor-cleanup');
+  } finally {
+    restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('used trial abort terminates the supervisor without a second wire decision', {
+  timeout: 5_000,
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-eval-used-abort-'));
+  const executable = join(root, 'fake-python.mjs');
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { connect } from 'node:net';
+import { readFile } from 'node:fs/promises';
+process.on('SIGTERM', () => process.exit(0));
+const config = JSON.parse(await readFile(process.argv.at(-1), 'utf8'));
+const socket = connect(config.agent.kwargs.relay_port, config.agent.kwargs.relay_host);
+socket.setEncoding('utf8');
+let buffered = '';
+const message = () => new Promise((resolve) => {
+  const read = (chunk) => {
+    buffered += chunk;
+    const boundary = buffered.indexOf('\\n');
+    if (boundary < 0) return;
+    socket.off('data', read);
+    const line = buffered.slice(0, boundary);
+    buffered = buffered.slice(boundary + 1);
+    resolve(JSON.parse(line));
+  };
+  socket.on('data', read);
+});
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve);
+  socket.once('error', reject);
+});
+socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'ready', instruction: 'solve', cwd: '/workspace' }) + '\\n');
+await message();
+socket.write(
+  JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'executed', termination: 'exited', exitCode: 0, stdout: '', diagnostic: { category: 'none' } }) + '\\n',
+);
+socket.on('data', () => process.exit(9));
+setInterval(() => {}, 1_000);
+await new Promise(() => {});
+`,
+  );
+  await chmod(executable, 0o755);
+  const restoreEnvironment = setEnvironment({
+    MAKA_TEST_PYTHON: executable,
+    MAKA_TEST_TRIALS: root,
+  });
+  const nativeSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) =>
+    nativeSetTimeout(
+      callback,
+      [120_000, 20_000, 5_000].includes(delay ?? -1) ? 100 : delay,
+      ...args,
+    )) as typeof setTimeout;
+  try {
+    const store = new FileAttemptStore(join(root, 'attempts'));
+    await runExperiment({
+      spec: experiment(),
+      store,
+      executor: createHarborExecutor(executorConfig(), join(root, 'experiment.json')),
+      subjects: [
+        {
+          kind: 'external',
+          execute: async ({ context }) => {
+            await context.execute({ command: '/bin/true', args: [], credentialEnvironment: {} });
+            return {
+              usage: null,
+              costUsd: null,
+              durationMs: 1,
+              status: 'infra_failed',
+              failureReason: 'subject transport failed',
+              artifacts: [],
+            };
+          },
+        },
+      ],
+    });
+    const result = (await store.list('task::1::external'))[0]!.result;
+    assert.equal(result.status, 'infra_failed');
+    assert.equal(result.failureReason, 'subject transport failed');
+    assert.deepEqual(result.artifacts, [
+      {
+        kind: 'executor-cleanup',
+        action: 'abort',
+        phase: 'abort',
+        deadlineMs: 120_000,
+        escalation: 'term',
+        outcome: 'confirmed',
+      },
+    ]);
+  } finally {
+    globalThis.setTimeout = nativeSetTimeout;
+    restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('SIGKILL of the supervisor does not confirm host cleanup', { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'maka-eval-killed-cleanup-'));
+  const executable = join(root, 'fake-python.mjs');
+  await writeFile(
+    executable,
+    `#!/usr/bin/env node
+import { connect } from 'node:net';
+import { readFile } from 'node:fs/promises';
+process.on('SIGTERM', () => {});
+const config = JSON.parse(await readFile(process.argv.at(-1), 'utf8'));
+const socket = connect(config.agent.kwargs.relay_port, config.agent.kwargs.relay_host);
+socket.setEncoding('utf8');
+let buffered = '';
+const message = () => new Promise((resolve) => {
+  const read = (chunk) => {
+    buffered += chunk;
+    const boundary = buffered.indexOf('\\n');
+    if (boundary < 0) return;
+    socket.off('data', read);
+    const line = buffered.slice(0, boundary);
+    buffered = buffered.slice(boundary + 1);
+    resolve(JSON.parse(line));
+  };
+  socket.on('data', read);
+});
+await new Promise((resolve, reject) => {
+  socket.once('connect', resolve);
+  socket.once('error', reject);
+});
+socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'ready', instruction: 'solve', cwd: '/workspace' }) + '\\n');
+await message();
+socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'executed', termination: 'exited', exitCode: 0, stdout: '', diagnostic: { category: 'none' } }) + '\\n');
+setInterval(() => {}, 1_000);
+await new Promise(() => {});
+`,
+  );
+  await chmod(executable, 0o755);
+  const restoreEnvironment = setEnvironment({
+    MAKA_TEST_PYTHON: executable,
+    MAKA_TEST_TRIALS: root,
+  });
+  const nativeSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) => nativeSetTimeout(callback, delay === 120_000 ? 0 : delay, ...args)) as typeof setTimeout;
+  try {
+    const store = new FileAttemptStore(join(root, 'attempts'));
+    await runExperiment({
+      spec: experiment(),
+      store,
+      executor: createHarborExecutor(executorConfig(), join(root, 'experiment.json')),
+      subjects: [
+        {
+          kind: 'external',
+          execute: async ({ context }) => {
+            await context.execute({ command: '/bin/true', args: [], credentialEnvironment: {} });
+            return {
+              usage: null,
+              costUsd: null,
+              durationMs: 1,
+              status: 'infra_failed',
+              failureReason: 'subject transport failed',
+              artifacts: [],
+            };
+          },
+        },
+      ],
+    });
+    const result = (await store.list('task::1::external'))[0]!.result;
+    assert.equal(result.status, 'indeterminate');
+    assert.equal(result.score, null);
+    assert.equal(result.failureReason, 'executor cleanup did not settle');
+    assert.deepEqual(result.artifacts.at(-1), {
+      kind: 'executor-cleanup',
+      action: 'abort',
+      phase: 'abort',
+      deadlineMs: 120_000,
+      escalation: 'kill',
+      outcome: 'killed',
+    });
+  } finally {
+    globalThis.setTimeout = nativeSetTimeout;
+    restoreEnvironment();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Maka framework termination is authoritative before stdout decoding', async () => {
   for (const stdout of ['', '{']) {
     const result = await executeMaka('framework_timeout', () => stdout);
@@ -55,12 +443,8 @@ test('Maka framework termination is authoritative before stdout decoding', async
   assert.deepEqual(retained.usage, usage());
   assert.ok(Math.abs((retained.costUsd ?? 0) - 0.0000029087) < 1e-15);
 
-  const cancelled = await executeMaka('cancelled', () => '');
-  assert.equal(cancelled.status, 'indeterminate');
-  assert.equal(cancelled.failureReason, 'Maka subject cancelled');
-
   const external = await createExternalSubjectAdapter().execute({
-    cell: cell('external', { command: '/opt/competitor', args: [] }),
+    cell: cell('external', { command: '/opt/competitor', args: [], result: 'exit-code' }),
     context: {
       cwd: '/app',
       taskInput: 'solve',
@@ -69,6 +453,46 @@ test('Maka framework termination is authoritative before stdout decoding', async
     },
   });
   assert.equal(external.status, 'failed');
+});
+
+test('Maka forwards the configured Runtime Host settlement budget', async () => {
+  const makaCell = cell('maka', { ...makaConfig(), hostSettlementTimeoutMs: 120_000 });
+  let settlementBudget: unknown;
+  const result = await createMakaSubjectAdapter().execute({
+    cell: makaCell,
+    context: {
+      cwd: '/workspace',
+      taskInput: 'solve',
+      metadata: {},
+      execute: async (input) => {
+        const payload = JSON.parse(Buffer.from(input.args[1] ?? '', 'base64url').toString()) as {
+          hostSettlementTimeoutMs?: unknown;
+          execution: { executionId: string };
+        };
+        settlementBudget = payload.hostSettlementTimeoutMs;
+        return {
+          termination: 'exited',
+          exitCode: 0,
+          stdout: JSON.stringify({
+            executionId: payload.execution.executionId,
+            kind: 'settled',
+            status: 'completed',
+            usage: usage(),
+            costUsd: null,
+          }),
+        };
+      },
+    },
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(settlementBudget, 120_000);
+  assert.throws(
+    () =>
+      createMakaSubjectAdapter().validate?.(
+        cell('maka', { ...makaConfig(), hostSettlementTimeoutMs: 120_000.5 }),
+      ),
+    /hostSettlementTimeoutMs/u,
+  );
 });
 
 test('subject preflight settles before the attempt timer starts', async () => {
@@ -240,6 +664,7 @@ test('eight-arm spec and wrappers freeze the working provider contracts', async 
     ...process.env,
     OPENAI_API_KEY: 'test-only-key',
     ANTHROPIC_API_KEY: 'test-only-key',
+    MAKA_EVAL_RESULT_TOKEN: '0123456789abcdef0123456789abcdef',
   };
   try {
     for (const args of [
@@ -260,7 +685,10 @@ test('eight-arm spec and wrappers freeze the working provider contracts', async 
       const { stdout } = await execFileAsync(process.execPath, [wrapper.pathname, ...args], {
         env,
       });
-      assert.equal(JSON.parse(stdout).schemaVersion, 'maka.external_subject_result.v2');
+      assert.equal(
+        decodeResultFrame(stdout, '0123456789abcdef0123456789abcdef').schemaVersion,
+        'maka.external_subject_result.v2',
+      );
     }
     const codexConfig = await readFile(join(root, 'tmp/maka-eval-codex/config.toml'), 'utf8');
     assert.match(codexConfig, /model_catalog_json = .*deepseek-codex-models\.json/u);
@@ -318,6 +746,16 @@ test('eight-arm spec and wrappers freeze the working provider contracts', async 
   }
 });
 
+function decodeResultFrame(stdout: string, token: string): Record<string, unknown> {
+  const [prefix, framedToken, length, digest, encoded] = stdout.trim().split(' ');
+  assert.equal(prefix, 'MAKA-EVAL-RESULT-V1');
+  assert.equal(framedToken, token);
+  const payload = Buffer.from(encoded ?? '', 'base64url');
+  assert.equal(payload.byteLength, Number(length));
+  assert.match(digest ?? '', /^[0-9a-f]{64}$/u);
+  return JSON.parse(payload.toString()) as Record<string, unknown>;
+}
+
 test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', async () => {
   const spec = JSON.parse(
     await readFile(
@@ -355,6 +793,10 @@ test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', 
   const maka = spec.subjects.find(({ id }) => id === 'maka')!;
   const zcode = spec.subjects.find(({ id }) => id === 'zcode')!;
   assert.equal(maka.config.webTools, 'disabled');
+  assert.equal(
+    (maka.config as { hostSettlementTimeoutMs?: number }).hostSettlementTimeoutMs,
+    120_000,
+  );
   assert.deepEqual(
     zcode.config.args?.slice(
       zcode.config.args.indexOf('--disallowedTools'),
@@ -374,6 +816,24 @@ test('Maka web-tool policy removes both hosted search and fetch surfaces', () =>
   const document = disabledWebToolsRuntimePolicyDocument();
   assert.equal(document.policy.webSearch.enabled, false);
   assert.equal(document.policy.privacy.incognitoActive, true);
+});
+
+test('experiment specs do not declare an executor working-directory authority', async () => {
+  for (const name of [
+    'terminal-bench-2.1-deepseek-v4-flash-four-arm.json',
+    'terminal-bench-2.1-deepseek-v4-flash-eight-arm.json',
+  ]) {
+    const spec = JSON.parse(
+      await readFile(new URL(`../../experiments/${name}`, import.meta.url), 'utf8'),
+    ) as {
+      executor: { config: Record<string, unknown> };
+      subjects: Array<{ kind: string; config: Record<string, unknown> }>;
+    };
+    assert.equal(Object.hasOwn(spec.executor.config, 'containerCwd'), false);
+    for (const subject of spec.subjects.filter(({ kind }) => kind === 'maka')) {
+      assert.equal(subject.config.hostSettlementTimeoutMs, 120_000);
+    }
+  }
 });
 
 async function verifyPreparationCancellation(
@@ -417,6 +877,17 @@ await new Promise(() => {});
     MAKA_TEST_STAGE: stage,
     MAKA_TEST_IGNORE_FIRST: ignoreFirstTermination ? '1' : '0',
   });
+  const nativeSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((
+    callback: (...args: unknown[]) => void,
+    delay?: number,
+    ...args: unknown[]
+  ) =>
+    nativeSetTimeout(
+      callback,
+      delay === 20_000 ? 0 : delay === 5_000 ? 100 : delay,
+      ...args,
+    )) as typeof setTimeout;
   try {
     const controller = new AbortController();
     const store = new FileAttemptStore(join(root, 'attempts'));
@@ -443,14 +914,16 @@ await new Promise(() => {});
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
     await store.runExclusive(async () => undefined);
   } finally {
+    globalThis.setTimeout = nativeSetTimeout;
     restore();
     await rm(root, { recursive: true, force: true });
   }
 }
 
 async function executeMaka(
-  termination: 'framework_timeout' | 'cancelled',
+  termination: 'exited' | 'framework_timeout',
   stdout: (executionId: string) => string,
+  diagnostic?: Awaited<ReturnType<SubjectExecutionContext['execute']>>['diagnostic'],
 ) {
   return createMakaSubjectAdapter().execute({
     cell: cell('maka', makaConfig()),
@@ -464,8 +937,9 @@ async function executeMaka(
         };
         return {
           termination,
-          exitCode: termination === 'framework_timeout' ? 124 : 130,
+          exitCode: termination === 'framework_timeout' ? 124 : 1,
           stdout: stdout(payload.execution.executionId),
+          ...(diagnostic ? { diagnostic } : {}),
         };
       },
     },
@@ -492,7 +966,6 @@ function executorConfig(): JsonObject {
     frameworkVersion: '0.20.0',
     pythonPathEnv: 'MAKA_TEST_PYTHON',
     trialsRootEnv: 'MAKA_TEST_TRIALS',
-    containerCwd: '/app',
     environment: {},
     preparationEnvironment: [
       'MAKA_TEST_BARRIER',
@@ -531,6 +1004,7 @@ function makaConfig() {
     permissionMode: 'bypass',
     collaborationMode: 'agent',
     orchestrationMode: 'default',
+    hostSettlementTimeoutMs: 120_000,
   };
 }
 
