@@ -63,6 +63,7 @@ function installGraphRenderer(initial: AgentGraphClientSnapshot): {
   container: Element;
   root: Root;
   setSnapshot(next: AgentGraphClientSnapshot): Promise<void>;
+  renderSession(sessionId: string): Promise<void>;
 } {
   const { document, window } = parseHTML('<div id="root"></div>');
   const matchMedia = (media: string) => ({
@@ -87,11 +88,17 @@ function installGraphRenderer(initial: AgentGraphClientSnapshot): {
     IS_REACT_ACT_ENVIRONMENT: true,
   });
 
-  let current = initial;
+  const snapshots = new Map<string, AgentGraphClientSnapshot>([
+    [initial.rootSessionId, initial],
+  ]);
   const listeners = new Set<GraphListener>();
   (window as unknown as { maka: unknown }).maka = {
     graphs: {
-      getSnapshot: async () => current,
+      getSnapshot: async (sessionId: string) => {
+        const next = snapshots.get(sessionId);
+        if (!next) throw new Error(`missing graph snapshot for ${sessionId}`);
+        return next;
+      },
       inspectOperator: async () => {
         throw new Error('inspectOperator is unused by AgentGraphPanel');
       },
@@ -112,9 +119,22 @@ function installGraphRenderer(initial: AgentGraphClientSnapshot): {
     container,
     root,
     async setSnapshot(next) {
-      current = next;
+      snapshots.set(next.rootSessionId, next);
       await act(async () => {
         for (const listener of [...listeners]) listener();
+        await Promise.resolve();
+      });
+    },
+    async renderSession(sessionId) {
+      await act(async () => {
+        root.render(
+          createElement(AgentGraphPanel, {
+            rootSessionId: sessionId,
+            enabled: true,
+            locale: 'en',
+            onOpenSession: () => undefined,
+          }),
+        );
         await Promise.resolve();
       });
     },
@@ -177,5 +197,34 @@ describe('AgentGraphPanel dismiss', () => {
       assert.equal(harness.container.querySelector('.maka-agent-graph-panel'), null, status);
       await act(async () => harness.root.unmount());
     }
+  });
+
+  it('keeps session A dismissed after switching A → B → A', async () => {
+    const sessionA = snapshot({
+      rootSessionId: 'session-a',
+      graphId: 'graph-a',
+      status: 'completed',
+    });
+    const sessionB = snapshot({
+      rootSessionId: 'session-b',
+      graphId: 'graph-b',
+      status: 'completed',
+    });
+    const harness = installGraphRenderer(sessionA);
+    await harness.setSnapshot(sessionB);
+    await harness.renderSession('session-a');
+    const dismiss = harness.container.querySelector('.maka-agent-graph-dismiss');
+    assert.ok(dismiss);
+    await act(async () => {
+      (dismiss as HTMLElement).click();
+    });
+    assert.equal(harness.container.querySelector('.maka-agent-graph-panel'), null);
+
+    await harness.renderSession('session-b');
+    assert.ok(harness.container.querySelector('.maka-agent-graph-panel'));
+
+    await harness.renderSession('session-a');
+    assert.equal(harness.container.querySelector('.maka-agent-graph-panel'), null);
+    await act(async () => harness.root.unmount());
   });
 });

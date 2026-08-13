@@ -33,10 +33,14 @@ export function dismissAgentGraphPanel(
 export function reconcileAgentGraphPanelDismissals(
   dismissedBySession: AgentGraphPanelDismissals,
   sessionId: string,
-  snapshot: { graphId: string; status: AgentGraphPanelStatus } | undefined,
+  snapshot:
+    | { rootSessionId: string; graphId: string; status: AgentGraphPanelStatus }
+    | undefined,
 ): AgentGraphPanelDismissals {
   const dismissed = dismissedBySession[sessionId];
-  if (!dismissed || !snapshot) return dismissedBySession;
+  if (!dismissed || !snapshot || snapshot.rootSessionId !== sessionId) {
+    return dismissedBySession;
+  }
   if (snapshot.graphId === dismissed && isAgentGraphPanelDismissible(snapshot.status)) {
     return dismissedBySession;
   }

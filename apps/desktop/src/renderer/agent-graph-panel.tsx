@@ -202,7 +202,11 @@ export function AgentGraphPanel(props: {
         current,
         props.rootSessionId,
         snapshot
-          ? { graphId: snapshot.graphId, status: snapshot.status }
+          ? {
+              rootSessionId: snapshot.rootSessionId,
+              graphId: snapshot.graphId,
+              status: snapshot.status,
+            }
           : undefined,
       ),
     );

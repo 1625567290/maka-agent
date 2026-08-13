@@ -122,7 +122,7 @@ describe('dismiss and reconcile', () => {
       reconcileAgentGraphPanelDismissals(
         { 'session-1': 'graph-1' },
         'session-1',
-        { graphId: 'graph-2', status: 'active' },
+        { rootSessionId: 'session-1', graphId: 'graph-2', status: 'active' },
       ),
       {},
     );
@@ -133,7 +133,7 @@ describe('dismiss and reconcile', () => {
       reconcileAgentGraphPanelDismissals(
         { 'session-1': 'graph-1' },
         'session-1',
-        { graphId: 'graph-1', status: 'active' },
+        { rootSessionId: 'session-1', graphId: 'graph-1', status: 'active' },
       ),
       {},
     );
@@ -144,9 +144,20 @@ describe('dismiss and reconcile', () => {
       reconcileAgentGraphPanelDismissals(
         { 'session-1': 'graph-1' },
         'session-1',
-        { graphId: 'graph-1', status: 'completed' },
+        { rootSessionId: 'session-1', graphId: 'graph-1', status: 'completed' },
       ),
       { 'session-1': 'graph-1' },
+    );
+  });
+
+  it('does not clear a dismissal against a snapshot still owned by the previous session', () => {
+    assert.deepEqual(
+      reconcileAgentGraphPanelDismissals(
+        { 'session-a': 'graph-a' },
+        'session-a',
+        { rootSessionId: 'session-b', graphId: 'graph-b', status: 'completed' },
+      ),
+      { 'session-a': 'graph-a' },
     );
   });
 });
