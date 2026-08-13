@@ -161,6 +161,25 @@ class EgressFilterTest(unittest.TestCase):
             self.assertEqual(record["ruleId"], "raw_tunnel")
             self.assertEqual(record["host"], "ssh.github.com")
 
+    def test_audit_writes_one_truncation_marker_when_the_byte_limit_is_reached(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            MODULE.AUDIT_PATH = Path(directory) / "hits.jsonl"
+            MODULE.AUDIT_PATH.write_bytes(b"x" * MODULE.MAX_AUDIT_BYTES)
+            MODULE.append_audit("tbench_domain", "tbench.ai", "/tasks")
+            records = [
+                json.loads(line)
+                for line in MODULE.AUDIT_PATH.read_text().splitlines()
+                if line.startswith("{")
+            ]
+            self.assertEqual(records[-1]["ruleId"], "audit_truncated")
+            size_after_marker = MODULE.AUDIT_PATH.stat().st_size
+            MODULE.append_audit("tbench_domain", "tbench.ai", "/other")
+            self.assertEqual(MODULE.AUDIT_PATH.stat().st_size, size_after_marker)
+            self.assertEqual(
+                [record["ruleId"] for record in records if record["ruleId"] == "audit_truncated"],
+                ["audit_truncated"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

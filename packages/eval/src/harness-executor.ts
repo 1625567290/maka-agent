@@ -166,7 +166,7 @@ async function runHarnessAttempt(
           : await waitForTrial(state.child, { phase: 'completion' });
         finalizationEvidence = completed;
         if (!finalizationConfirmed(completed)) throw new Error('Trial did not finalize cleanly');
-        const verification = await readVerification(state, cell);
+        const verification = await readVerification(state, cell, Boolean(options.egressProxy));
         verificationConfirmedBeforeCancellation = !hostCancellationObserved;
         return verification;
       },
@@ -674,9 +674,34 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
+export function collectEgressAuditArtifact(
+  audit: Buffer | undefined,
+  expected: boolean,
+): { readonly missing: boolean; readonly artifacts: readonly JsonObject[] } {
+  if (audit) {
+    return {
+      missing: false,
+      artifacts: [
+        {
+          kind: 'egress-audit',
+          path: 'artifacts/egress-hits.jsonl',
+          bytes: audit.byteLength,
+          sha256: `sha256:${createHash('sha256').update(audit).digest('hex')}`,
+        },
+      ],
+    };
+  }
+  if (!expected) return { missing: false, artifacts: [] };
+  return {
+    missing: true,
+    artifacts: [{ kind: 'egress-audit-missing', path: 'artifacts/egress-hits.jsonl' }],
+  };
+}
+
 async function readVerification(
   state: RelayState,
   cell: ExperimentCell,
+  expectEgressAudit: boolean,
 ): Promise<ExecutorVerification> {
   const result = JSON.parse(await readFile(join(state.trialPath, 'result.json'), 'utf8')) as {
     exception_info?: { exception_type?: unknown } | null;
@@ -690,24 +715,29 @@ async function readVerification(
     throw new Error('Trial failed outside subject execution');
   }
   const egressAuditPath = join(state.trialPath, 'artifacts', 'egress-hits.jsonl');
-  const egressAudit = await readFile(egressAuditPath).catch(() => undefined);
+  const egressAudit = await readFile(egressAuditPath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined;
+    throw error;
+  });
+  const audit = collectEgressAuditArtifact(egressAudit, expectEgressAudit);
   return {
-    status: score === null ? 'infra_failed' : subjectException ? 'subject_failed' : 'completed',
+    status: audit.missing
+      ? 'infra_failed'
+      : score === null
+        ? 'infra_failed'
+        : subjectException
+          ? 'subject_failed'
+          : 'completed',
     score,
-    failureReason: score === null ? 'verifier produced no reward' : null,
+    failureReason: audit.missing
+      ? 'egress audit log missing'
+      : score === null
+        ? 'verifier produced no reward'
+        : null,
     artifacts: [
       { kind: 'trial', framework: cell.executor.kind, trialName: state.trialName },
       ...(await collectedArtifactInventory(state.trialPath)),
-      ...(egressAudit
-        ? [
-            {
-              kind: 'egress-audit',
-              path: 'artifacts/egress-hits.jsonl',
-              bytes: egressAudit.byteLength,
-              sha256: createHash('sha256').update(egressAudit).digest('hex'),
-            },
-          ]
-        : []),
+      ...audit.artifacts,
     ],
   };
 }
