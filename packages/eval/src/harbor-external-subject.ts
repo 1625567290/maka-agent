@@ -1,15 +1,17 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, rmSync, statSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { basename, dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
+import { fetch as undiciFetch, ProxyAgent } from 'undici';
 import {
   decodePreverifiedToolchain,
   type ExternalProfile as Profile,
 } from './toolchain-verification.js';
 import { isInferenceAdmissionEvent } from './provider-admission.js';
+import { removeEvalWebTools } from './provider-web-tool-surface.js';
 import { takeRelayResultToken, writeRelayResult } from './relay-result-frame.js';
 
 const resultToken = takeRelayResultToken();
@@ -91,6 +93,7 @@ try {
       requests: proxy.requestCount(),
       admittedRequests: proxy.admittedRequestCount(),
       usageRequests: proxy.usageRequestCount(),
+      removedWebTools: proxy.removedWebToolCount(),
     });
     artifacts.push(
       { kind: 'external-process', profile, exitCode: result.exitCode },
@@ -103,6 +106,9 @@ try {
         admittedRequests: proxy.admittedRequestCount(),
         usageRequests: proxy.usageRequestCount(),
         usageComplete: proxy.usageComplete(),
+        removedWebTools: proxy.removedWebToolCount(),
+        models: proxy.requestModels(),
+        toolNames: proxy.observedToolNames(),
       },
       fileArtifact('wrapper-state', statePath, profile),
     );
@@ -181,7 +187,7 @@ async function prepareProfile(
     await writePolicy(
       rooted(root, '/etc/claude-code'),
       'managed-settings.json',
-      '{"permissions":{"deny":["WebSearch","WebFetch"]}}\n',
+      '{"permissions":{"deny":["WebSearch","WebFetch","FetchURL"]}}\n',
     );
   } else if (selected === 'reasonix') {
     const modelReference = executableArgs[executableArgs.indexOf('--model') + 1];
@@ -268,6 +274,7 @@ async function prepareProfile(
         '[permission]',
         'rules = [',
         '  { decision = "deny", scope = "user", pattern = "WebSearch", reason = "Disabled for eval parity" },',
+        '  { decision = "deny", scope = "user", pattern = "WebFetch", reason = "Disabled for eval parity" },',
         '  { decision = "deny", scope = "user", pattern = "FetchURL", reason = "Disabled for eval parity" },',
         ']',
         '',
@@ -370,7 +377,7 @@ async function prepareProfile(
         model: 'deepseek/deepseek-v4-flash',
         permission: {
           mode: 'yolo',
-          disallowedTools: ['WebSearch', 'WebFetch'],
+          disallowedTools: ['WebSearch', 'WebFetch', 'FetchURL'],
         },
         features: { memory: false, mcp: false },
         plugins: { enabled: false },
@@ -587,6 +594,9 @@ async function startMeteringProxy(
   admittedRequestCount(): number;
   usageRequestCount(): number;
   usageComplete(): boolean;
+  removedWebToolCount(): number;
+  requestModels(): readonly string[];
+  observedToolNames(): readonly string[];
   close(): Promise<void>;
 }> {
   const total = zeroUsage();
@@ -594,13 +604,20 @@ async function startMeteringProxy(
   let requests = 0;
   let admittedRequests = 0;
   let usageRequests = 0;
+  let removedWebTools = 0;
+  const requestModels = new Set<string>();
+  const observedToolNames = new Set<string>();
+  const dispatcher = process.env.HTTPS_PROXY ? new ProxyAgent(process.env.HTTPS_PROXY) : undefined;
   const active = new Set<Promise<void>>();
   const server = createServer((request, response) => {
     const operation = (async () => {
       requests += 1;
-      const body = await readRequest(request);
+      const projected = removeEvalWebTools(await readRequest(request));
+      removedWebTools += projected.removed;
+      if (projected.model) requestModels.add(projected.model);
+      for (const name of projected.toolNames) observedToolNames.add(name);
       const target = joinUpstream(upstreamBaseUrl, request.url ?? '/');
-      const headers = new Headers();
+      const headers: Record<string, string> = {};
       for (const [name, value] of Object.entries(request.headers)) {
         if (
           value === undefined ||
@@ -609,14 +626,15 @@ async function startMeteringProxy(
           )
         )
           continue;
-        headers.set(name, Array.isArray(value) ? value.join(', ') : value);
+        headers[name] = Array.isArray(value) ? value.join(', ') : value;
       }
-      if (anthropic) headers.set('x-api-key', upstreamKey);
-      else headers.set('authorization', `Bearer ${upstreamKey}`);
-      const upstream = await fetch(target, {
+      if (anthropic) headers['x-api-key'] = upstreamKey;
+      else headers.authorization = `Bearer ${upstreamKey}`;
+      const upstream = await undiciFetch(target, {
         method: request.method,
         headers,
-        body: body.length === 0 ? undefined : new Uint8Array(body),
+        body: projected.body.length === 0 ? undefined : new Uint8Array(projected.body),
+        ...(dispatcher ? { dispatcher } : {}),
       });
       response.statusCode = upstream.status;
       upstream.headers.forEach((value, name) => {
@@ -666,9 +684,13 @@ async function startMeteringProxy(
     admittedRequestCount: () => admittedRequests,
     usageRequestCount: () => usageRequests,
     usageComplete: () => admittedRequests > 0 && usageRequests === admittedRequests,
+    removedWebToolCount: () => removedWebTools,
+    requestModels: () => [...requestModels].sort(),
+    observedToolNames: () => [...observedToolNames].sort(),
     close: async () => {
       await Promise.allSettled([...active]);
       await closeServer(server);
+      await dispatcher?.close();
     },
   };
 }
@@ -826,8 +848,11 @@ function fileArtifact(kind: string, path: string, selected: Profile): Record<str
 }
 
 async function writePolicy(directory: string, name: string, contents: string): Promise<void> {
-  await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, name), contents);
+  await mkdir(directory, { recursive: true, mode: 0o755 });
+  await chmod(directory, 0o755);
+  const path = join(directory, name);
+  await writeFile(path, contents, { mode: 0o644 });
+  await chmod(path, 0o644);
 }
 
 function rooted(root: string, absolutePath: string): string {

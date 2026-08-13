@@ -1,12 +1,18 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { chmod, lstat, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
-import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { decodeJsonObject, type ExperimentCell, type JsonObject } from './experiment.js';
+import {
+  MAKA_RUNTIME_ARTIFACT_PATH,
+  MAKA_SUBJECT_STDERR_PATH,
+  MAKA_SUBJECT_STDOUT_PATH,
+} from './maka-artifacts.js';
 import {
   type ExecutorAttemptOutcome,
   type ExperimentExecutor,
@@ -47,6 +53,7 @@ interface RelayState {
   readonly taskInput: string;
   readonly credentials: Readonly<Record<string, string>>;
   readonly cwd: string;
+  readonly executionEnvironment: Readonly<Record<string, string>>;
   used: boolean;
   diagnostic?: SubjectProcessDiagnostic;
 }
@@ -240,7 +247,10 @@ function relayContext(state: RelayState, signal?: AbortSignal): SubjectExecution
           kind: 'execute',
           command: input.command,
           args: input.args,
-          environment: input.environment ?? {},
+          environment: mergeExecutionEnvironment(
+            state.executionEnvironment,
+            input.environment ?? {},
+          ),
           credentials,
           resultToken,
           captureStdout: input.captureStdout ?? true,
@@ -341,13 +351,17 @@ async function startTrial(
   const trialPath = join(trialsRoot, trialName);
   const task = decodeTask(framework, options, cell);
   const timeoutMultiplier = positive(cell.budget.timeoutMultiplier, 'budget.timeoutMultiplier');
-  const environmentConfig = { ...options.environment, mounts: resolveMounts(options.mounts) };
+  const environmentConfig = resolveEnvironmentConfig(options);
+  const networkPolicyPath = resolveNetworkPolicyPath(options);
   const relayPath = resolve(dirname(fileURLToPath(import.meta.url)), '../harbor');
+  const executionEnvironment = egressExecutionEnvironment(options.egressProxy);
   const environment = preparationEnvironment(
     framework,
     relayPath,
     [...subjectCredentialNames, ...cell.subject.credentials],
     options.preparationEnvironment,
+    options.egressProxy?.allowedHost,
+    networkPolicyPath,
   );
   const server = createServer();
   const connections = new Set<Socket>();
@@ -388,6 +402,17 @@ async function startTrial(
           },
         },
         environment: environmentConfig,
+        ...(options.egressProxy
+          ? {
+              artifacts: [
+                {
+                  source: '/opt/maka-egress/hits.jsonl',
+                  destination: 'egress-hits.jsonl',
+                  service: 'maka-eval-mitmproxy',
+                },
+              ],
+            }
+          : {}),
       })}\n`,
       { flag: 'wx', mode: 0o600 },
     );
@@ -449,6 +474,7 @@ async function startTrial(
         taskInput: ready.instruction,
         credentials,
         cwd: ready.cwd,
+        executionEnvironment,
         used: false,
       },
     };
@@ -566,6 +592,8 @@ function preparationEnvironment(
   relayPath: string,
   subjectCredentialNames: readonly string[],
   declared: readonly string[],
+  egressAllowedHost?: string,
+  networkPolicyPath?: string,
 ): NodeJS.ProcessEnv {
   const allowed = new Set([
     'HOME',
@@ -593,6 +621,44 @@ function preparationEnvironment(
     ...inherited,
     MAKA_EVAL_FRAMEWORK: framework,
     PYTHONPATH: [relayPath, inherited.PYTHONPATH].filter(Boolean).join(delimiter),
+    ...(egressAllowedHost
+      ? {
+          MAKA_EVAL_EGRESS_REQUIRED: '1',
+          MAKA_EVAL_EGRESS_ALLOWED_HOST: egressAllowedHost,
+        }
+      : {}),
+    ...(networkPolicyPath ? { MAKA_EVAL_NETWORK_POLICY_PATH: networkPolicyPath } : {}),
+  };
+}
+
+function mergeExecutionEnvironment(
+  required: Readonly<Record<string, string>>,
+  subject: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const overlap = Object.keys(required).filter((name) => Object.hasOwn(subject, name));
+  if (overlap.length > 0) {
+    throw new Error(`subject environment overrides Eval egress policy: ${overlap.join(', ')}`);
+  }
+  return { ...subject, ...required };
+}
+
+function egressExecutionEnvironment(
+  options: HarnessOptions['egressProxy'],
+): Readonly<Record<string, string>> {
+  if (!options) return {};
+  const noProxy = '127.0.0.1,localhost';
+  return {
+    HTTP_PROXY: options.proxyUrl,
+    HTTPS_PROXY: options.proxyUrl,
+    http_proxy: options.proxyUrl,
+    https_proxy: options.proxyUrl,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
+    SSL_CERT_FILE: options.containerCaPath,
+    REQUESTS_CA_BUNDLE: options.containerCaPath,
+    CURL_CA_BUNDLE: options.containerCaPath,
+    GIT_SSL_CAINFO: options.containerCaPath,
+    NODE_EXTRA_CA_CERTS: options.containerCaPath,
   };
 }
 
@@ -623,12 +689,69 @@ async function readVerification(
   if (result.exception_info && !subjectException) {
     throw new Error('Trial failed outside subject execution');
   }
+  const egressAuditPath = join(state.trialPath, 'artifacts', 'egress-hits.jsonl');
+  const egressAudit = await readFile(egressAuditPath).catch(() => undefined);
   return {
     status: score === null ? 'infra_failed' : subjectException ? 'subject_failed' : 'completed',
     score,
     failureReason: score === null ? 'verifier produced no reward' : null,
-    artifacts: [{ kind: 'trial', framework: cell.executor.kind, trialName: state.trialName }],
+    artifacts: [
+      { kind: 'trial', framework: cell.executor.kind, trialName: state.trialName },
+      ...(await collectedArtifactInventory(state.trialPath)),
+      ...(egressAudit
+        ? [
+            {
+              kind: 'egress-audit',
+              path: 'artifacts/egress-hits.jsonl',
+              bytes: egressAudit.byteLength,
+              sha256: createHash('sha256').update(egressAudit).digest('hex'),
+            },
+          ]
+        : []),
+    ],
   };
+}
+
+async function collectedArtifactInventory(trialPath: string): Promise<JsonObject[]> {
+  const root = join(trialPath, 'artifacts', 'logs', 'artifacts');
+  const files: JsonObject[] = [];
+  const targets = [
+    join(root, basename(MAKA_RUNTIME_ARTIFACT_PATH)),
+    join(root, basename(MAKA_SUBJECT_STDOUT_PATH)),
+    join(root, basename(MAKA_SUBJECT_STDERR_PATH)),
+  ];
+  for (const target of targets) {
+    await walkCollectedArtifacts(trialPath, target, files).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+  }
+  return files.sort((left, right) => String(left.path).localeCompare(String(right.path)));
+}
+
+async function walkCollectedArtifacts(
+  trialPath: string,
+  current: string,
+  files: JsonObject[],
+): Promise<void> {
+  const metadata = await lstat(current);
+  if (metadata.isSymbolicLink()) return;
+  if (metadata.isFile()) {
+    const hash = createHash('sha256');
+    for await (const chunk of createReadStream(current)) hash.update(chunk as Buffer);
+    files.push({
+      kind: 'collected-artifact',
+      path: relative(trialPath, current).split(sep).join('/'),
+      bytes: metadata.size,
+      sha256: `sha256:${hash.digest('hex')}`,
+    });
+    return;
+  }
+  if (!metadata.isDirectory()) return;
+  for (const entry of await readdir(current, { withFileTypes: true })) {
+    const path = join(current, entry.name);
+    if (entry.isSymbolicLink()) continue;
+    await walkCollectedArtifacts(trialPath, path, files);
+  }
 }
 
 interface HarnessOptions {
@@ -638,6 +761,14 @@ interface HarnessOptions {
   readonly tasksRootEnv?: string;
   readonly environment: JsonObject;
   readonly preparationEnvironment: readonly string[];
+  readonly egressProxy?: {
+    readonly composeSourceEnv: string;
+    readonly composeRelativePath: string;
+    readonly networkPolicyRelativePath: string;
+    readonly proxyUrl: string;
+    readonly allowedHost: string;
+    readonly containerCaPath: string;
+  };
   readonly mounts: readonly {
     readonly sourceEnv: string;
     readonly target: string;
@@ -657,6 +788,7 @@ function decodeOptions(value: JsonObject, framework: Framework): HarnessOptions 
     'preparationEnvironment',
     'mounts',
   ];
+  if (Object.hasOwn(value, 'egressProxy')) fields.push('egressProxy');
   if (framework === 'pier') fields.push('tasksRootEnv');
   const options = exact(value, fields, 'executor.config');
   const preparationEnvironment = array(
@@ -675,15 +807,53 @@ function decodeOptions(value: JsonObject, framework: Framework): HarnessOptions 
     trialsRootEnv: machinePathEnv(options.trialsRootEnv, 'trialsRootEnv'),
     environment: decodeJsonObject(options.environment, 'environment'),
     preparationEnvironment,
+    ...(Object.hasOwn(options, 'egressProxy')
+      ? { egressProxy: decodeEgressProxy(options.egressProxy) }
+      : {}),
     mounts: array(options.mounts, 'mounts').map((mount, index) => decodeMount(mount, index)),
     ...(framework === 'pier'
       ? { tasksRootEnv: machinePathEnv(options.tasksRootEnv, 'tasksRootEnv') }
       : {}),
   };
-  for (const name of [decoded.pythonPathEnv, decoded.trialsRootEnv, decoded.tasksRootEnv]) {
+  for (const name of [
+    decoded.pythonPathEnv,
+    decoded.trialsRootEnv,
+    decoded.tasksRootEnv,
+    decoded.egressProxy?.composeSourceEnv,
+  ]) {
     if (name && !process.env[name]) throw new Error(`machine path ${name} is unavailable`);
   }
   return decoded;
+}
+
+function decodeEgressProxy(value: unknown): NonNullable<HarnessOptions['egressProxy']> {
+  const proxy = exact(
+    value,
+    [
+      'composeSourceEnv',
+      'composeRelativePath',
+      'networkPolicyRelativePath',
+      'proxyUrl',
+      'allowedHost',
+      'containerCaPath',
+    ],
+    'egressProxy',
+  );
+  const proxyUrl = text(proxy.proxyUrl, 'egressProxy.proxyUrl');
+  if (!URL.canParse(proxyUrl) || new URL(proxyUrl).protocol !== 'http:') {
+    throw new Error('egressProxy.proxyUrl must be an HTTP proxy URL');
+  }
+  return {
+    composeSourceEnv: machinePathEnv(proxy.composeSourceEnv, 'egressProxy.composeSourceEnv'),
+    composeRelativePath: relativePath(proxy.composeRelativePath, 'egressProxy.composeRelativePath'),
+    networkPolicyRelativePath: relativePath(
+      proxy.networkPolicyRelativePath,
+      'egressProxy.networkPolicyRelativePath',
+    ),
+    proxyUrl,
+    allowedHost: hostName(proxy.allowedHost, 'egressProxy.allowedHost'),
+    containerCaPath: absolute(proxy.containerCaPath, 'egressProxy.containerCaPath'),
+  };
 }
 
 function decodeMount(value: unknown, index: number) {
@@ -705,6 +875,27 @@ function resolveMounts(mounts: HarnessOptions['mounts']) {
     target: mount.target,
     read_only: true,
   }));
+}
+
+function resolveEnvironmentConfig(options: HarnessOptions): JsonObject {
+  const base = { ...options.environment, mounts: resolveMounts(options.mounts) };
+  if (!options.egressProxy) return base;
+  const source = resolve(process.env[options.egressProxy.composeSourceEnv]!);
+  const composePath = resolve(source, options.egressProxy.composeRelativePath);
+  if (relative(source, composePath).startsWith(`..${sep}`)) {
+    throw new Error('egress proxy compose path escapes its source root');
+  }
+  return { ...base, extra_docker_compose: [composePath] };
+}
+
+function resolveNetworkPolicyPath(options: HarnessOptions): string | undefined {
+  if (!options.egressProxy) return undefined;
+  const source = resolve(process.env[options.egressProxy.composeSourceEnv]!);
+  const policyPath = resolve(source, options.egressProxy.networkPolicyRelativePath);
+  if (relative(source, policyPath).startsWith(`..${sep}`)) {
+    throw new Error('egress network policy path escapes its source root');
+  }
+  return policyPath;
 }
 
 function decodeTask(framework: Framework, options: HarnessOptions, cell: ExperimentCell) {
@@ -901,6 +1092,22 @@ function machinePathEnv(value: unknown, where: string): string {
   const name = text(value, where);
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) throw new Error(`${where} is invalid`);
   return name;
+}
+
+function relativePath(value: unknown, where: string): string {
+  const path = text(value, where);
+  if (path.startsWith('/') || path === '..' || path.startsWith(`..${sep}`)) {
+    throw new Error(`${where} must stay within its source root`);
+  }
+  return path;
+}
+
+function hostName(value: unknown, where: string): string {
+  const host = text(value, where).toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/u.test(host)) {
+    throw new Error(`${where} must be a hostname`);
+  }
+  return host;
 }
 
 function absolute(value: unknown, where: string): string {

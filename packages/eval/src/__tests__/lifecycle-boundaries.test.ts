@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -9,7 +9,7 @@ import { FileAttemptStore } from '../attempt-store.js';
 import type { ExperimentCell, ExperimentSpec, JsonObject } from '../experiment.js';
 import { createExternalSubjectAdapter } from '../external-subject.js';
 import { createHarborExecutor } from '../harness-executor.js';
-import { disabledWebToolsRuntimePolicyDocument } from '../maka-runtime-policy.js';
+import { makaEvalRuntimePolicyDocument } from '../maka-runtime-policy.js';
 import { createMakaSubjectAdapter } from '../maka-subject.js';
 import {
   runExperiment,
@@ -449,7 +449,12 @@ test('Maka framework termination is authoritative before stdout decoding', async
       cwd: '/app',
       taskInput: 'solve',
       metadata: {},
-      execute: async () => ({ termination: 'framework_timeout', exitCode: 124, stdout: '' }),
+      execute: async () => ({
+        termination: 'framework_timeout',
+        exitCode: 124,
+        stdout: '',
+        stderr: '',
+      }),
     },
   });
   assert.equal(external.status, 'failed');
@@ -635,6 +640,7 @@ test('eight-arm spec and wrappers freeze the working provider contracts', async 
       config: {
         connectionSlug?: string;
         baseUrl?: string;
+        toolProfile?: string;
         args?: string[];
         credentialEnvironment?: Record<string, string>;
       };
@@ -646,6 +652,7 @@ test('eight-arm spec and wrappers freeze the working provider contracts', async 
   assert.deepEqual(maka.credentials, ['DEEPSEEK_API_KEY']);
   assert.equal(maka.config.connectionSlug, 'env-deepseek');
   assert.equal(maka.config.baseUrl, 'https://api.deepseek.com');
+  assert.equal(maka.config.toolProfile, 'headless-coding-v1');
   assert.equal(codex.config.args?.includes('--ephemeral'), true);
   assert.equal(codex.config.args?.includes('--skip-git-repo-check'), true);
   assert.equal(claude.config.args?.includes('--bare'), true);
@@ -697,6 +704,11 @@ test('eight-arm spec and wrappers freeze the working provider contracts', async 
     assert.match(
       await readFile(join(root, 'etc/claude-code/managed-settings.json'), 'utf8'),
       /WebSearch.*WebFetch/u,
+    );
+    assert.equal((await stat(join(root, 'etc/claude-code'))).mode & 0o777, 0o755);
+    assert.equal(
+      (await stat(join(root, 'etc/claude-code/managed-settings.json'))).mode & 0o777,
+      0o644,
     );
     assert.match(
       await readFile(join(root, 'tmp/maka-eval-reasonix/config.toml'), 'utf8'),
@@ -766,15 +778,47 @@ test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', 
       'utf8',
     ),
   ) as {
-    subjects: Array<{ id: string; config: { args?: string[]; webTools?: string } }>;
+    subjects: Array<{
+      id: string;
+      config: { args?: string[]; toolProfile?: string };
+    }>;
     execution: { maxConcurrentTaskGroups: number };
-    executor: { config: { mounts: Array<{ target: string }> } };
+    executor: {
+      config: {
+        mounts: Array<{ target: string }>;
+        egressProxy: {
+          composeSourceEnv: string;
+          composeRelativePath: string;
+          networkPolicyRelativePath: string;
+          proxyUrl: string;
+          allowedHost: string;
+          containerCaPath: string;
+        };
+      };
+    };
   };
   assert.equal(spec.execution.maxConcurrentTaskGroups, 16);
   assert.deepEqual(
     spec.subjects.map(({ id }) => id),
     ['maka', 'codex', 'claude-code', 'reasonix', 'opencode', 'kimi-code', 'zcode', 'pi'],
   );
+  assert.deepEqual(spec.executor.config.egressProxy, {
+    composeSourceEnv: 'MAKA_EVAL_MAKA_BUNDLE_PATH',
+    composeRelativePath: 'packages/eval/harbor/docker-compose-egress-proxy.yaml',
+    networkPolicyRelativePath: 'packages/eval/harbor/egress-proxy/network-policy',
+    proxyUrl: 'http://maka-eval-mitmproxy:8080',
+    allowedHost: 'maka-eval-mitmproxy',
+    containerCaPath: '/opt/maka-egress/mitmproxy-ca-cert.pem',
+  });
+  const egressCompose = await readFile(
+    new URL('../../harbor/docker-compose-egress-proxy.yaml', import.meta.url),
+    'utf8',
+  );
+  assert.doesNotMatch(egressCompose, /^\s*ports:/mu);
+  assert.match(egressCompose, /condition: service_healthy/u);
+  assert.match(egressCompose, /maka-eval-egress-state:\/opt\/maka-egress/u);
+  assert.match(egressCompose, /networks:\s*\n\s+- default/u);
+  assert.match(egressCompose, /target: \/usr\/local\/bin\/network-policy/u);
   assert.deepEqual(
     spec.executor.config.mounts.map(({ target }) => target),
     [
@@ -792,17 +836,17 @@ test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', 
   const pi = spec.subjects.find(({ id }) => id === 'pi')!;
   const maka = spec.subjects.find(({ id }) => id === 'maka')!;
   const zcode = spec.subjects.find(({ id }) => id === 'zcode')!;
-  assert.equal(maka.config.webTools, 'disabled');
   assert.equal(
     (maka.config as { hostSettlementTimeoutMs?: number }).hostSettlementTimeoutMs,
     120_000,
   );
+  assert.equal(maka.config.toolProfile, 'headless-coding-v1');
   assert.deepEqual(
     zcode.config.args?.slice(
       zcode.config.args.indexOf('--disallowedTools'),
       zcode.config.args.indexOf('--disallowedTools') + 2,
     ),
-    ['--disallowedTools', 'WebSearch,WebFetch'],
+    ['--disallowedTools', 'WebSearch,WebFetch,FetchURL'],
   );
   assert.equal(pi.config.args?.includes('/opt/maka-pi-toolchain/bin/pi'), true);
   assert.equal(pi.config.args?.includes('--mode'), true);
@@ -812,9 +856,8 @@ test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', 
   assert.equal(pi.config.args?.includes('max'), true);
 });
 
-test('Maka web-tool policy removes both hosted search and fetch surfaces', () => {
-  const document = disabledWebToolsRuntimePolicyDocument();
-  assert.equal(document.policy.webSearch.enabled, false);
+test('Maka Eval policy enables privacy independently of the tool profile', () => {
+  const document = makaEvalRuntimePolicyDocument();
   assert.equal(document.policy.privacy.incognitoActive, true);
 });
 
@@ -997,7 +1040,6 @@ function makaConfig() {
     shimPath: '/opt/maka/harbor-maka-subject.js',
     runtimeHostsPath: '/tmp/maka-runtime-hosts',
     baseUrl: 'https://provider.test/v1',
-    webTools: 'disabled',
     connectionSlug: 'provider',
     model: 'deepseek-v4-flash',
     thinkingLevel: 'max',
@@ -1005,6 +1047,7 @@ function makaConfig() {
     collaborationMode: 'agent',
     orchestrationMode: 'default',
     hostSettlementTimeoutMs: 120_000,
+    toolProfile: 'headless-coding-v1',
   };
 }
 
