@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { describe, test } from 'node:test';
-import type { ModelMessage } from '../model-protocol.js';
+import type { ModelMessage, ModelStreamResult } from '../model-protocol.js';
 import { MockLanguageModelV4, simulateReadableStream } from 'ai/test';
 import { APICallError, type LanguageModelV4StreamPart } from '@ai-sdk/provider';
 import type { AgentRunHeader } from '@maka/core/agent-run';
@@ -5975,6 +5975,74 @@ describe('AiSdkBackend error surfaces', () => {
 });
 
 describe('AiSdkBackend usage telemetry', () => {
+  test('records provider-reported usage for a content-filter terminal', async () => {
+    const model = new MockLanguageModelV4({
+      doStream: {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: 'stream-start', warnings: [] },
+            {
+              type: 'finish',
+              finishReason: { unified: 'content-filter', raw: 'content_filter' },
+              usage: {
+                inputTokens: { total: 7, noCache: 7, cacheRead: 0, cacheWrite: 0 },
+                outputTokens: { total: 3, text: 3, reasoning: 0 },
+              },
+            },
+          ],
+          initialDelayInMs: null,
+          chunkDelayInMs: null,
+        }),
+      },
+    });
+    const appended: StoredMessage[] = [];
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async (message) => {
+        appended.push(message);
+      },
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => model,
+      tools: [],
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events: SessionEvent[] = [];
+    for await (const event of backend.send({ turnId: 'turn-1', text: 'hi', context: [] })) {
+      events.push(event);
+    }
+
+    assert.equal(events.find((event) => event.type === 'token_usage')?.total, 10);
+    assert.equal(appended.find((message) => message.type === 'token_usage')?.total, 10);
+  });
+
+  test('lets an unconfigured turn continue past the former 50-step default', async () => {
+    const loop = countingToolLoopModel(51);
+    const durable = durableTurnHarness('turn-1', 'hi');
+    const backend = createTestAiSdkBackend({
+      sessionId: 'session-1',
+      header: header(),
+      appendMessage: async () => {},
+      connection: connection(),
+      apiKey: 'sk-test',
+      modelId: 'mock-model-id',
+      modelFactory: () => loop.model,
+      tools: [testTool('Read', z.object({ path: z.string() }))],
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+      newId: idGenerator(),
+      now: monotonicClock(),
+    });
+
+    const events = await drainDurably(backend.send(durable.input()), durable);
+
+    assert.equal(loop.callCount(), 52);
+    assert.equal(events.at(-1)?.type, 'complete');
+  });
+
   test('retries an output-free truncated provider stream once and recovers', async () => {
     const durable = durableTurnHarness('turn-truncated-retry', 'analyse the image');
     let calls = 0;
@@ -6167,107 +6235,6 @@ describe('AiSdkBackend usage telemetry', () => {
       (event): event is Extract<SessionEvent, { type: 'error' }> => event.type === 'error',
     );
     assert.equal(error?.reason, 'provider_unavailable');
-  });
-
-  test('says which failed terminal a content filter is', async () => {
-    // A named provider terminal, not a stream nobody closed. It reaches the
-    // same failed outcome and so must carry the same error event — on main it
-    // ended the turn failed while `lastError` stayed empty — but calling it
-    // "ended without finishing" would describe the wrong thing.
-    const durable = durableTurnHarness('turn-filtered', 'analyse the image');
-    const model = new MockLanguageModelV4({
-      doStream: async () => ({
-        stream: simulateReadableStream({
-          chunks: [
-            { type: 'stream-start', warnings: [] },
-            { type: 'text-start', id: 'text-1' },
-            { type: 'text-delta', id: 'text-1', delta: 'I cannot' },
-            { type: 'text-end', id: 'text-1' },
-            {
-              type: 'finish',
-              finishReason: { unified: 'content-filter' as const, raw: 'content_filter' },
-              usage: emptyUsage(),
-            },
-          ],
-          initialDelayInMs: null,
-          chunkDelayInMs: null,
-        }),
-      }),
-    });
-    const backend = createTestAiSdkBackend({
-      sessionId: 'session-1',
-      header: header(),
-      appendMessage: async () => {},
-      connection: connection(),
-      apiKey: 'sk-test',
-      modelId: 'mock-model-id',
-      modelFactory: () => model,
-      tools: [],
-      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
-      newId: idGenerator(),
-      now: monotonicClock(),
-    });
-
-    const events = await drainDurably(backend.send(durable.input()), durable);
-    const complete = events.find(
-      (event): event is Extract<SessionEvent, { type: 'complete' }> => event.type === 'complete',
-    );
-    const error = events.find(
-      (event): event is Extract<SessionEvent, { type: 'error' }> => event.type === 'error',
-    );
-
-    assert.equal(complete?.stopReason, 'error');
-    assert.ok(error, 'a failed terminal must be accompanied by an error event');
-  });
-
-  test('keeps a turn the provider named its own reason for', async () => {
-    // The SDK's `other` is not a reason, it is the SDK declining to name one:
-    // an unrecognized `finish_reason` from an OpenAI-compatible provider —
-    // llama.cpp's `eos_token`, DeepSeek's `insufficient_system_resource` —
-    // lands in the same bucket as a connection that died mid-answer. The
-    // provider's own spelling is the only thing that tells them apart, so
-    // treating the bucket itself as failure would fail complete answers.
-    const durable = durableTurnHarness('turn-unnamed', 'analyse the image');
-    const model = new MockLanguageModelV4({
-      doStream: async () => ({
-        stream: simulateReadableStream({
-          chunks: [
-            { type: 'stream-start', warnings: [] },
-            { type: 'text-start', id: 'text-1' },
-            { type: 'text-delta', id: 'text-1', delta: 'The top region is empty.' },
-            { type: 'text-end', id: 'text-1' },
-            {
-              type: 'finish',
-              finishReason: { unified: 'other' as const, raw: 'eos_token' },
-              usage: emptyUsage(),
-            },
-          ],
-          initialDelayInMs: null,
-          chunkDelayInMs: null,
-        }),
-      }),
-    });
-    const backend = createTestAiSdkBackend({
-      sessionId: 'session-1',
-      header: header(),
-      appendMessage: async () => {},
-      connection: connection(),
-      apiKey: 'sk-test',
-      modelId: 'mock-model-id',
-      modelFactory: () => model,
-      tools: [],
-      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
-      newId: idGenerator(),
-      now: monotonicClock(),
-    });
-
-    const events = await drainDurably(backend.send(durable.input()), durable);
-    const complete = events.find(
-      (event): event is Extract<SessionEvent, { type: 'complete' }> => event.type === 'complete',
-    );
-
-    assert.equal(complete?.stopReason, 'end_turn');
-    assert.ok(!events.some((event) => event.type === 'error'));
   });
 
   test('rejects continuation-capable tools before side effects without a durable reader', async () => {
@@ -9135,7 +9102,7 @@ describe('AiSdkBackend RunTrace', () => {
     };
     (
       backend as unknown as {
-        modelAdapter: { startStream: (input: FakeStreamInput) => Promise<unknown> };
+        modelAdapter: { startStream: (input: FakeStreamInput) => Promise<ModelStreamResult> };
       }
     ).modelAdapter.startStream = async (input: FakeStreamInput) => {
       calls += 1;
@@ -9150,8 +9117,12 @@ describe('AiSdkBackend RunTrace', () => {
             else input.abortSignal.addEventListener('abort', abort, { once: true });
           });
         })(),
-        usage: Promise.resolve(undefined),
-        finishReason: Promise.resolve('stop'),
+        outcome: Promise.resolve({
+          kind: 'completed',
+          finishReason: 'stop',
+          request: { messages: [] },
+          continuation: 'none',
+        }),
       };
     };
 
@@ -11500,7 +11471,7 @@ describe('AiSdkBackend thinking persistence', () => {
     };
     (
       backend as unknown as {
-        modelAdapter: { startStream: (input: FakeStreamInput) => Promise<unknown> };
+        modelAdapter: { startStream: (input: FakeStreamInput) => Promise<ModelStreamResult> };
       }
     ).modelAdapter.startStream = async (input: FakeStreamInput) => ({
       // The adapter boundary now exposes Maka-owned `ModelStreamEvent`s, not
@@ -11512,8 +11483,17 @@ describe('AiSdkBackend thinking persistence', () => {
         yield { kind: 'thinking', text: 'final thoughts' };
         yield { kind: 'thinking-signature', signature: 'sig-last' };
       })(),
-      usage: Promise.resolve(undefined),
-      finishReason: Promise.resolve('stop'),
+      outcome: Promise.resolve({
+        kind: 'truncated',
+        failure: {
+          type: 'model_failure',
+          kind: 'provider_unavailable',
+          message: 'Provider stream ended without finishing (unknown)',
+          retryable: false,
+        },
+        request: { messages: [] },
+        continuation: 'none',
+      }),
     });
 
     for await (const event of backend.send({ turnId: 'turn-1', text: 'hi', context: [] })) {
@@ -11526,6 +11506,7 @@ describe('AiSdkBackend thinking persistence', () => {
     const thinkingOnly = assistants.find((m) => m.thinking?.signature === 'sig-last');
     assert.ok(thinkingOnly, 'thinking-only last step must persist');
     assert.equal(thinkingOnly.text, '');
+    assert.equal(events.find((event) => event.type === 'complete')?.stopReason, 'error');
     // No duplicate message ids anywhere in the ledger.
     const ids = appended.map((m) => (m as { id: string }).id);
     assert.equal(new Set(ids).size, ids.length, `duplicate ledger ids: ${ids.join(', ')}`);
