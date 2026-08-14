@@ -19,9 +19,8 @@ import { runExperiment } from '../runner.js';
 const TEST_REVISION = 'd49e28f1e4ddd13d289e85a5f312a66750951932';
 const EVAL_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
-test('present egress audit is inventoried with a sha256 prefix', () => {
-  const audit = Buffer.from('{"ruleId":"tbench_domain"}\n');
-  assert.deepEqual(collectEgressAuditArtifact(audit, true), {
+function inventory(audit: Buffer, truncated: boolean, policyErrorCount: number) {
+  return {
     missing: false,
     failureReason: null,
     artifacts: [
@@ -30,25 +29,21 @@ test('present egress audit is inventoried with a sha256 prefix', () => {
         path: EGRESS_AUDIT_ARTIFACT_PATH,
         bytes: audit.byteLength,
         sha256: `sha256:${createHash('sha256').update(audit).digest('hex')}`,
+        truncated,
+        policyErrorCount,
       },
     ],
-  });
+  };
+}
+
+test('present egress audit is inventoried with a sha256 prefix', () => {
+  const audit = Buffer.from('{"ruleId":"tbench_domain"}\n');
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 0));
 });
 
 test('an empty audit file is a clean trial, not a missing log', () => {
   const audit = Buffer.alloc(0);
-  assert.deepEqual(collectEgressAuditArtifact(audit, true), {
-    missing: false,
-    failureReason: null,
-    artifacts: [
-      {
-        kind: 'egress-audit',
-        path: EGRESS_AUDIT_ARTIFACT_PATH,
-        bytes: 0,
-        sha256: `sha256:${createHash('sha256').update(audit).digest('hex')}`,
-      },
-    ],
-  });
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 0));
 });
 
 test('a missing expected audit is explicit evidence, not a clean pass', () => {
@@ -59,28 +54,30 @@ test('a missing expected audit is explicit evidence, not a clean pass', () => {
   });
 });
 
-test('a truncated audit is incomplete even though the file exists', () => {
+test('a truncated audit is recorded on the artifact, not judged as infra_failed', () => {
   const audit = Buffer.from(
     '{"ruleId":"tbench_domain"}\n{"ruleId":"audit_truncated","host":"","normalizedPath":""}\n',
   );
-  const collected = collectEgressAuditArtifact(audit, true);
-  assert.equal(collected.missing, false);
-  assert.equal(collected.failureReason, 'egress audit log truncated');
-  assert.equal(collected.artifacts[0]?.kind, 'egress-audit');
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, true, 0));
 });
 
-test('a policy_error audit is a harness fault, not a scored subject failure', () => {
+test('policy_error records are counted without changing attribution', () => {
   const audit = Buffer.from('{"ruleId":"policy_error","host":"","normalizedPath":"ValueError"}\n');
-  const collected = collectEgressAuditArtifact(audit, true);
-  assert.equal(collected.missing, false);
-  assert.equal(collected.failureReason, 'egress policy error');
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 1));
 });
 
-test('truncation takes precedence over an earlier policy_error', () => {
+test('a policy_error followed by a later hit still counts the policy error', () => {
+  const audit = Buffer.from(
+    '{"ruleId":"policy_error","host":"","normalizedPath":"ValueError"}\n{"ruleId":"tbench_domain","host":"tbench.ai","normalizedPath":"/tasks"}\n',
+  );
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 1));
+});
+
+test('truncation and an earlier policy_error are both recorded', () => {
   const audit = Buffer.from(
     '{"ruleId":"policy_error"}\n{"ruleId":"audit_truncated","host":"","normalizedPath":""}\n',
   );
-  assert.equal(collectEgressAuditArtifact(audit, true).failureReason, 'egress audit log truncated');
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, true, 1));
 });
 
 test('trials without an egress proxy do not invent a missing-audit artifact', () => {
@@ -110,28 +107,64 @@ test('a missing expected audit through runAttempt is infra_failed and excluded',
   ]);
 });
 
-test('a truncated audit through runAttempt is infra_failed and excluded', {
+test('a truncated audit through runAttempt stays scored', { timeout: 10_000 }, async () => {
+  const { attempts, selected } = await runHarborTrial({
+    auditMode: 'truncated',
+    egressProxy: true,
+  });
+  assert.equal(attempts[0]?.result.status, 'completed');
+  assert.equal(attempts[0]?.result.score, 1);
+  assert.equal(selected?.result.status, 'completed');
+  assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
+    truncated: true,
+    policyErrorCount: 0,
+  });
+});
+
+test('a policy_error audit through runAttempt stays scored', { timeout: 10_000 }, async () => {
+  const { attempts, selected } = await runHarborTrial({
+    auditMode: 'policy',
+    egressProxy: true,
+  });
+  assert.equal(attempts[0]?.result.status, 'completed');
+  assert.equal(selected?.result.status, 'completed');
+  assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
+    truncated: false,
+    policyErrorCount: 1,
+  });
+});
+
+test('a policy_error then a later hit through runAttempt stays scored', {
+  timeout: 10_000,
+}, async () => {
+  const { attempts, selected } = await runHarborTrial({
+    auditMode: 'policy-then-hit',
+    egressProxy: true,
+  });
+  assert.equal(attempts[0]?.result.status, 'completed');
+  assert.equal(selected?.result.status, 'completed');
+  assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
+    truncated: false,
+    policyErrorCount: 1,
+  });
+});
+
+test('subject timeout still scores when the audit log is truncated', {
   timeout: 10_000,
 }, async () => {
   const { attempts, selected } = await runHarborTrial({
     auditMode: 'truncated',
     egressProxy: true,
+    exceptionType: 'AgentTimeoutError',
+    reward: 0,
   });
-  assert.equal(attempts[0]?.result.status, 'infra_failed');
-  assert.equal(attempts[0]?.result.failureReason, 'egress audit log truncated');
-  assert.equal(selected, undefined);
-});
-
-test('a policy_error audit through runAttempt is infra_failed and excluded', {
-  timeout: 10_000,
-}, async () => {
-  const { attempts, selected } = await runHarborTrial({
-    auditMode: 'policy',
-    egressProxy: true,
+  assert.equal(attempts[0]?.result.status, 'subject_failed');
+  assert.equal(attempts[0]?.result.score, 0);
+  assert.equal(selected?.result.status, 'subject_failed');
+  assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
+    truncated: true,
+    policyErrorCount: 0,
   });
-  assert.equal(attempts[0]?.result.status, 'infra_failed');
-  assert.equal(attempts[0]?.result.failureReason, 'egress policy error');
-  assert.equal(selected, undefined);
 });
 
 test('an empty landed audit through runAttempt stays completed', { timeout: 10_000 }, async () => {
@@ -157,6 +190,12 @@ test('an unreadable expected audit is infra_failed with the artifact path', {
     new RegExp(`failed to read egress audit log .*/${EGRESS_AUDIT_ARTIFACT_PATH} \\(EISDIR\\)`),
   );
   assert.equal(selected, undefined);
+  assert.deepEqual(
+    attempts[0]?.result.artifacts.filter((artifact) =>
+      String(artifact.kind).startsWith('egress-audit'),
+    ),
+    [{ kind: 'egress-audit-unreadable', path: EGRESS_AUDIT_ARTIFACT_PATH }],
+  );
 });
 
 test('trials without an egress proxy still complete when the audit file is absent', {
@@ -171,9 +210,26 @@ test('trials without an egress proxy still complete when the audit file is absen
   assert.equal(trialConfig, null);
 });
 
+function egressAuditArtifact(artifacts: readonly JsonObject[]) {
+  const artifact = artifacts.find((item) => item.kind === 'egress-audit');
+  assert.ok(artifact, 'expected an egress-audit artifact');
+  return {
+    truncated: artifact.truncated,
+    policyErrorCount: artifact.policyErrorCount,
+  };
+}
+
 async function runHarborTrial(options: {
-  readonly auditMode: 'missing' | 'empty' | 'truncated' | 'policy' | 'unreadable';
+  readonly auditMode:
+    | 'missing'
+    | 'empty'
+    | 'truncated'
+    | 'policy'
+    | 'policy-then-hit'
+    | 'unreadable';
   readonly egressProxy: boolean;
+  readonly exceptionType?: string;
+  readonly reward?: number;
 }) {
   const root = await mkdtemp(join(tmpdir(), 'maka-eval-egress-audit-'));
   const executable = join(root, 'fake-python.mjs');
@@ -209,7 +265,13 @@ socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'exe
 await message();
 const trialPath = new URL('./' + config.trial_name + '/', new URL('file://' + config.trials_dir + '/'));
 await mkdir(trialPath, { recursive: true });
-await writeFile(new URL('result.json', trialPath), JSON.stringify({ verifier_result: { rewards: { reward: 1 } } }));
+const reward = Number(process.env.MAKA_TEST_REWARD ?? '1');
+const exceptionType = process.env.MAKA_TEST_EXCEPTION;
+const result = {
+  verifier_result: { rewards: { reward } },
+  ...(exceptionType ? { exception_info: { exception_type: exceptionType } } : {}),
+};
+await writeFile(new URL('result.json', trialPath), JSON.stringify(result));
 await writeFile(process.env.MAKA_TEST_TRIAL_CONFIG, JSON.stringify(config.artifacts ?? null));
 const mode = process.env.MAKA_TEST_AUDIT_MODE;
 if (mode !== 'missing') {
@@ -222,6 +284,8 @@ if (mode !== 'missing') {
     await writeFile(auditUrl, '{"ruleId":"tbench_domain"}\\n{"ruleId":"audit_truncated","host":"","normalizedPath":""}\\n');
   } else if (mode === 'policy') {
     await writeFile(auditUrl, '{"ruleId":"policy_error","host":"","normalizedPath":"ValueError"}\\n');
+  } else if (mode === 'policy-then-hit') {
+    await writeFile(auditUrl, '{"ruleId":"policy_error","host":"","normalizedPath":"ValueError"}\\n{"ruleId":"tbench_domain","host":"tbench.ai","normalizedPath":"/tasks"}\\n');
   }
 }
 socket.end();
@@ -234,6 +298,8 @@ socket.end();
     MAKA_TEST_BUNDLE: EVAL_ROOT,
     MAKA_TEST_AUDIT_MODE: options.auditMode,
     MAKA_TEST_TRIAL_CONFIG: trialConfigPath,
+    MAKA_TEST_REWARD: String(options.reward ?? 1),
+    ...(options.exceptionType ? { MAKA_TEST_EXCEPTION: options.exceptionType } : {}),
   });
   try {
     const store = new FileAttemptStore(join(root, 'attempts'));
@@ -294,7 +360,12 @@ function executorConfig(egressProxy: boolean): JsonObject {
     pythonPathEnv: 'MAKA_TEST_PYTHON',
     trialsRootEnv: 'MAKA_TEST_TRIALS',
     environment: {},
-    preparationEnvironment: ['MAKA_TEST_AUDIT_MODE', 'MAKA_TEST_TRIAL_CONFIG'],
+    preparationEnvironment: [
+      'MAKA_TEST_AUDIT_MODE',
+      'MAKA_TEST_TRIAL_CONFIG',
+      'MAKA_TEST_REWARD',
+      'MAKA_TEST_EXCEPTION',
+    ],
     mounts: [],
     ...(egressProxy
       ? {

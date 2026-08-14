@@ -693,23 +693,29 @@ export function collectEgressAuditArtifact(
       artifacts: [{ kind: 'egress-audit-missing', path: EGRESS_AUDIT_ARTIFACT_PATH }],
     };
   }
+  const forensics = inspectEgressAudit(audit);
   return {
     missing: false,
-    failureReason: classifyEgressAudit(audit),
+    failureReason: null,
     artifacts: [
       {
         kind: 'egress-audit',
         path: EGRESS_AUDIT_ARTIFACT_PATH,
         bytes: audit.byteLength,
         sha256: `sha256:${createHash('sha256').update(audit).digest('hex')}`,
+        truncated: forensics.truncated,
+        policyErrorCount: forensics.policyErrorCount,
       },
     ],
   };
 }
 
-function classifyEgressAudit(audit: Buffer): string | null {
+function inspectEgressAudit(audit: Buffer): {
+  readonly truncated: boolean;
+  readonly policyErrorCount: number;
+} {
   let truncated = false;
-  let policyError = false;
+  let policyErrorCount = 0;
   for (const line of audit.toString('utf8').split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -722,11 +728,9 @@ function classifyEgressAudit(audit: Buffer): string | null {
     if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
     const ruleId = (record as { ruleId?: unknown }).ruleId;
     if (ruleId === 'audit_truncated') truncated = true;
-    if (ruleId === 'policy_error') policyError = true;
+    if (ruleId === 'policy_error') policyErrorCount += 1;
   }
-  if (truncated) return 'egress audit log truncated';
-  if (policyError) return 'egress policy error';
-  return null;
+  return { truncated, policyErrorCount };
 }
 
 async function readVerification(
@@ -751,20 +755,17 @@ async function readVerification(
     egressAudit = await readFile(egressAuditPath);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'ENOENT') {
-      if (!expectEgressAudit) {
-        egressAudit = undefined;
-      } else {
-        return {
-          status: 'infra_failed',
-          score,
-          failureReason: `failed to read egress audit log ${egressAuditPath}${code ? ` (${code})` : ''}`,
-          artifacts: [
-            { kind: 'trial', framework: cell.executor.kind, trialName: state.trialName },
-            ...(await collectedArtifactInventory(state.trialPath)),
-          ],
-        };
-      }
+    if (expectEgressAudit && code !== 'ENOENT') {
+      return {
+        status: 'infra_failed',
+        score,
+        failureReason: `failed to read egress audit log ${egressAuditPath}${code ? ` (${code})` : ''}`,
+        artifacts: [
+          { kind: 'trial', framework: cell.executor.kind, trialName: state.trialName },
+          ...(await collectedArtifactInventory(state.trialPath)),
+          { kind: 'egress-audit-unreadable', path: EGRESS_AUDIT_ARTIFACT_PATH },
+        ],
+      };
     }
   }
   const audit = collectEgressAuditArtifact(egressAudit, expectEgressAudit);
