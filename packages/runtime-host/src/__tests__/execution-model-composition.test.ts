@@ -39,6 +39,7 @@ import { buildParentAgentTools } from '@maka/runtime/subagent-tools';
 import { SESSION_RECAP_INSTRUCTION } from '@maka/runtime/session-recap';
 import { hostedExecutionToolNames } from '../server/hosted-execution-tool-profile.js';
 import { createToolResultArchiveCapability } from '@maka/runtime/tool-result-archive-capability';
+import { loadHistoryCompactCheckpointsFromRunLedger } from '@maka/runtime/history-compact-ledger';
 import { stableHash, toolCatalogHash } from '@maka/runtime/request-shape';
 import { toolAvailabilityHash } from '@maka/runtime/tool-availability';
 import { createSqliteRuntimeStore } from '@maka/storage';
@@ -987,6 +988,15 @@ test('production Host executes a canonical ai-sdk Session against a real provide
       );
       assert.equal(terminal.status, 'completed');
     }
+    const hostedCheckpoints = await loadHistoryCompactCheckpointsFromRunLedger(
+      execution.agentRunStore,
+      session.id,
+    );
+    const hostedMemoryBoundary = hostedCheckpoints.find(
+      (checkpoint) => checkpoint.memoryExtractionBoundary,
+    )?.memoryExtractionBoundary;
+    assert.equal(hostedMemoryBoundary?.disposition, 'eligible');
+    await waitForAutomaticMemoryRequestsToSettle(provider.requests);
 
     const mainRequests = provider.requests.filter((request) => request.body.stream === true);
     const compactRequests = provider.requests.filter(
@@ -994,8 +1004,19 @@ test('production Host executes a canonical ai-sdk Session against a real provide
         request.body.stream !== true &&
         /context summarization assistant/.test(JSON.stringify(request.body)),
     );
+    const memoryRequests = provider.requests.filter((request) =>
+      /Perform the first stage of long-term-memory extraction/.test(JSON.stringify(request.body)),
+    );
     assert.equal(mainRequests.length, 5);
     assert.ok(compactRequests.length >= 1);
+    assert.ok(memoryRequests.length >= 1);
+    assert.ok(memoryRequests.every((memoryRequest) => toolNames(memoryRequest.body).length === 0));
+    assert.ok(
+      memoryRequests.every(
+        (memoryRequest) =>
+          !JSON.stringify(memoryRequest.body).includes('HOSTED_WORKSPACE_SENTINEL'),
+      ),
+    );
     const request = mainRequests[0];
     assert.equal(request?.authorization, `Bearer ${API_KEY}`);
     assert.equal(request?.url, '/v1/chat/completions');
@@ -2677,7 +2698,45 @@ async function waitForProviderEvidence(
     }
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error('Hosted provider request evidence was not persisted');
+  const runs = await execution.agentRunStore.listSessionRuns(sessionId);
+  const events = (
+    await Promise.all(runs.map((run) => execution.agentRunStore.readEvents(sessionId, run.runId)))
+  ).flat();
+  throw new Error(
+    `Hosted provider request evidence was not persisted: ${JSON.stringify({
+      expectedRequests,
+      captures: events.filter((event) => event.type === 'provider_request_captured').length,
+      attempts: events.filter((event) => event.type === 'provider_request_attempt_recorded').length,
+    })}`,
+  );
+}
+
+async function waitForAutomaticMemoryRequestsToSettle(
+  requests: readonly ProviderRequest[],
+): Promise<void> {
+  let stablePolls = 0;
+  let previousCount = -1;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const memoryCount = requests.filter((request) =>
+      /Perform the first stage of long-term-memory extraction/.test(JSON.stringify(request.body)),
+    ).length;
+    if (memoryCount > 0 && requests.length === previousCount) stablePolls += 1;
+    else stablePolls = 0;
+    if (stablePolls >= 5) return;
+    previousCount = requests.length;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Hosted automatic Memory extraction request did not settle: ${JSON.stringify(
+      requests.map((request) => ({
+        stream: request.body.stream,
+        summary: /context summarization assistant/.test(JSON.stringify(request.body)),
+        memory: /Perform the first stage of long-term-memory extraction/.test(
+          JSON.stringify(request.body),
+        ),
+      })),
+    )}`,
+  );
 }
 
 function isTerminal(snapshot: TurnSnapshot): boolean {
@@ -3154,6 +3213,9 @@ async function handleProviderRequest(
     return;
   }
   if (body.stream !== true) {
+    const isMemoryExtraction = /Perform the first stage of long-term-memory extraction/.test(
+      JSON.stringify(body),
+    );
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(
       JSON.stringify({
@@ -3164,7 +3226,18 @@ async function handleProviderRequest(
         choices: [
           {
             index: 0,
-            message: { role: 'assistant', content: SUMMARY_TEXT },
+            message: {
+              role: 'assistant',
+              content: isMemoryExtraction
+                ? JSON.stringify({
+                    status: 'complete',
+                    coverageStatus: 'processed',
+                    requestedStatus: 'not_applicable',
+                    requestedItems: [],
+                    incidentalItems: [],
+                  })
+                : SUMMARY_TEXT,
+            },
             finish_reason: 'stop',
           },
         ],

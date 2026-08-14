@@ -28,7 +28,10 @@ import {
 } from '@maka/runtime/filesystem-worker';
 import { FakeBackend } from '@maka/runtime/fake-backend';
 import { isOAuthEnrollmentProviderEnabled } from '@maka/runtime/oauth-provider-contracts';
-import { loadLatestHistoryCompactCheckpointFromRunLedger } from '@maka/runtime/history-compact-ledger';
+import {
+  loadHistoryCompactCheckpointsFromRunLedger,
+  loadLatestHistoryCompactCheckpointFromRunLedger,
+} from '@maka/runtime/history-compact-ledger';
 import { prepareSkillInvocationMessageFromInventory } from '@maka/runtime/skill-invocation';
 import { RuntimeReadModel } from '@maka/runtime/runtime-read-model';
 import { routeWebSearchTools } from '@maka/runtime/native-web-search-tool';
@@ -606,6 +609,8 @@ export async function createExecutionRuntimeHostComposition(
       historyCompaction: {
         readLatestCheckpoint: (sessionId) =>
           loadLatestHistoryCompactCheckpointFromRunLedger(stores.agentRunStore, sessionId),
+        readCheckpoints: (sessionId) =>
+          loadHistoryCompactCheckpointsFromRunLedger(stores.agentRunStore, sessionId),
       },
       model: createHostMemoryExtractionModel({
         runtimePolicy: runtimePolicyStores,
