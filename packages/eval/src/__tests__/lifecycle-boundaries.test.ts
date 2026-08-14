@@ -834,7 +834,8 @@ test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', 
     'utf8',
   );
   assert.doesNotMatch(networkPolicy, /meta mark \S+ (?:accept|return)/u);
-  assert.match(networkPolicy, /ip daddr 127\.0\.0\.11 udp dport 53 reject/u);
+  assert.match(networkPolicy, /ip daddr 127\.0\.0\.11 reject/u);
+  assert.doesNotMatch(networkPolicy, /127\.0\.0\.11 (?:udp|tcp) dport 53 reject/u);
   assert.match(egressCompose, /proxy-ipv4/u);
   const entrypoint = await readFile(
     new URL('../../harbor/egress-proxy/entrypoint.sh', import.meta.url),

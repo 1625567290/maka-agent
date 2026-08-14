@@ -46,8 +46,10 @@ ${proxy_ip:+    ip daddr $proxy_ip tcp dport $PROXY_PORT return}
   chain egress {
     type filter hook output priority filter; policy accept;
 
-    ip daddr 127.0.0.11 udp dport 53 reject
-    ip daddr 127.0.0.11 tcp dport 53 reject
+    # Docker DNATs 127.0.0.11:53 onto another local port before this hook.
+    # Matching only dport 53 here misses, and the local exemption below
+    # would then accept the rewritten packet.
+    ip daddr 127.0.0.11 reject
     fib daddr type local accept
 ${proxy_ip:+    ip daddr $proxy_ip tcp dport $PROXY_PORT accept}
     # Rejecting everything else rather than only non-TCP: the nat chain above

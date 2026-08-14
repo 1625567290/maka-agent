@@ -57,8 +57,10 @@ namespace-local addresses, and rejects everything else, ICMP included. Rejecting
 redirecting the remainder also closes a connection the subject inherits from an earlier phase: the
 redirect is a NAT rule, and NAT is evaluated only on a connection's first packet. The
 namespace-local exemption keeps the loopback provider proxies reachable. Docker's
-embedded resolver at `127.0.0.11:53` is refused, because it forwards names it does
-not own to the host's upstream resolvers. The proxy publishes its IPv4 into the
+embedded resolver at `127.0.0.11` is refused, because it forwards names it does
+not own to the host's upstream resolvers. The engine DNATs `:53` onto another
+local port before the filter hook, so the rule matches the address rather than
+only that port. The proxy publishes its IPv4 into the
 certificate volume; the relay pins `maka-eval-mitmproxy` in `/etc/hosts` before the
 subject starts, so `HTTPS_PROXY` still resolves after DNS is closed. The policy exempts no
 packet mark: the
