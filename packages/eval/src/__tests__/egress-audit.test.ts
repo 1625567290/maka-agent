@@ -19,7 +19,12 @@ import { runExperiment } from '../runner.js';
 const TEST_REVISION = 'd49e28f1e4ddd13d289e85a5f312a66750951932';
 const EVAL_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
-function inventory(audit: Buffer, truncated: boolean, policyErrorCount: number) {
+function inventory(
+  audit: Buffer,
+  truncated: boolean,
+  policyErrorCount: number,
+  malformedLineCount = 0,
+) {
   return {
     missing: false,
     failureReason: null,
@@ -31,6 +36,7 @@ function inventory(audit: Buffer, truncated: boolean, policyErrorCount: number) 
         sha256: `sha256:${createHash('sha256').update(audit).digest('hex')}`,
         truncated,
         policyErrorCount,
+        malformedLineCount,
       },
     ],
   };
@@ -80,6 +86,25 @@ test('truncation and an earlier policy_error are both recorded', () => {
   assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, true, 1));
 });
 
+test('two policy_error records increment the count rather than pinning it at one', () => {
+  const audit = Buffer.from(
+    '{"ruleId":"policy_error","host":"","normalizedPath":"ValueError"}\n{"ruleId":"policy_error","host":"","normalizedPath":"ValueError"}\n',
+  );
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 2));
+});
+
+test('unparseable and non-object lines are counted without changing attribution', () => {
+  const audit = Buffer.from(
+    '{"ruleId":"tbench_domain"}\n{not json\ngarbage\n123\n"x"\n',
+  );
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 0, 4));
+});
+
+test('invalid UTF-8 is counted as a malformed line, not judged', () => {
+  const audit = Buffer.from([0x7b, 0xff, 0x7d, 0x0a]);
+  assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 0, 1));
+});
+
 test('trials without an egress proxy do not invent a missing-audit artifact', () => {
   assert.deepEqual(collectEgressAuditArtifact(undefined, false), {
     missing: false,
@@ -118,6 +143,7 @@ test('a truncated audit through runAttempt stays scored', { timeout: 10_000 }, a
   assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
     truncated: true,
     policyErrorCount: 0,
+    malformedLineCount: 0,
   });
 });
 
@@ -131,6 +157,7 @@ test('a policy_error audit through runAttempt stays scored', { timeout: 10_000 }
   assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
     truncated: false,
     policyErrorCount: 1,
+    malformedLineCount: 0,
   });
 });
 
@@ -146,6 +173,7 @@ test('a policy_error then a later hit through runAttempt stays scored', {
   assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
     truncated: false,
     policyErrorCount: 1,
+    malformedLineCount: 0,
   });
 });
 
@@ -164,7 +192,31 @@ test('subject timeout still scores when the audit log is truncated', {
   assert.deepEqual(egressAuditArtifact(attempts[0]!.result.artifacts), {
     truncated: true,
     policyErrorCount: 0,
+    malformedLineCount: 0,
   });
+});
+
+test('a missing audit wins over a subject timeout', { timeout: 10_000 }, async () => {
+  const { attempts, selected } = await runHarborTrial({
+    auditMode: 'missing',
+    egressProxy: true,
+    exceptionType: 'AgentTimeoutError',
+    reward: 0,
+  });
+  assert.equal(attempts[0]?.result.status, 'infra_failed');
+  assert.equal(attempts[0]?.result.failureReason, 'egress audit log missing');
+  assert.equal(selected, undefined);
+});
+
+test('a missing audit wins over a missing reward', { timeout: 10_000 }, async () => {
+  const { attempts, selected } = await runHarborTrial({
+    auditMode: 'missing',
+    egressProxy: true,
+    reward: null,
+  });
+  assert.equal(attempts[0]?.result.status, 'infra_failed');
+  assert.equal(attempts[0]?.result.failureReason, 'egress audit log missing');
+  assert.equal(selected, undefined);
 });
 
 test('an empty landed audit through runAttempt stays completed', { timeout: 10_000 }, async () => {
@@ -216,6 +268,7 @@ function egressAuditArtifact(artifacts: readonly JsonObject[]) {
   return {
     truncated: artifact.truncated,
     policyErrorCount: artifact.policyErrorCount,
+    malformedLineCount: artifact.malformedLineCount,
   };
 }
 
@@ -229,7 +282,7 @@ async function runHarborTrial(options: {
     | 'unreadable';
   readonly egressProxy: boolean;
   readonly exceptionType?: string;
-  readonly reward?: number;
+  readonly reward?: number | null;
 }) {
   const root = await mkdtemp(join(tmpdir(), 'maka-eval-egress-audit-'));
   const executable = join(root, 'fake-python.mjs');
@@ -265,10 +318,12 @@ socket.write(JSON.stringify({ token: config.agent.kwargs.relay_token, kind: 'exe
 await message();
 const trialPath = new URL('./' + config.trial_name + '/', new URL('file://' + config.trials_dir + '/'));
 await mkdir(trialPath, { recursive: true });
-const reward = Number(process.env.MAKA_TEST_REWARD ?? '1');
+const rewardEnv = process.env.MAKA_TEST_REWARD;
 const exceptionType = process.env.MAKA_TEST_EXCEPTION;
 const result = {
-  verifier_result: { rewards: { reward } },
+  verifier_result: {
+    rewards: rewardEnv === 'none' ? {} : { reward: Number(rewardEnv ?? '1') },
+  },
   ...(exceptionType ? { exception_info: { exception_type: exceptionType } } : {}),
 };
 await writeFile(new URL('result.json', trialPath), JSON.stringify(result));
@@ -298,7 +353,7 @@ socket.end();
     MAKA_TEST_BUNDLE: EVAL_ROOT,
     MAKA_TEST_AUDIT_MODE: options.auditMode,
     MAKA_TEST_TRIAL_CONFIG: trialConfigPath,
-    MAKA_TEST_REWARD: String(options.reward ?? 1),
+    MAKA_TEST_REWARD: options.reward === null ? 'none' : String(options.reward ?? 1),
     ...(options.exceptionType ? { MAKA_TEST_EXCEPTION: options.exceptionType } : {}),
   });
   try {

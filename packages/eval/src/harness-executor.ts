@@ -705,6 +705,7 @@ export function collectEgressAuditArtifact(
         sha256: `sha256:${createHash('sha256').update(audit).digest('hex')}`,
         truncated: forensics.truncated,
         policyErrorCount: forensics.policyErrorCount,
+        malformedLineCount: forensics.malformedLineCount,
       },
     ],
   };
@@ -713,9 +714,11 @@ export function collectEgressAuditArtifact(
 function inspectEgressAudit(audit: Buffer): {
   readonly truncated: boolean;
   readonly policyErrorCount: number;
+  readonly malformedLineCount: number;
 } {
   let truncated = false;
   let policyErrorCount = 0;
+  let malformedLineCount = 0;
   for (const line of audit.toString('utf8').split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed) continue;
@@ -723,14 +726,18 @@ function inspectEgressAudit(audit: Buffer): {
     try {
       record = JSON.parse(trimmed);
     } catch {
+      malformedLineCount += 1;
       continue;
     }
-    if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      malformedLineCount += 1;
+      continue;
+    }
     const ruleId = (record as { ruleId?: unknown }).ruleId;
     if (ruleId === 'audit_truncated') truncated = true;
     if (ruleId === 'policy_error') policyErrorCount += 1;
   }
-  return { truncated, policyErrorCount };
+  return { truncated, policyErrorCount, malformedLineCount };
 }
 
 async function readVerification(
