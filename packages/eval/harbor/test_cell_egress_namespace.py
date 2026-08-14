@@ -133,6 +133,22 @@ UDP_PROBE = (
     "    print('blocked')\n"
 )
 
+DOCKER_DNS_PROBE = (
+    "import socket\n"
+    "query = (\n"
+    "    b'\\xab\\xcd\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00'\n"
+    "    b'\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01'\n"
+    ")\n"
+    "sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n"
+    "sock.settimeout(5)\n"
+    "try:\n"
+    "    sock.sendto(query, ('127.0.0.11', 53))\n"
+    "    sock.recvfrom(512)\n"
+    "    print('reachable')\n"
+    "except OSError:\n"
+    "    print('blocked')\n"
+)
+
 # An AF_PACKET socket writes at the link layer, below the IP output hooks the
 # policy installs, so no nftables rule can see this traffic at all. Only the
 # absence of NET_RAW stops it. The frame is addressed to the default gateway's
@@ -262,6 +278,9 @@ class CellEgressNamespaceTest(unittest.TestCase):
             cls.run_compose, ["down", "--volumes", "--remove-orphans"], check=False
         )
         cls.run_compose(["up", "--detach", "--wait"], timeout=BUILD_TIMEOUT_S)
+        # Pin the proxy hostname before any test applies the policy, so
+        # HTTPS_PROXY still resolves after Docker DNS is refused.
+        asyncio.run(load_relay()._pin_proxy_hostname(CellEnvironment("main")))
 
     @classmethod
     def build_image(
@@ -393,7 +412,7 @@ class CellEgressNamespaceTest(unittest.TestCase):
     def test_subject_sees_only_the_ca_certificate(self) -> None:
         listed = self.exec_main(["ls", "--almost-all", "/opt/maka-egress"])
         self.assertEqual(listed.returncode, 0, listed.stderr)
-        self.assertEqual(listed.stdout.split(), ["mitmproxy-ca-cert.pem"])
+        self.assertEqual(sorted(listed.stdout.split()), ["mitmproxy-ca-cert.pem", "proxy-ipv4"])
 
     def test_cell_namespace_admits_only_the_audited_proxy(self) -> None:
         # Every negative assertion below is vacuous on a host that cannot reach
@@ -437,9 +456,12 @@ class CellEgressNamespaceTest(unittest.TestCase):
         with self.subTest("loopback provider proxy"):
             self.assertEqual(self.probe_main(LOOPBACK_PROBE), "reachable")
 
-        with self.subTest("Docker DNS"):
+        with self.subTest("pinned proxy hostname"):
             resolved = self.exec_main(["getent", "hosts", PROXY_HOST])
             self.assertEqual(resolved.returncode, 0, resolved.stderr)
+
+        with self.subTest("Docker DNS"):
+            self.assertEqual(self.probe_main(DOCKER_DNS_PROBE), "blocked")
 
 class CellEnvironment:
     """Presents one live cell service as the relay's environment."""

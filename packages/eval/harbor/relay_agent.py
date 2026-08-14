@@ -52,6 +52,8 @@ CAPABILITY_FIELDS = ("CapEff", "CapPrm", "CapBnd")
 # than inferring it from something only the shared namespace would expose.
 POLICY_SERVICE = "harbor-docker-egress-control-sidecar"
 NAMESPACE_PROBE = f"printf %s {shlex.quote(NAMESPACE_PREFIX)}; readlink /proc/self/ns/net"
+PROXY_IPV4_PATH = "/opt/maka-egress/proxy-ipv4"
+PROXY_HOSTS_PREFIX = "MAKA-EVAL-PROXY-HOST-V1 "
 # The kernel's own form for a namespace link target. Matching it keeps an
 # unexpected answer from being compared as if it were an identity.
 NAMESPACE_IDENTITY = re.compile(r"^net:\[[0-9]+\]$")
@@ -354,6 +356,45 @@ async def _require_constrained_subject(environment: Any) -> None:
             "the subject does not share the network namespace the Eval egress policy "
             "was applied to; remove the task's own networking on the subject service"
         )
+    await _pin_proxy_hostname(environment)
+
+
+async def _pin_proxy_hostname(environment: Any) -> None:
+    """Point the proxy hostname at the published IPv4 so Docker DNS can be refused.
+
+    The subject only needs that one name, because the HTTP proxy does remote
+    resolution itself. Pinning it in /etc/hosts lets the namespace policy reject
+    127.0.0.11:53 without breaking HTTPS_PROXY.
+    """
+    host = os.environ.get("MAKA_EVAL_EGRESS_ALLOWED_HOST") or "maka-eval-mitmproxy"
+    if "/" in host or "\x00" in host or host in {".", ".."}:
+        raise RuntimeError("Eval egress proxy host is invalid")
+    script = f"""
+set -eu
+path={shlex.quote(PROXY_IPV4_PATH)}
+host={shlex.quote(host)}
+test -f "$path"
+ip=$(tr -d ' \\t\\r\\n' < "$path")
+case "$ip" in
+  ""|*.*.*.*.*|*[!0-9.]*) exit 1 ;;
+esac
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+if [ -f /etc/hosts ]; then
+  grep -v "[[:space:]]$host$" /etc/hosts > "$tmp" || true
+fi
+printf '%s %s\\n' "$ip" "$host" >> "$tmp"
+cat "$tmp" > /etc/hosts
+printf %s {shlex.quote(PROXY_HOSTS_PREFIX)}
+printf '%s %s\\n' "$ip" "$host"
+"""
+    probe = await environment.exec(script)
+    if probe.return_code != 0:
+        raise RuntimeError("Maka Eval could not pin the Eval egress proxy hostname")
+    reported = _sole_probe_line(probe, PROXY_HOSTS_PREFIX)
+    ip, _, pinned = reported.partition(" ")
+    if pinned != host or not ip or ip.count(".") != 3:
+        raise RuntimeError("Maka Eval could not pin the Eval egress proxy hostname")
 
 
 def _sole_probe_line(probe: Any, prefix: str) -> str:

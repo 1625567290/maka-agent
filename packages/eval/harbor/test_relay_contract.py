@@ -325,6 +325,12 @@ class SubjectEnvironment:
 
     async def exec(self, command: str, cwd=None, timeout_sec=None):
         self.commands.append(command)
+        if "proxy-ipv4" in command:
+            return types.SimpleNamespace(
+                return_code=0,
+                stdout="MAKA-EVAL-PROXY-HOST-V1 172.18.0.2 maka-eval-mitmproxy\n",
+                stderr="",
+            )
         reported = " ".join(f"{name}={value:016x}" for name, value in self.sets.items())
         return types.SimpleNamespace(
             return_code=0,
@@ -445,6 +451,21 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
             await relay._require_constrained_subject(environment)
         self.assertEqual(environment.commands, [])
         self.assertEqual(environment.services, [])
+
+    async def test_missing_published_proxy_address_fails_closed(self):
+        relay = load_relay()
+
+        class MissingAddressEnvironment(SubjectEnvironment):
+            async def exec(self, command, cwd=None, timeout_sec=None):
+                self.commands.append(command)
+                if "proxy-ipv4" in command:
+                    return types.SimpleNamespace(return_code=1, stdout="", stderr="")
+                return await super().exec(command, cwd=cwd, timeout_sec=timeout_sec)
+
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            with self.assertRaises(RuntimeError) as raised:
+                await relay._require_constrained_subject(MissingAddressEnvironment())
+        self.assertIn("pin the Eval egress proxy hostname", str(raised.exception))
 
 
 if __name__ == "__main__":

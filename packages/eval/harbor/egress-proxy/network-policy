@@ -15,7 +15,13 @@ remove_nftables() {
   nft delete table inet "$NFTABLES_RULESET_NAME" 2>/dev/null || true
 }
 
+PROXY_IP_CACHE=/tmp/maka-eval-proxy.ipv4
+
 resolve_proxy_ip() {
+  if [ -s "$PROXY_IP_CACHE" ]; then
+    cat "$PROXY_IP_CACHE"
+    return
+  fi
   getent ahostsv4 "$PROXY_HOST" | awk 'NR == 1 { print $1 }'
 }
 
@@ -40,6 +46,8 @@ ${proxy_ip:+    ip daddr $proxy_ip tcp dport $PROXY_PORT return}
   chain egress {
     type filter hook output priority filter; policy accept;
 
+    ip daddr 127.0.0.11 udp dport 53 reject
+    ip daddr 127.0.0.11 tcp dport 53 reject
     fib daddr type local accept
 ${proxy_ip:+    ip daddr $proxy_ip tcp dport $PROXY_PORT accept}
     # Rejecting everything else rather than only non-TCP: the nat chain above
@@ -58,6 +66,7 @@ setup_proxy_only() {
     echo "could not resolve Eval egress proxy" >&2
     exit 1
   fi
+  printf '%s\n' "$proxy_ip" > "$PROXY_IP_CACHE"
   apply_ruleset "$proxy_ip"
   echo "ok: Eval proxy-only egress applied ($proxy_ip:$PROXY_PORT)"
 }
