@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { FileAttemptStore } from '../attempt-store.js';
 import type { ExperimentCell, ExperimentSpec, JsonObject } from '../experiment.js';
 import { createExternalSubjectAdapter } from '../external-subject.js';
-import { createHarborExecutor } from '../harness-executor.js';
+import { createHarborExecutor, createPierExecutor } from '../harness-executor.js';
 import { makaEvalRuntimePolicyDocument } from '../maka-runtime-policy.js';
 import { createMakaSubjectAdapter } from '../maka-subject.js';
 import {
@@ -816,9 +816,35 @@ test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', 
   );
   assert.doesNotMatch(egressCompose, /^\s*ports:/mu);
   assert.match(egressCompose, /condition: service_healthy/u);
-  assert.match(egressCompose, /maka-eval-egress-state:\/opt\/maka-egress/u);
+  // Scoped to the subject's own block: a whole-file match would still hold with
+  // the capability drop or the read-only flag moved onto the proxy service.
+  const subjectService = egressCompose
+    .split(/\n(?= {2}\S)/u)
+    .find((block) => block.trimStart().startsWith('main:'))!;
+  assert.match(subjectService, /maka-eval-egress-ca:\/opt\/maka-egress:ro/u);
+  assert.match(subjectService, /cap_drop:\s*\n\s+- NET_RAW/u);
   assert.match(egressCompose, /networks:\s*\n\s+- default/u);
   assert.match(egressCompose, /target: \/usr\/local\/bin\/network-policy/u);
+  // The subject shares the sidecar's network namespace, so any packet mark it
+  // could set is one the subject can set too. No live probe can show this any
+  // more — without NET_RAW the subject cannot set a mark at all — so the rule's
+  // absence is asserted where it is written.
+  const networkPolicy = await readFile(
+    new URL('../../harbor/egress-proxy/network-policy', import.meta.url),
+    'utf8',
+  );
+  assert.doesNotMatch(networkPolicy, /meta mark \S+ (?:accept|return)/u);
+  // The relay compares the subject's namespace against the namespace of the
+  // service that installs the policy, so the service it reads has to be the one
+  // the overlay mounts the policy script into. The two names live in different
+  // languages, and a rename on either side leaves the comparison meaningless
+  // rather than failing.
+  const relayAgent = await readFile(
+    new URL('../../harbor/relay_agent.py', import.meta.url),
+    'utf8',
+  );
+  const policyService = /^POLICY_SERVICE = "([^"]+)"$/mu.exec(relayAgent)![1];
+  assert.match(egressCompose, new RegExp(`^ {2}${policyService}:$`, 'mu'));
   assert.deepEqual(
     spec.executor.config.mounts.map(({ target }) => target),
     [
@@ -1003,6 +1029,25 @@ function experiment(): ExperimentSpec {
     verifier: { reward: 'reward' },
   };
 }
+
+test('pier cannot declare an egress proxy it never enforces', () => {
+  const egressProxy = {
+    composeSourceEnv: 'MAKA_TEST_BUNDLE',
+    composeRelativePath: 'packages/eval/harbor/docker-compose-egress-proxy.yaml',
+    networkPolicyRelativePath: 'packages/eval/harbor/egress-proxy/network-policy',
+    proxyUrl: 'http://maka-eval-mitmproxy:8080',
+    allowedHost: 'maka-eval-mitmproxy',
+    containerCaPath: '/opt/maka-egress/mitmproxy-ca-cert.pem',
+  };
+  assert.throws(
+    () =>
+      createPierExecutor(
+        { ...executorConfig(), tasksRootEnv: 'MAKA_TEST_TASKS', egressProxy },
+        'experiment.json',
+      ),
+    /egressProxy is Harbor-only/u,
+  );
+});
 
 function executorConfig(): JsonObject {
   return {

@@ -293,5 +293,159 @@ class RelayContractTest(unittest.TestCase):
                 target.unlink(missing_ok=True)
 
 
+# Every default Docker capability except the two that bypass the policy.
+CONSTRAINED_CAPABILITIES = 0xA80425FB & ~(1 << 13) & ~(1 << 12)
+# The kernel's form for a namespace link target. Two distinct ones, because what
+# the check compares is identity: the same string means the same namespace.
+POLICY_NAMESPACE = "net:[4026532001]"
+OWN_NAMESPACE = "net:[4026532099]"
+
+
+class SubjectEnvironment:
+    """Reports the evidence the probe reads: every `Cap` set, and both namespaces."""
+
+    def __init__(
+        self,
+        *,
+        permitted: int = CONSTRAINED_CAPABILITIES,
+        effective: int | None = None,
+        bounding: int | None = None,
+        namespace: str = POLICY_NAMESPACE,
+    ) -> None:
+        self.sets = {
+            "CapInh": 0,
+            "CapPrm": permitted,
+            "CapEff": permitted if effective is None else effective,
+            "CapBnd": permitted if bounding is None else bounding,
+            "CapAmb": 0,
+        }
+        self.namespace = namespace
+        self.commands: list[str] = []
+        self.services: list[str] = []
+
+    async def exec(self, command: str, cwd=None, timeout_sec=None):
+        self.commands.append(command)
+        reported = " ".join(f"{name}={value:016x}" for name, value in self.sets.items())
+        return types.SimpleNamespace(
+            return_code=0,
+            stdout=(
+                f"MAKA-EVAL-CAPABILITIES-V1 {reported}\n"
+                f"MAKA-EVAL-POLICY-NAMESPACE-V1 {self.namespace}\n"
+            ),
+            stderr="",
+        )
+
+    async def service_exec(self, command: str, *, service: str, **kwargs):
+        self.services.append(service)
+        return types.SimpleNamespace(
+            return_code=0,
+            stdout=f"MAKA-EVAL-POLICY-NAMESPACE-V1 {POLICY_NAMESPACE}\n",
+            stderr="",
+        )
+
+
+def _echoing_service_exec(answer: str):
+    async def service_exec(command: str, *, service: str, **kwargs):
+        return types.SimpleNamespace(
+            return_code=0,
+            stdout=f"MAKA-EVAL-POLICY-NAMESPACE-V1 {answer}\n",
+            stderr="",
+        )
+
+    return service_exec
+
+
+class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
+    async def test_subject_holding_a_bypass_capability_never_starts(self):
+        relay = load_relay()
+        # Named here rather than read from the module: sourcing the expectation
+        # from the code under test would let deleting a capability delete its
+        # own coverage. NET_RAW grants AF_PACKET, NET_ADMIN grants `nft flush`.
+        for name, bit in (("NET_RAW", 1 << 13), ("NET_ADMIN", 1 << 12)):
+            with self.subTest(name):
+                environment = SubjectEnvironment(permitted=bit | (1 << 21))
+                with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+                    with self.assertRaises(RuntimeError) as raised:
+                        await relay._require_constrained_subject(environment)
+                self.assertIn(name, str(raised.exception))
+
+    async def test_capability_reachable_only_through_the_bounding_set_never_starts(self):
+        relay = load_relay()
+        # A non-root subject reports an empty effective set while a
+        # `cap_net_raw+ep` executable still reacquires whatever the bounding set
+        # kept. Verified in a container: with the capability bounded away the
+        # same executable cannot be run at all.
+        environment = SubjectEnvironment(
+            permitted=0,
+            effective=0,
+            bounding=CONSTRAINED_CAPABILITIES | (1 << 13),
+        )
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            with self.assertRaises(RuntimeError) as raised:
+                await relay._require_constrained_subject(environment)
+        self.assertIn("NET_RAW", str(raised.exception))
+
+    async def test_subject_outside_the_policy_namespace_never_starts(self):
+        relay = load_relay()
+        # Harbor applies the policy inside the sidecar and respects a task's own
+        # networking on `main`, so a task that declares it leaves the subject in
+        # a namespace no policy was ever applied to.
+        environment = SubjectEnvironment(namespace=OWN_NAMESPACE)
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            with self.assertRaises(RuntimeError) as raised:
+                await relay._require_constrained_subject(environment)
+        self.assertIn("network namespace", str(raised.exception))
+
+    async def test_policy_namespace_is_read_from_the_service_that_applies_the_policy(self):
+        relay = load_relay()
+        # The comparison is only meaningful against the namespace the policy was
+        # installed in, and Harbor installs it by running `network-policy` in the
+        # egress sidecar. Reading the other side from anywhere else would compare
+        # the subject against a namespace nothing was applied to.
+        environment = SubjectEnvironment()
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            await relay._require_constrained_subject(environment)
+        self.assertEqual(environment.services, ["harbor-docker-egress-control-sidecar"])
+
+    async def test_constrained_subject_proceeds(self):
+        relay = load_relay()
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            await relay._require_constrained_subject(SubjectEnvironment())
+
+    async def test_unreadable_evidence_fails_closed(self):
+        relay = load_relay()
+
+        class SilentEnvironment:
+            async def exec(self, command, cwd=None, timeout_sec=None):
+                return types.SimpleNamespace(return_code=0, stdout="", stderr="")
+
+            async def service_exec(self, command, *, service, **kwargs):
+                return types.SimpleNamespace(return_code=0, stdout="", stderr="")
+
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            with self.assertRaises(RuntimeError):
+                await relay._require_constrained_subject(SilentEnvironment())
+
+    async def test_answer_that_is_not_a_namespace_identity_fails_closed(self):
+        relay = load_relay()
+        # Two sides that both failed to answer must not compare equal. Anything
+        # that is not the kernel's own form is not an identity to compare.
+        for answer in ("", "shared", "net:[]"):
+            with self.subTest(answer):
+                environment = SubjectEnvironment(namespace=answer)
+                environment.service_exec = _echoing_service_exec(answer)
+                with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+                    with self.assertRaises(RuntimeError):
+                        await relay._require_constrained_subject(environment)
+
+    async def test_check_is_scoped_to_runs_that_require_the_proxy(self):
+        relay = load_relay()
+        environment = SubjectEnvironment(permitted=1 << 13, namespace=OWN_NAMESPACE)
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": ""}):
+            await relay._require_constrained_subject(environment)
+        self.assertEqual(environment.commands, [])
+        self.assertEqual(environment.services, [])
+
+
 if __name__ == "__main__":
     unittest.main()
