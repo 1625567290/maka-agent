@@ -78,6 +78,89 @@ class EgressFilterTest(unittest.TestCase):
             self.assertIn("host", record)
             self.assertIn("normalizedPath", record)
 
+    def test_http_connect_refuses_blocklisted_hosts_before_the_tunnel_opens(self) -> None:
+        class Response:
+            @staticmethod
+            def make(status, body, headers):
+                return {"status": status, "body": body, "headers": headers}
+
+        with tempfile.TemporaryDirectory() as directory:
+            MODULE.http = SimpleNamespace(Response=Response)
+            MODULE.AUDIT_PATH = Path(directory) / "hits.jsonl"
+            blocked = type(
+                "Flow",
+                (),
+                {
+                    "request": type(
+                        "Request",
+                        (),
+                        {"pretty_host": "tbench.ai", "host": "tbench.ai", "port": 443},
+                    )()
+                },
+            )()
+            MODULE.http_connect(blocked)
+            self.assertEqual(blocked.response["status"], 451)
+            self.assertEqual(blocked.response["headers"]["X-Maka-Eval-Egress-Rule"], "tbench_domain")
+            record = json.loads(MODULE.AUDIT_PATH.read_text().splitlines()[0])
+            self.assertEqual(record["ruleId"], "tbench_domain")
+            self.assertEqual(record["host"], "tbench.ai")
+
+            for host in ("example.com", "github.com", "ssh.github.com"):
+                allowed = type(
+                    "Flow",
+                    (),
+                    {
+                        "request": type(
+                            "Request",
+                            (),
+                            {"pretty_host": host, "host": host, "port": 443},
+                        )(),
+                        "response": None,
+                    },
+                )()
+                MODULE.http_connect(allowed)
+                self.assertIsNone(allowed.response, host)
+
+    def test_tcp_start_kills_raw_tunnels_and_records_them(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            MODULE.AUDIT_PATH = Path(directory) / "hits.jsonl"
+            killed: list[str] = []
+            flow = type(
+                "Flow",
+                (),
+                {"server_conn": SimpleNamespace(address=("ssh.github.com", 443))},
+            )()
+            flow.kill = lambda: killed.append("killed")
+            MODULE.tcp_start(flow)
+            self.assertEqual(killed, ["killed"])
+            record = json.loads(MODULE.AUDIT_PATH.read_text().splitlines()[0])
+            self.assertEqual(record["ruleId"], "raw_tunnel")
+            self.assertEqual(record["host"], "ssh.github.com")
+            self.assertEqual(record["normalizedPath"], ":443")
+
+    def test_tcp_message_drops_raw_payloads(self) -> None:
+        message = SimpleNamespace(content=b"SSH-2.0-test\r\n")
+        killed: list[str] = []
+        flow = SimpleNamespace(messages=[message], killable=True)
+        flow.kill = lambda: killed.append("killed")
+        MODULE.tcp_message(flow)
+        self.assertEqual(message.content, b"")
+        self.assertEqual(killed, ["killed"])
+
+    def test_next_layer_replaces_raw_tcp_with_a_closer(self) -> None:
+        class TCPLayer:
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            MODULE.AUDIT_PATH = Path(directory) / "hits.jsonl"
+            context = SimpleNamespace(server=SimpleNamespace(address=("ssh.github.com", 443)))
+            nextlayer = SimpleNamespace(layer=TCPLayer(), context=context)
+            MODULE.next_layer(nextlayer)
+            self.assertIsInstance(nextlayer.layer, MODULE.CloseRawLayer)
+            record = json.loads(MODULE.AUDIT_PATH.read_text().splitlines()[0])
+            self.assertEqual(record["ruleId"], "raw_tunnel")
+            self.assertEqual(record["host"], "ssh.github.com")
+
 
 if __name__ == "__main__":
     unittest.main()

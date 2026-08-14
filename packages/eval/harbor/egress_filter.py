@@ -101,12 +101,50 @@ try:
 except ImportError:
     http = None
 
+try:
+    from mitmproxy.proxy import commands as proxy_commands
+except ImportError:
+    proxy_commands = None
+
 
 def request(flow: object) -> None:
+    apply_http_policy(flow, flow.request.pretty_url)
+
+
+def http_connect(flow: object) -> None:
+    try:
+        raw_url = connect_target_url(flow)
+    except Exception:
+        raw_url = ""
+    apply_http_policy(flow, raw_url)
+
+
+def tcp_start(flow: object) -> None:
+    record_raw_tunnel(flow)
+    kill_flow(flow)
+
+
+def tcp_message(flow: object) -> None:
+    messages = getattr(flow, "messages", None)
+    if messages:
+        messages[-1].content = b""
+    kill_flow(flow)
+
+
+def next_layer(nextlayer: object) -> None:
+    current = getattr(nextlayer, "layer", None)
+    if current is None or type(current).__name__ != "TCPLayer":
+        return
+    context = getattr(nextlayer, "context", None)
+    record_raw_tunnel(context)
+    nextlayer.layer = CloseRawLayer(context)
+
+
+def apply_http_policy(flow: object, raw_url: str) -> None:
     if http is None:
         raise RuntimeError("mitmproxy is required to run the Eval egress filter")
     try:
-        matched = contamination_rule(flow.request.pretty_url)
+        matched = contamination_rule(raw_url)
         if not matched:
             return
         rule_id, host, normalized_path = matched
@@ -125,6 +163,62 @@ def request(flow: object) -> None:
             append_audit("policy_error", "", type(error).__name__)
         except Exception:
             pass
+
+
+def connect_target_url(flow: object) -> str:
+    request = flow.request
+    host = (getattr(request, "pretty_host", None) or getattr(request, "host", "") or "").strip()
+    if not host:
+        raise ValueError("empty CONNECT host")
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = getattr(request, "port", None)
+    if port in (None, 443):
+        return f"https://{host}/"
+    if port == 80:
+        return f"http://{host}/"
+    return f"https://{host}:{port}/"
+
+
+def tcp_peer(flow: object) -> tuple[str, str]:
+    server = getattr(flow, "server_conn", None) or getattr(flow, "server", None)
+    address = getattr(server, "address", None) if server is not None else None
+    if isinstance(address, (tuple, list)) and address:
+        host = str(address[0])[:255]
+        port = address[1] if len(address) > 1 else ""
+        return host, f":{port}" if port != "" else ""
+    return "", ""
+
+
+def record_raw_tunnel(flow: object) -> None:
+    host, path = tcp_peer(flow)
+    try:
+        append_audit("raw_tunnel", host, path)
+    except Exception:
+        pass
+
+
+def kill_flow(flow: object) -> None:
+    kill = getattr(flow, "kill", None)
+    if callable(kill) and getattr(flow, "killable", True):
+        try:
+            kill()
+        except Exception:
+            pass
+
+
+class CloseRawLayer:
+    def __init__(self, context: object) -> None:
+        self.context = context
+
+    def handle_event(self, event: object):
+        if proxy_commands is None:
+            return
+            yield
+        for name in ("client", "server"):
+            connection = getattr(self.context, name, None)
+            if connection is not None:
+                yield proxy_commands.CloseConnection(connection)
 
 
 def blocked_response(rule_id: str):
