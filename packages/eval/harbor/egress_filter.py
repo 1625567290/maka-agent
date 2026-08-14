@@ -278,6 +278,7 @@ def audit_already_truncated() -> bool:
     if not lines:
         return False
     try:
-        return json.loads(lines[-1]).get("ruleId") == "audit_truncated"
+        parsed = json.loads(lines[-1])
     except json.JSONDecodeError:
         return False
+    return isinstance(parsed, dict) and parsed.get("ruleId") == "audit_truncated"

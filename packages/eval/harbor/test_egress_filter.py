@@ -175,10 +175,23 @@ class EgressFilterTest(unittest.TestCase):
             size_after_marker = MODULE.AUDIT_PATH.stat().st_size
             MODULE.append_audit("tbench_domain", "tbench.ai", "/other")
             self.assertEqual(MODULE.AUDIT_PATH.stat().st_size, size_after_marker)
+            records_after = [
+                json.loads(line)
+                for line in MODULE.AUDIT_PATH.read_text().splitlines()
+                if line.startswith("{")
+            ]
             self.assertEqual(
-                [record["ruleId"] for record in records if record["ruleId"] == "audit_truncated"],
+                [record["ruleId"] for record in records_after if record["ruleId"] == "audit_truncated"],
                 ["audit_truncated"],
             )
+
+    def test_truncation_probe_ignores_non_object_json_tails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            MODULE.AUDIT_PATH = Path(directory) / "hits.jsonl"
+            MODULE.AUDIT_PATH.write_text('123\n"x"\n')
+            self.assertFalse(MODULE.audit_already_truncated())
+            MODULE.write_truncation_marker()
+            self.assertTrue(MODULE.audit_already_truncated())
 
 
 if __name__ == "__main__":
