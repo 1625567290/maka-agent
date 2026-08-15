@@ -86,6 +86,28 @@ export async function writeSession(
   }
 }
 
+/**
+ * Same store `writeSession` wrote. Search uses this in fixture windows so
+ * a Host subscription that cannot see the seed still returns content hits.
+ */
+export async function readE2eFixtureSessionMessages(
+  workspaceRoot: string,
+  sessionId: string,
+): Promise<StoredMessage[] | null> {
+  const databaseLease = acquireOperationalStateDatabase(workspaceRoot);
+  const sessions = createSqliteSessionMetadataStore(
+    join(workspaceRoot, OPERATIONAL_STATE_DATABASE_NAME),
+    { databaseLease },
+  );
+  try {
+    return await sessions.readMessages(sessionId);
+  } catch {
+    return null;
+  } finally {
+    sessions.close();
+  }
+}
+
 export async function writeJson(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(value, null, 2) + '\n', 'utf8');

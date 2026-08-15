@@ -1,3 +1,4 @@
+import type { StoredMessage } from '@maka/core/session';
 import { runThreadSearch } from './search/thread-search.js';
 import type { DesktopRuntimeHostClient } from './runtime-host-client.js';
 import { toDesktopHostSessionSummary } from './runtime-host-session-catalog-ipc-main.js';
@@ -13,6 +14,13 @@ interface RuntimeHostSearchIpcDeps {
     DesktopRuntimeHostClient,
     'listSessions' | 'openSession' | 'queryRuntimePolicy'
   >;
+  /**
+   * Fixture windows seed transcripts into the workspace store before the
+   * Host is up. Bind this to that store so `search:thread` can return
+   * content hits (with `turnId`) even when `openSession`/`loadTranscript`
+   * cannot see the seed. Production omits it and reads the Host transcript.
+   */
+  readonly readFixtureMessages?: (sessionId: string) => Promise<StoredMessage[] | null>;
 }
 
 export function registerRuntimeHostSearchIpc(
@@ -23,18 +31,27 @@ export function registerRuntimeHostSearchIpc(
       listSessions: async () =>
         (await deps.client.listSessions()).map(toDesktopHostSessionSummary),
       readMessages: (sessionId) =>
-        readWithFallback(async () => {
-          const session = await deps.client.openSession(sessionId);
-          try {
-            return await session.loadTranscript();
-          } finally {
-            await session.close();
-          }
-        }, null),
+        deps.readFixtureMessages
+          ? deps.readFixtureMessages(sessionId)
+          : readHostTranscript(deps.client, sessionId),
       getPrivacyContext: async () => ({
         incognitoActive: (await deps.client.queryRuntimePolicy()).policy.privacy
           .incognitoActive,
       }),
     }),
   );
+}
+
+async function readHostTranscript(
+  client: Pick<DesktopRuntimeHostClient, 'openSession'>,
+  sessionId: string,
+): Promise<StoredMessage[] | null> {
+  return readWithFallback(async () => {
+    const session = await client.openSession(sessionId);
+    try {
+      return await session.loadTranscript();
+    } finally {
+      await session.close();
+    }
+  }, null);
 }

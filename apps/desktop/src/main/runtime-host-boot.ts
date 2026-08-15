@@ -47,6 +47,7 @@ import { installDesktopShellPresentation } from "./desktop-shell-presentation.js
 import {
   resolveE2eFixture,
   seedE2eFixture,
+  readE2eFixtureSessionMessages,
 } from "./e2e-fixture.js";
 import { createKeepSystemAwakeController } from "./keep-system-awake.js";
 import {
@@ -937,7 +938,16 @@ function registerHostClientIpc(
     openPath: (path) => shell.openPath(path),
     allowLocalPaths: target.kind === "local",
   });
-  registerRuntimeHostSearchIpc({ ipcMain: scopedIpc, client });
+  registerRuntimeHostSearchIpc({
+    ipcMain: scopedIpc,
+    client,
+    ...(e2eFixture
+      ? {
+          readFixtureMessages: (sessionId) =>
+            readE2eFixtureSessionMessages(workspaceRoot, sessionId),
+        }
+      : {}),
+  });
   registerRuntimeHostUsageIpc({
     ipcMain: scopedIpc,
     client,

@@ -12,6 +12,7 @@ import {
   LONG_SIDEBAR_SESSION_PREFIX,
   PROMPT_RAIL_SESSION_ID,
   TURN_SESSION_ID,
+  readE2eFixtureSessionMessages,
   writeSession,
 } from './e2e-fixture/seed-helpers.js';
 import {
@@ -29,6 +30,8 @@ import {
   writeSettings,
 } from './e2e-fixture/scenarios-settings.js';
 import { usageStatsSessions } from './e2e-fixture/scenarios-usage.js';
+
+export { readE2eFixtureSessionMessages };
 
 const E2E_FIXTURE_SCENARIOS = new Set<E2eFixtureScenario>([
   'fetched-empty',
