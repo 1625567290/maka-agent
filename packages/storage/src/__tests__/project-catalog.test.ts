@@ -12,6 +12,7 @@ import {
   ProjectUnavailableError,
   type ResolvedProjectLocation,
   resolveProjectLocation,
+  resolveUserSelectedProjectLocation,
 } from '../project-catalog.js';
 import { createSessionStore } from '../session-store.js';
 import { createGitRepositoryWithWorktree } from './fixtures/git-repository.js';
@@ -111,6 +112,44 @@ test('a repository and its linked worktree resolve to one project identity', asy
     assert.notEqual(main.canonicalPath, linked.canonicalPath);
     assert.equal(main.git?.isWorktree, false);
     assert.equal(linked.git?.isWorktree, true);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test('registering a nested folder keeps that folder instead of the enclosing repository', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'maka-project-nested-folder-'));
+  try {
+    const parent = join(base, 'parent-project');
+    const child = join(parent, 'child-project');
+    await mkdir(child, { recursive: true });
+    await execFileAsync('git', ['init', '--quiet'], { cwd: parent });
+    const catalog = createProjectCatalog(join(base, 'storage'), {
+      now: () => 1_000,
+      createId: (() => {
+        let id = 0;
+        return () => `project-${++id}`;
+      })(),
+    });
+
+    const parentProject = await catalog.register(parent);
+    const childProject = await catalog.register(child);
+    const parentPath = await realpath(parent);
+    const childPath = await realpath(child);
+    const parentLocation = await resolveProjectLocation({ path: parent });
+
+    assert.notEqual(childProject.id, parentProject.id);
+    assert.equal(parentProject.preferredPath, parentPath);
+    assert.equal(childProject.preferredPath, childPath);
+    assert.equal(childProject.name, 'child-project');
+    assert.equal(parentLocation.kind, 'git');
+    assert.equal((await resolveProjectLocation({ path: child })).identity, parentLocation.identity);
+    assert.deepEqual(await resolveUserSelectedProjectLocation(child), {
+      canonicalPath: childPath,
+      identity: `folder:${childPath}`,
+      kind: 'folder',
+    });
+    assert.equal((await catalog.resolveHistoricalPath(child)).id, parentProject.id);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
