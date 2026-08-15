@@ -492,7 +492,10 @@ export interface MakaBridge {
     abandonPlanExecution(sessionId: string, executionId: string): Promise<PlanSessionState>;
     setModel(sessionId: string, input: { llmConnectionSlug: string; model: string }): Promise<SessionSummary>;
     setThinkingLevel(sessionId: string, level: ThinkingLevel | undefined | null): Promise<SessionSummary>;
-    remove(sessionId: string, options?: { revisionFamily?: boolean }): Promise<void>;
+    remove(
+      sessionId: string,
+      options?: { revisionFamily?: boolean },
+    ): Promise<{ kind: 'removed' } | { kind: 'restored' }>;
     cleanupSessionCopy(sessionId: string): Promise<void>;
     abandonSessionCopy(sessionId: string): Promise<void>;
   };

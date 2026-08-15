@@ -37,6 +37,7 @@ function installWindow(
   harness: SweepHarness,
   options: {
     rejectIds?: readonly string[];
+    restoreIds?: readonly string[];
     surviving?: readonly SessionSummary[];
     /** Runs after each accepted removal, to model what another client did meanwhile. */
     onRemove?: (sessionId: string) => void;
@@ -52,8 +53,10 @@ function installWindow(
         sessions: {
           remove: async (id: string) => {
             if (options.rejectIds?.includes(id)) throw new Error(`busy:${id}`);
+            if (options.restoreIds?.includes(id)) return { kind: 'restored' as const };
             harness.removed.push(id);
             options.onRemove?.(id);
+            return { kind: 'removed' as const };
           },
           list: async () => {
             harness.listCalls += 1;
@@ -114,7 +117,13 @@ describe('purgeSessions', () => {
     const outcome = await actions.purgeSessions(['a-v2', 'b']).finally(restore);
 
     assert.deepEqual(h.removed, ['a-v2', 'b']);
-    assert.deepEqual(outcome, { removed: 2, remaining: [], verified: true, firstError: undefined });
+    assert.deepEqual(outcome, {
+      removed: 2,
+      restored: 0,
+      remaining: [],
+      verified: true,
+      firstError: undefined,
+    });
     // The family goes, not just the representative, and the open member of it
     // stops being the active session.
     assert.deepEqual(h.cleared.sort(), ['a', 'a-v2', 'b']);
@@ -136,6 +145,7 @@ describe('purgeSessions', () => {
 
     assert.deepEqual(h.removed, ['doomed']);
     assert.equal(outcome.removed, 1);
+    assert.equal(outcome.restored, 0);
     assert.deepEqual(outcome.remaining, []);
   });
 
@@ -157,7 +167,23 @@ describe('purgeSessions', () => {
 
     assert.deepEqual(h.removed, ['first']);
     assert.equal(outcome.removed, 1);
+    assert.equal(outcome.restored, 0);
     assert.deepEqual(outcome.remaining, []);
+  });
+
+  it('counts a Host-side restore separately from a failed delete', async () => {
+    const h = harness();
+    const sessions = [summary('kept'), summary('doomed')];
+    const restore = installWindow(h, { restoreIds: ['kept'] });
+    const actions = createActions({ harness: h, sessions, activeIdRef: { current: undefined } });
+
+    const outcome = await actions.purgeSessions(['kept', 'doomed']).finally(restore);
+
+    assert.deepEqual(h.removed, ['doomed']);
+    assert.equal(outcome.removed, 1);
+    assert.equal(outcome.restored, 1);
+    assert.deepEqual(outcome.remaining, []);
+    assert.equal(outcome.firstError, undefined);
   });
 
   it('skips an id whose row action is already in flight instead of racing it', async () => {
@@ -176,6 +202,7 @@ describe('purgeSessions', () => {
     assert.deepEqual(h.removed, ['free']);
     assert.deepEqual(outcome.remaining, ['busy']);
     assert.equal(outcome.removed, 1);
+    assert.equal(outcome.restored, 0);
   });
 
   it('counts a rejected delete that the catalog no longer lists as removed', async () => {
@@ -195,6 +222,7 @@ describe('purgeSessions', () => {
     assert.equal(h.listCalls, 1);
     assert.deepEqual(outcome.remaining, ['survivor']);
     assert.equal(outcome.removed, 1);
+    assert.equal(outcome.restored, 0);
     assert.equal((outcome.firstError as Error).message, 'busy:committed');
   });
 
@@ -216,5 +244,6 @@ describe('purgeSessions', () => {
     assert.equal(outcome.verified, false);
     assert.deepEqual(outcome.remaining, []);
     assert.equal(outcome.removed, 0);
+    assert.equal(outcome.restored, 0);
   });
 });

@@ -133,6 +133,69 @@ test('settles branch cleanup when its target disappears between catalog reads', 
   assert.equal(await client.removeSessionCopy('branch-copy'), 'removed');
 });
 
+test('removes an archived Session on the first matching revision', async () => {
+  const { client, requests } = clientWithResponses([
+    { kind: 'session', session: session('archived', 3, { isArchived: true }) },
+    { kind: 'removed', sessionId: 'archived' },
+  ]);
+
+  assert.equal(await client.removeSession('archived'), 'removed');
+  assert.deepEqual(
+    requests.filter(({ operation }) => operation === 'session.remove').map(({ input }) => input),
+    [{ sessionId: 'archived', expectedRevision: 3 }],
+  );
+});
+
+test('retries an archived remove after a same-lifecycle revision conflict', async () => {
+  const { client, requests } = clientWithResponses([
+    { kind: 'session', session: session('archived', 3, { isArchived: true }) },
+    { kind: 'revision_conflict', expectedRevision: 3, actualRevision: 4 },
+    { kind: 'session', session: session('archived', 4, { isArchived: true }) },
+    { kind: 'removed', sessionId: 'archived' },
+  ]);
+
+  assert.equal(await client.removeSession('archived'), 'removed');
+  assert.deepEqual(
+    requests.filter(({ operation }) => operation === 'session.remove').map(({ input }) => input),
+    [
+      { sessionId: 'archived', expectedRevision: 3 },
+      { sessionId: 'archived', expectedRevision: 4 },
+    ],
+  );
+});
+
+test('does not replay a remove after the Session is restored', async () => {
+  const { client, requests } = clientWithResponses([
+    { kind: 'session', session: session('archived', 3, { isArchived: true }) },
+    { kind: 'revision_conflict', expectedRevision: 3, actualRevision: 4 },
+    { kind: 'session', session: session('archived', 4, { isArchived: false }) },
+  ]);
+
+  assert.equal(await client.removeSession('archived'), 'restored');
+  assert.deepEqual(
+    requests.filter(({ operation }) => operation === 'session.remove').map(({ input }) => input),
+    [{ sessionId: 'archived', expectedRevision: 3 }],
+  );
+});
+
+test('still retries an active Session remove after a rename conflict', async () => {
+  const { client, requests } = clientWithResponses([
+    { kind: 'session', session: session('live', 3) },
+    { kind: 'revision_conflict', expectedRevision: 3, actualRevision: 4 },
+    { kind: 'session', session: session('live', 4) },
+    { kind: 'removed', sessionId: 'live' },
+  ]);
+
+  assert.equal(await client.removeSession('live'), 'removed');
+  assert.deepEqual(
+    requests.filter(({ operation }) => operation === 'session.remove').map(({ input }) => input),
+    [
+      { sessionId: 'live', expectedRevision: 3 },
+      { sessionId: 'live', expectedRevision: 4 },
+    ],
+  );
+});
+
 test('settles revision cleanup when abandon observes an already absent target', async () => {
   const { client } = clientWithResponses([
     {

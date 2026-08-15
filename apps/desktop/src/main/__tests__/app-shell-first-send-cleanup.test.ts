@@ -204,6 +204,7 @@ describe('composer first-send cleanup', () => {
         send: async () => Promise.reject(new Error('Skill discovery failed')),
         remove: async (sessionId: string) => {
           removed.push(sessionId);
+          return { kind: 'removed' as const };
         },
       },
     });
@@ -231,6 +232,7 @@ describe('composer first-send cleanup', () => {
         // and the rest of the happy path run after the cleanup window closes.
         remove: async (sessionId: string) => {
           removed.push(sessionId);
+          return { kind: 'removed' as const };
         },
       },
     });
@@ -256,6 +258,7 @@ describe('composer first-send cleanup', () => {
         send: async () => Promise.reject(new Error('Skill discovery failed')),
         remove: async (sessionId: string) => {
           removed.push(sessionId);
+          return { kind: 'removed' as const };
         },
       },
     });
@@ -342,7 +345,7 @@ describe('composer send failure feedback', () => {
       },
       send: async () =>
         Promise.reject(new Error('NO_REAL_CONNECTION:missing_api_key: no ready connection')),
-      remove: async () => undefined,
+      remove: async () => ({ kind: 'removed' as const }),
     },
   });
 

@@ -191,8 +191,10 @@ export function registerRuntimeHostSessionCatalogIpc(
   ipcMain.handle('sessions:remove', async (_event, sessionId: string, options?: unknown) => {
     requestsRevisionFamily(options);
     const ids = await actionIds(sessionId, { revisionFamily: true });
-    await deps.client.removeSession(sessionId);
+    const outcome = await deps.client.removeSession(sessionId);
+    if (outcome === 'restored') return { kind: 'restored' as const };
     await finishSessionRetirement(deps, ids, 'deleted');
+    return { kind: 'removed' as const };
   });
 }
 

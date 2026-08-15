@@ -24,6 +24,8 @@ type ToastApi = {
 export interface SessionPurgeOutcome {
   /** Tasks confirmed gone. */
   removed: number;
+  /** Tasks left alone because they were restored while the sweep ran. */
+  restored: number;
   /** Tasks the catalog still reports. Empty when `verified` is false. */
   remaining: string[];
   verified: boolean;
@@ -129,9 +131,9 @@ export function createAppShellSessionRowActions(deps: {
         destructive: true,
       });
       if (!ok) return;
-      await removeSessionFamily(sessionId);
+      const outcome = await removeSessionFamily(sessionId);
       await refreshSessions();
-      toastApi.success(copy.deletedTitle(name));
+      if (outcome === 'removed') toastApi.success(copy.deletedTitle(name));
     });
   }
 
@@ -141,16 +143,18 @@ export function createAppShellSessionRowActions(deps: {
    * deletion and released those resources, so the cleanup below is only ever
    * reached for a task that is really gone.
    */
-  async function removeSessionFamily(sessionId: string): Promise<void> {
+  async function removeSessionFamily(sessionId: string): Promise<'removed' | 'restored'> {
     // Read before the write: the family comes off the live catalog, which no
     // longer lists it afterwards.
     const familyIds = revisionFamilySessionIds(sessionsRef.current, sessionId);
-    await window.maka.sessions.remove(sessionId, { revisionFamily: true });
+    const outcome = await window.maka.sessions.remove(sessionId, { revisionFamily: true });
+    if (outcome.kind === 'restored') return 'restored';
     if (activeIdRef.current && familyIds.includes(activeIdRef.current)) {
       setActiveId(undefined);
       setMessages([]);
     }
     for (const id of familyIds) clearSessionRendererState(id);
+    return 'removed';
   }
 
   /**
@@ -175,6 +179,7 @@ export function createAppShellSessionRowActions(deps: {
     const unsettled: string[] = [];
     let firstError: unknown;
     let removed = 0;
+    let restored = 0;
     for (const sessionId of sessionIds) {
       // Read the catalog as the sweep reaches each task, not once up front. A
       // sweep is serial, and a task restored from another window while it runs
@@ -198,8 +203,9 @@ export function createAppShellSessionRowActions(deps: {
       }
       pendingSessionRowActionsRef.current.add(key);
       try {
-        await removeSessionFamily(sessionId);
-        removed += 1;
+        const outcome = await removeSessionFamily(sessionId);
+        if (outcome === 'restored') restored += 1;
+        else removed += 1;
       } catch (error) {
         unsettled.push(sessionId);
         firstError ??= error;
@@ -209,7 +215,7 @@ export function createAppShellSessionRowActions(deps: {
     }
     if (unsettled.length === 0) {
       await refreshSessions();
-      return { removed, remaining: [], verified: true, firstError };
+      return { removed, restored, remaining: [], verified: true, firstError };
     }
     let listed: SessionSummary[] | undefined;
     try {
@@ -218,10 +224,16 @@ export function createAppShellSessionRowActions(deps: {
       listed = undefined;
     }
     await refreshSessions();
-    if (!listed) return { removed, remaining: [], verified: false, firstError };
+    if (!listed) return { removed, restored, remaining: [], verified: false, firstError };
     const present = new Set(listed.map((session) => session.id));
     const remaining = unsettled.filter((sessionId) => present.has(sessionId));
-    return { removed: removed + (unsettled.length - remaining.length), remaining, verified: true, firstError };
+    return {
+      removed: removed + (unsettled.length - remaining.length),
+      restored,
+      remaining,
+      verified: true,
+      firstError,
+    };
   }
 
   return {

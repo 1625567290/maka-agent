@@ -838,14 +838,17 @@ export class DesktopRuntimeHostClient {
     );
   }
 
-  async removeSession(sessionId: string): Promise<void> {
+  async removeSession(sessionId: string): Promise<'removed' | 'restored'> {
+    let requiredArchived: boolean | undefined;
     for (let attempt = 0; attempt < MAX_SESSION_REVISION_ATTEMPTS; attempt += 1) {
       const current = await this.#requireSession(sessionId);
+      if (requiredArchived === undefined) requiredArchived = current.isArchived;
+      else if (requiredArchived && !current.isArchived) return 'restored';
       const result = await this.request("session.remove", {
         sessionId,
         expectedRevision: current.revision,
       });
-      if (result.kind === "removed") return;
+      if (result.kind === "removed") return 'removed';
     }
     throw revisionConflict("remove", sessionId);
   }
@@ -859,8 +862,8 @@ export class DesktopRuntimeHostClient {
         });
         return result.kind === 'abandoned' ? 'removed' : 'retained';
       }
-      await this.removeSession(sessionId);
-      return 'removed';
+      const removed = await this.removeSession(sessionId);
+      return removed === 'removed' ? 'removed' : 'retained';
     } catch (error) {
       if (isMissingSessionError(error)) return 'removed';
       throw error;

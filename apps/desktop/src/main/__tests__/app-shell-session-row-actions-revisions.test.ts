@@ -34,7 +34,10 @@ function installWindow(calls: string[]): () => void {
           archive: async (id: string, options?: { revisionFamily?: boolean }) => { calls.push(`archive:${id}:${options?.revisionFamily === true}`); },
           unarchive: async (id: string, options?: { revisionFamily?: boolean }) => { calls.push(`unarchive:${id}:${options?.revisionFamily === true}`); },
           rename: async (id: string, name: string, options?: { revisionFamily?: boolean }) => { calls.push(`rename:${id}:${name}:${options?.revisionFamily === true}`); },
-          remove: async (id: string, options?: { revisionFamily?: boolean }) => { calls.push(`remove:${id}:${options?.revisionFamily === true}`); },
+          remove: async (id: string, options?: { revisionFamily?: boolean }) => {
+            calls.push(`remove:${id}:${options?.revisionFamily === true}`);
+            return { kind: 'removed' as const };
+          },
         },
       },
     },
