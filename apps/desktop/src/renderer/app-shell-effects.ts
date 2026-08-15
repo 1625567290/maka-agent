@@ -420,6 +420,7 @@ export function useActiveSessionEvents(options: {
   activeIdRef: RefBox<string | undefined>;
   handleEvent: (sessionId: string, event: SessionEvent) => void;
   markSessionReadLocally: (sessionId: string, readMessages: readonly StoredMessage[]) => void;
+  markDisplayPending?: (sessionId: string) => void;
   onEventSeeded?: (sessionId: string) => void;
   setMessageLoadErrorBySession: (updater: (current: Record<string, string>) => Record<string, string>) => void;
   setMessageLoadPending: (pending: boolean) => void;
@@ -485,6 +486,7 @@ export function useActiveSessionEvents(options: {
 
   useLayoutEffect(() => {
     if (!activeId) return;
+    options.markDisplayPending?.(activeId);
     let disposed = false;
     const transcript = new DesktopTranscriptRangeStore();
     const subscribedAt = Date.now();

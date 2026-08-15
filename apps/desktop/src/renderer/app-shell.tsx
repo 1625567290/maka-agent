@@ -2186,7 +2186,14 @@ function AppShellContent({
   });
 
   const [sessionDisplayBatch] = useState(createAppShellSessionDisplayBatch);
-  const { handleEvent, reconcilePersistedMessages, settleAssistantStreaming } = useStableActions(createAppShellSessionEventHandlers, {
+  const {
+    handleEvent,
+    reconcilePersistedMessages,
+    settleAssistantStreaming,
+    flushDisplayEvents,
+    markDisplayPending,
+    markDisplayReady,
+  } = useStableActions(createAppShellSessionEventHandlers, {
     uiLocale,
     activeIdRef,
     liveTurnBySessionRef,
@@ -2337,11 +2344,14 @@ function AppShellContent({
     handleEvent,
     markSessionReadLocally,
     onEventSeeded: (sessionId) => {
+      flushDisplayEvents(sessionId);
+      markDisplayReady(sessionId);
       setActiveEventSeed((current) => ({
         sessionId,
         revision: current.revision + 1,
       }));
     },
+    markDisplayPending,
     setMessageLoadErrorBySession,
     setMessageLoadPending,
     setMessages,
