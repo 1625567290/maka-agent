@@ -1055,6 +1055,11 @@ test('pier cannot declare an egress proxy it never enforces', () => {
   );
 });
 
+test('framework selection is not a reserved preparation environment value', async () => {
+  const harness = await readFile(new URL('../../src/harness-executor.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(harness, /MAKA_EVAL_FRAMEWORK/u);
+});
+
 function executorConfig(): JsonObject {
   return {
     frameworkVersion: '0.20.0',
