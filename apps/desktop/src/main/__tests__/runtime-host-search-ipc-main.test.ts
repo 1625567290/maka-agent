@@ -96,6 +96,59 @@ test("fixture-seeded transcripts return content hits even when Host loadTranscri
   assert.equal(hostTranscriptReads, 0);
 });
 
+test("falls back to the Host when the fixture store has no messages", async () => {
+  const handlers = new Map<string, IpcHandler>();
+  let closed = 0;
+  registerRuntimeHostSearchIpc({
+    ipcMain: {
+      handle: (channel, listener) => {
+        handlers.set(channel, listener);
+      },
+      handleReconnectableRead: (channel, listener) => {
+        handlers.set(channel, listener);
+      },
+    },
+    client: searchClient({
+      listSessions: async () => [
+        catalogSession("host-only-session", "runtime-written turn"),
+      ],
+      openSession: async () =>
+        ({
+          loadTranscript: async () => [
+            {
+              type: "user",
+              id: "host-user",
+              turnId: "turn-host-only",
+              ts: 1,
+              text: "composer message written after the fixture seed",
+            },
+          ],
+          close: async () => {
+            closed += 1;
+          },
+        }) as never,
+    }),
+    readFixtureMessages: async () => null,
+  });
+
+  const handler = handlers.get("search:thread");
+  assert.ok(handler);
+  const hits = expectResults(
+    await handler({} as never, {
+      source: "thread",
+      query: "composer message",
+      limit: 10,
+    }),
+  );
+  assert.deepEqual(hits[0]?.target, {
+    kind: "thread",
+    sessionId: "host-only-session",
+    turnId: "turn-host-only",
+    sequence: 0,
+  });
+  assert.equal(closed, 1);
+});
+
 test("without a fixture reader, Host transcripts still produce content hits", async () => {
   const handlers = new Map<string, IpcHandler>();
   let closed = 0;
