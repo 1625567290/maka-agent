@@ -743,6 +743,7 @@ const makaBridge = {
       sessionId: string,
       handler: (event: SessionEvent) => void,
       onSeeded?: () => void,
+      onObservationSeed?: (phase: 'pending' | 'ready') => void,
     ): () => void {
       const channel = `sessions:event:${sessionId}`;
       const unsubscribeEvents = subscribeActiveRuntimeHostEvent(channel, handler);
@@ -753,8 +754,18 @@ const makaBridge = {
       }));
       const observing = observeDispatch.then(({ completion }) => completion);
       const disposeSeedNotification = notifyWhenSeeded(observing, onSeeded);
+      const unsubscribeObservationSeed = subscribeActiveRuntimeHostEvent(
+        'sessions:observation-seed',
+        (payload: { sessionId?: string; phase?: string }) => {
+          if (payload.sessionId !== sessionId) return;
+          if (payload.phase === 'pending' || payload.phase === 'ready') {
+            onObservationSeed?.(payload.phase);
+          }
+        },
+      );
       return () => {
         disposeSeedNotification();
+        unsubscribeObservationSeed();
         unsubscribeEvents();
         void releaseSessionObservation(observeDispatch, () =>
           ipcRenderer.invoke('sessions:unobserve', observerId),

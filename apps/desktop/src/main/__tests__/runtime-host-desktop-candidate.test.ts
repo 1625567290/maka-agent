@@ -495,6 +495,20 @@ test('resyncs Goal, exact interaction, and sidecar state after candidate replace
     observations,
   );
 
+  const seedPendingAt = resyncs.findIndex(
+    ({ channel, payload }) =>
+      channel === 'sessions:observation-seed'
+      && (payload as { sessionId?: unknown; phase?: unknown }).sessionId === 'session-1'
+      && (payload as { phase?: unknown }).phase === 'pending',
+  );
+  const seedReadyAt = resyncs.findIndex(
+    ({ channel, payload }) =>
+      channel === 'sessions:observation-seed'
+      && (payload as { sessionId?: unknown; phase?: unknown }).sessionId === 'session-1'
+      && (payload as { phase?: unknown }).phase === 'ready',
+  );
+  assert.ok(seedPendingAt >= 0);
+  assert.ok(seedReadyAt > seedPendingAt);
   assert.ok(
     resyncs.some(
       ({ channel, payload }) =>

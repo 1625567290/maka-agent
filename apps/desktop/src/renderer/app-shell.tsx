@@ -173,6 +173,13 @@ import {
   useShellRunUpdates,
   useSettledSessionTransientReconcile,
 } from './app-shell-effects';
+import {
+  EMPTY_LIVE_CONTENT_SEED,
+  beginLiveContentSeed,
+  completeLiveContentSeed,
+  liveContentSeedRevision,
+  type LiveContentSeed,
+} from './live-content-seed';
 import { loadComposerDefaults, saveComposerDefaults } from './composer-defaults';
 import { useKeyedPendingRegistry } from './use-pending-action-registry';
 import { useAppShellComposerAttachments } from './use-app-shell-composer-attachments';
@@ -2333,25 +2340,34 @@ function AppShellContent({
     themePalette,
     themePref,
   });
-  const [activeEventSeed, setActiveEventSeed] = useState({
-    sessionId: undefined as string | undefined,
-    revision: 0,
-  });
+  const [activeEventSeed, setActiveEventSeed] = useState<LiveContentSeed>(EMPTY_LIVE_CONTENT_SEED);
+  const activeEventSeedRef = useRef(activeEventSeed);
+  activeEventSeedRef.current = activeEventSeed;
+  const beginObservationSeed = (sessionId: string): number => {
+    const next = beginLiveContentSeed(activeEventSeedRef.current, sessionId);
+    activeEventSeedRef.current = next;
+    markDisplayPending(sessionId);
+    setActiveEventSeed(next);
+    return next.generation;
+  };
+  const completeObservationSeed = (sessionId: string, generation?: number): void => {
+    const current = activeEventSeedRef.current;
+    const expected = generation ?? current.generation;
+    if (current.sessionId !== sessionId || current.generation !== expected) return;
+    flushDisplayEvents(sessionId);
+    markDisplayReady(sessionId);
+    const next = completeLiveContentSeed(current, sessionId, expected);
+    activeEventSeedRef.current = next;
+    setActiveEventSeed(next);
+  };
   useActiveSessionEvents({
     uiLocale,
     activeId,
     activeIdRef,
     handleEvent,
     markSessionReadLocally,
-    onEventSeeded: (sessionId) => {
-      flushDisplayEvents(sessionId);
-      markDisplayReady(sessionId);
-      setActiveEventSeed((current) => ({
-        sessionId,
-        revision: current.revision + 1,
-      }));
-    },
-    markDisplayPending,
+    beginObservationSeed,
+    completeObservationSeed,
     setMessageLoadErrorBySession,
     setMessageLoadPending,
     setMessages,
@@ -3086,9 +3102,7 @@ function AppShellContent({
                 historyLoadPending={historyLoadPendingSessionId === activeId}
                 onLoadEarlierHistory={() => loadTranscriptHistory('earlier')}
                 onReturnToLatestHistory={() => loadTranscriptHistory('latest')}
-                liveContentSeedRevision={activeEventSeed.sessionId === activeId
-                  ? activeEventSeed.revision
-                  : 0}
+                liveContentSeedRevision={liveContentSeedRevision(activeEventSeed, activeId)}
                 messages={messages}
                 messageLoading={activeMessageLoading}
                 runningStatus={showRunningStatus}

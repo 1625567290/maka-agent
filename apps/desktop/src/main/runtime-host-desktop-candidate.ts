@@ -440,6 +440,8 @@ export async function createDesktopRuntimeHostCandidate(
       emitActiveInteractionsChanged,
       emitSubscriptionRecovered: (sessionId) =>
         domains?.sessionSubscriptionRecovered(sessionId),
+      emitObservationSeed: (sessionId, phase) =>
+        sendToRenderer?.('sessions:observation-seed', { sessionId, phase }),
       onWatchedTurnFinished: (sessionId, outcome) =>
         outcome === "completed"
           ? deps.completeComputerUseTurn(
@@ -465,6 +467,9 @@ export async function createDesktopRuntimeHostCandidate(
       ipc,
     );
     closeSessionDomains = domains.close;
+    for (const sessionId of sessionObservations.observedSessionIds()) {
+      sendToRenderer('sessions:observation-seed', { sessionId, phase: 'pending' });
+    }
     const restoredSessionIds = await sessionObservations.attach(
       sessionObserver,
       (target) => ({
@@ -481,6 +486,7 @@ export async function createDesktopRuntimeHostCandidate(
     );
     observationsAttached = true;
     for (const sessionId of restoredSessionIds) {
+      sendToRenderer('sessions:observation-seed', { sessionId, phase: 'ready' });
       emitSessionsChanged("message-appended", sessionId);
       emitSessionsChanged("goal-change", sessionId);
       domains.sessionSubscriptionRecovered(sessionId);

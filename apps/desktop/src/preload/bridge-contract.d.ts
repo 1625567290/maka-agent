@@ -463,6 +463,7 @@ export interface MakaBridge {
       sessionId: string,
       handler: (event: SessionEvent) => void,
       onSeeded?: () => void,
+      onObservationSeed?: (phase: 'pending' | 'ready') => void,
     ): () => void;
     subscribeChanges(handler: (event: SessionChangedEvent) => void): () => void;
     archive(sessionId: string, options?: { revisionFamily?: boolean }): Promise<void>;

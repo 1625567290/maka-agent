@@ -53,7 +53,7 @@ interface ChatMessageSurfaceProps extends Omit<
   sessionUiController: AppShellSessionUiStateController;
   /** The shell's selected session. Not derived from `activeSession`, which the shell substitutes for an unsaved chat. */
   activeSessionId: string | undefined;
-  /** Advances after Runtime Host has seeded the active session's current live projection. */
+  /** Advances after the active session's current observation generation finishes seeding. */
   liveContentSeedRevision: number;
   sessionHealthNotice?: SessionHealthNoticeView;
   workspaceReadinessRecovery?: WorkspaceReadinessRecovery;
