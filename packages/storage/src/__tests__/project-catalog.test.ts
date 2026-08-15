@@ -10,9 +10,9 @@ import {
   createProjectCatalog as createProjectCatalogBase,
   type ProjectCatalog,
   ProjectUnavailableError,
+  ProjectPathMismatchError,
   type ResolvedProjectLocation,
   resolveProjectLocation,
-  resolveUserSelectedProjectLocation,
 } from '../project-catalog.js';
 import { createSessionStore } from '../session-store.js';
 import { createGitRepositoryWithWorktree } from './fixtures/git-repository.js';
@@ -136,20 +136,20 @@ test('registering a nested folder keeps that folder instead of the enclosing rep
     const childProject = await catalog.register(child);
     const parentPath = await realpath(parent);
     const childPath = await realpath(child);
-    const parentLocation = await resolveProjectLocation({ path: parent });
 
     assert.notEqual(childProject.id, parentProject.id);
     assert.equal(parentProject.preferredPath, parentPath);
     assert.equal(childProject.preferredPath, childPath);
     assert.equal(childProject.name, 'child-project');
-    assert.equal(parentLocation.kind, 'git');
-    assert.equal((await resolveProjectLocation({ path: child })).identity, parentLocation.identity);
-    assert.deepEqual(await resolveUserSelectedProjectLocation(child), {
-      canonicalPath: childPath,
-      identity: `folder:${childPath}`,
-      kind: 'folder',
-    });
-    assert.equal((await catalog.resolveHistoricalPath(child)).id, parentProject.id);
+
+    // session.create → HostWorkspaceResolver.touch(projectId, preferredPath)
+    const touched = await catalog.touch(childProject.id, childProject.preferredPath);
+    assert.equal(touched.id, childProject.id);
+    assert.equal(touched.preferredPath, childPath);
+    await assert.rejects(
+      () => catalog.touch(childProject.id, parentPath),
+      (error) => error instanceof ProjectPathMismatchError && error.projectId === childProject.id,
+    );
   } finally {
     await rm(base, { recursive: true, force: true });
   }

@@ -271,27 +271,24 @@ class SqliteProjectCatalog implements ProjectCatalog {
   }
 
   async touch(projectId: string, path?: string): Promise<ProjectRecord> {
-    let resolved: Awaited<ReturnType<typeof resolveProjectLocation>> | undefined;
-    try {
-      resolved = path ? await resolveProjectLocation({ path }) : undefined;
-    } catch {
-      throw new ProjectUnavailableError(projectId);
+    let canonicalPath: string | undefined;
+    if (path) {
+      try {
+        canonicalPath = normalize(await realpath(resolve(path)));
+      } catch {
+        throw new ProjectUnavailableError(projectId);
+      }
     }
-    const resolvedPath = resolved
-      ? resolved.kind === 'git'
-        ? resolved.git!.worktreeRoot
-        : resolved.canonicalPath
-      : undefined;
     const touched = await this.mutate((file) => {
       const project = findProjectById(file.projects, projectId);
       if (!project) throw new ProjectNotFoundError(projectId);
-      const location = resolvedPath
-        ? project.locations.find((item) => item.path === resolvedPath)
+      const location = canonicalPath
+        ? project.locations.find((item) => item.path === canonicalPath)
         : [...project.locations].sort(
             (a, b) => b.lastUsedAt - a.lastUsedAt || a.path.localeCompare(b.path),
           )[0];
-      if (resolvedPath && !location) {
-        throw new ProjectPathMismatchError(projectId, resolvedPath);
+      if (canonicalPath && !location) {
+        throw new ProjectPathMismatchError(projectId, canonicalPath);
       }
       const timestamp = this.now();
       if (location) location.lastUsedAt = timestamp;
@@ -843,9 +840,7 @@ export async function resolveProjectLocation(input: {
  * The chooser must not do that: selecting `repo/child` would otherwise
  * silently become `repo` and reopen the parent project.
  */
-export async function resolveUserSelectedProjectLocation(
-  path: string,
-): Promise<ResolvedProjectLocation> {
+async function resolveUserSelectedProjectLocation(path: string): Promise<ResolvedProjectLocation> {
   const resolved = await resolveProjectLocation({ path });
   if (
     resolved.kind !== 'git' ||
