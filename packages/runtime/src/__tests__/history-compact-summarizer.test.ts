@@ -13,10 +13,13 @@ import type { RuntimeEvent, RuntimeEventContent } from '@maka/core/runtime-event
 import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
 import { ProviderRequestTracker } from '../provider-request-telemetry.js';
 import type { HistoryCompactSummaryInput } from '../ai-sdk-compaction-contract.js';
+import type { ModelMessage } from '../model-protocol.js';
 import {
   buildLlmHistorySummarizer,
+  replayPlanItemsToModelMessages,
   type AiSdkGenerateTextLike,
 } from '../history-compact-summarizer.js';
+import { buildRuntimeEventModelReplayPlan } from '../model-history.js';
 import { buildHistoryCompactCheckpoint } from '../history-compact-checkpoint.js';
 
 const ts = 1_700_000_000_000;
@@ -33,6 +36,24 @@ function ev(overrides: Partial<RuntimeEvent> & { content?: RuntimeEventContent }
     partial: false,
     ...overrides,
   } as RuntimeEvent;
+}
+
+function assertStrictOpenAiToolCallFollowed(messages: ModelMessage[]): void {
+  for (const [index, message] of messages.entries()) {
+    if (message.role !== 'assistant' || typeof message.content === 'string') continue;
+    const callIds = message.content
+      .filter((part) => part.type === 'tool-call')
+      .map((part) => part.toolCallId);
+    if (callIds.length === 0) continue;
+    const answered: string[] = [];
+    for (const following of messages.slice(index + 1)) {
+      if (following.role !== 'tool') break;
+      for (const part of following.content) {
+        if (part.type === 'tool-result') answered.push(part.toolCallId);
+      }
+    }
+    assert.deepEqual(answered, callIds);
+  }
 }
 
 function inputWith(events: RuntimeEvent[], abortSignal?: AbortSignal): HistoryCompactSummaryInput {
@@ -164,6 +185,95 @@ describe('buildLlmHistorySummarizer', () => {
     expect(toolPart.toolName).toBe('read');
     // output must be the {type, value} wrapper, not the raw result object
     expect(toolPart.output).toEqual({ type: 'json', value: { name: 'maka' } });
+  });
+
+  test('groups consecutive parallel tool calls into one assistant message', async () => {
+    const seen: ModelMessage[][] = [];
+    const summarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async (options) => {
+        seen.push(options.messages);
+        return { text: '## Goal\nX' };
+      },
+    });
+
+    const events: RuntimeEvent[] = [
+      ev({ role: 'user', author: 'user', content: { kind: 'text', text: 'read both files' } }),
+      ev({
+        role: 'model',
+        author: 'agent',
+        content: { kind: 'function_call', id: 'fc-a', name: 'read', args: { path: 'a.ts' } },
+        refs: { stepId: 'step-1' },
+      }),
+      ev({
+        role: 'model',
+        author: 'agent',
+        content: { kind: 'function_call', id: 'fc-b', name: 'read', args: { path: 'b.ts' } },
+        refs: { stepId: 'step-1' },
+      }),
+      ev({
+        role: 'tool',
+        author: 'tool',
+        content: { kind: 'function_response', id: 'fc-a', name: 'read', result: { ok: 'a' } },
+      }),
+      ev({
+        role: 'tool',
+        author: 'tool',
+        content: { kind: 'function_response', id: 'fc-b', name: 'read', result: { ok: 'b' } },
+      }),
+    ];
+
+    expect(await summarize(inputWith(events))).toBe('## Goal\nX');
+    const messages = seen[0]!;
+    const assistantCalls = messages.filter(
+      (message) =>
+        message.role === 'assistant' && message.content.some((part) => part.type === 'tool-call'),
+    );
+    expect(assistantCalls).toHaveLength(1);
+    expect(assistantCalls[0]?.content).toEqual([
+      { type: 'tool-call', toolCallId: 'fc-a', toolName: 'read', input: { path: 'a.ts' } },
+      { type: 'tool-call', toolCallId: 'fc-b', toolName: 'read', input: { path: 'b.ts' } },
+    ]);
+    expect(
+      messages
+        .filter((message) => message.role === 'tool')
+        .flatMap((message) => message.content.map((part) => part.toolCallId)),
+    ).toEqual(['fc-a', 'fc-b']);
+    assertStrictOpenAiToolCallFollowed(messages);
+
+    const plan = buildRuntimeEventModelReplayPlan(events);
+    expect(
+      replayPlanItemsToModelMessages(plan.items).filter((message) => message.role === 'assistant'),
+    ).toHaveLength(1);
+  });
+
+  test('does not merge sequential tool-call rounds that already have answers between them', () => {
+    const messages = replayPlanItemsToModelMessages(
+      buildRuntimeEventModelReplayPlan([
+        ev({
+          role: 'model',
+          author: 'agent',
+          content: { kind: 'function_call', id: 'fc-a', name: 'read', args: { path: 'a.ts' } },
+        }),
+        ev({
+          role: 'tool',
+          author: 'tool',
+          content: { kind: 'function_response', id: 'fc-a', name: 'read', result: { ok: 'a' } },
+        }),
+        ev({
+          role: 'model',
+          author: 'agent',
+          content: { kind: 'function_call', id: 'fc-b', name: 'read', args: { path: 'b.ts' } },
+        }),
+        ev({
+          role: 'tool',
+          author: 'tool',
+          content: { kind: 'function_response', id: 'fc-b', name: 'read', result: { ok: 'b' } },
+        }),
+      ]).items,
+    );
+    expect(messages.filter((message) => message.role === 'assistant')).toHaveLength(2);
+    assertStrictOpenAiToolCallFollowed(messages);
   });
 
   test('surfaces provider failures so the runtime can report the real compact reason', async () => {

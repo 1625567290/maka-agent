@@ -130,10 +130,13 @@ async function loadAiSdkTextModule(): Promise<AiSdkTextModule> {
 }
 
 type ReplayPlanItems = ReturnType<typeof buildRuntimeEventModelReplayPlan>['items'];
+type ReplayToolCallItem = Extract<ReplayPlanItems[number], { kind: 'tool_call' }>;
 
 export function replayPlanItemsToModelMessages(items: ReplayPlanItems): ModelMessage[] {
   const out: ModelMessage[] = [];
-  for (const item of items) {
+  let index = 0;
+  while (index < items.length) {
+    const item = items[index]!;
     if (item.kind === 'text') {
       // Split on role so each push matches exactly one ModelMessage arm — no cast.
       const textPart = { type: 'text' as const, text: item.content };
@@ -142,17 +145,27 @@ export function replayPlanItemsToModelMessages(items: ReplayPlanItems): ModelMes
       } else {
         out.push({ role: 'assistant', content: [textPart] });
       }
+      index += 1;
     } else if (item.kind === 'tool_call') {
+      // Consecutive tool_call items are one assistant step. Emitting each as
+      // its own assistant message leaves the previous tool_calls unanswered
+      // and is rejected by strict OpenAI-compatible providers.
+      const calls: ReplayToolCallItem[] = [item];
+      index += 1;
+      while (index < items.length) {
+        const next = items[index];
+        if (next?.kind !== 'tool_call') break;
+        calls.push(next);
+        index += 1;
+      }
       out.push({
         role: 'assistant',
-        content: [
-          {
-            type: 'tool-call',
-            toolCallId: item.toolCallId,
-            toolName: item.toolName,
-            input: item.input,
-          },
-        ],
+        content: calls.map((call) => ({
+          type: 'tool-call' as const,
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+          input: call.input,
+        })),
       });
     } else if (item.kind === 'tool_result') {
       out.push({
@@ -166,8 +179,11 @@ export function replayPlanItemsToModelMessages(items: ReplayPlanItems): ModelMes
           },
         ],
       });
+      index += 1;
+    } else {
+      // thinking entries are intentionally skipped for summarization
+      index += 1;
     }
-    // thinking entries are intentionally skipped for summarization
   }
   return out;
 }
