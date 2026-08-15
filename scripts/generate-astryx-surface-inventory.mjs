@@ -350,8 +350,8 @@ function analyze(rel) {
   return { path: rel, role, ...a };
 }
 
-function main() {
-  const { files, excluded } = listProductSurfaceFiles(root);
+export function renderAstryxSurfaceInventory(repoRoot = root) {
+  const { files, excluded } = listProductSurfaceFiles(repoRoot);
   const rows = files.map(analyze);
 
   const bySev = { blocker: 0, polish: 0, aligned: 0 };
@@ -417,13 +417,27 @@ function main() {
   lines.push('- **aligned** — no blocker smell found; Astryx usage noted when present.');
   lines.push('');
 
+  const markdown = lines.join('\n');
+  return {
+    markdown: markdown.endsWith('\n') ? markdown : `${markdown}\n`,
+    paths: `${files.join('\n')}\n`,
+    files,
+    excluded,
+    totals: bySev,
+  };
+}
+
+function main() {
+  const rendered = renderAstryxSurfaceInventory(root);
   const mdPath = join(root, 'docs/astryx-surface-file-inventory.md');
   const pathsPath = join(root, 'docs/astryx-surface-file-inventory.paths');
-  writeFileSync(mdPath, lines.join('\n'));
-  writeFileSync(pathsPath, `${files.join('\n')}\n`);
-  console.log(`wrote ${relative(root, mdPath)} (${rows.length} files)`);
+  writeFileSync(mdPath, rendered.markdown);
+  writeFileSync(pathsPath, rendered.paths);
+  console.log(`wrote ${relative(root, mdPath)} (${rendered.files.length} files)`);
   console.log(`wrote ${relative(root, pathsPath)}`);
-  console.log(`severity: blocker=${bySev.blocker} polish=${bySev.polish} aligned=${bySev.aligned}`);
+  console.log(
+    `severity: blocker=${rendered.totals.blocker} polish=${rendered.totals.polish} aligned=${rendered.totals.aligned}`,
+  );
 }
 
 const isDirect = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
