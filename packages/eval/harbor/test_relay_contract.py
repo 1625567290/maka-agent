@@ -311,6 +311,7 @@ class SubjectEnvironment:
         effective: int | None = None,
         bounding: int | None = None,
         namespace: str = POLICY_NAMESPACE,
+        default_user: str | None = None,
     ) -> None:
         self.sets = {
             "CapInh": 0,
@@ -320,13 +321,15 @@ class SubjectEnvironment:
             "CapAmb": 0,
         }
         self.namespace = namespace
+        self.default_user = default_user
         self.commands: list[str] = []
         self.users: list[str | None] = []
         self.services: list[str] = []
 
     async def exec(self, command: str, cwd=None, timeout_sec=None, **kwargs):
         self.commands.append(command)
-        self.users.append(kwargs.get("user") if isinstance(kwargs.get("user"), str) else None)
+        explicit = kwargs.get("user") if isinstance(kwargs.get("user"), str) else None
+        self.users.append(explicit if explicit is not None else self.default_user)
         if "proxy-ipv4" in command:
             return types.SimpleNamespace(
                 return_code=0,
@@ -479,6 +482,27 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
             for command, user in zip(environment.commands, environment.users, strict=True)
             if "proxy-ipv4" in command
         ]
+        self.assertEqual(pin_users, ["root"])
+
+    async def test_proxy_hostname_pin_does_not_inherit_a_non_root_default_user(self):
+        # Harbor scopes every exec to the task's agent.user unless the call
+        # names another identity. Pinning /etc/hosts is infrastructure, so it
+        # must still be root when that default is a supported non-root user.
+        relay = load_relay()
+        environment = SubjectEnvironment(default_user="1000")
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            await relay._require_constrained_subject(environment)
+        probe_users = [
+            user
+            for command, user in zip(environment.commands, environment.users, strict=True)
+            if "proxy-ipv4" not in command
+        ]
+        pin_users = [
+            user
+            for command, user in zip(environment.commands, environment.users, strict=True)
+            if "proxy-ipv4" in command
+        ]
+        self.assertEqual(probe_users, ["1000"])
         self.assertEqual(pin_users, ["root"])
 
 
