@@ -514,10 +514,14 @@ test('resyncs Goal, exact interaction, and sidecar state after candidate replace
   );
   assert.ok(seedPendingAt >= 0);
   assert.ok(seedReadyAt > seedPendingAt);
+  const sessionEventIndexes = resyncs.flatMap(({ channel }, index) =>
+    channel === 'sessions:event:session-1' ? [index] : [],
+  );
+  assert.ok(sessionEventIndexes.length > 0);
   assert.ok(
-    resyncs
-      .slice(seedPendingAt + 1, seedReadyAt)
-      .some(({ channel }) => channel === 'sessions:event:session-1'),
+    sessionEventIndexes.every(
+      (index) => index > seedPendingAt && index < seedReadyAt,
+    ),
   );
   assert.ok(
     resyncs.some(
@@ -653,12 +657,16 @@ test('retries candidate startup when a restored observation cannot seed', async 
       && (payload as { phase?: unknown }).phase === 'ready',
   );
   assert.ok(pendingAt >= 0);
-  assert.ok(
-    seedEvents
-      .slice(pendingAt + 1, readyAt)
-      .some(({ channel }) => channel === 'sessions:event:session-1'),
-  );
   assert.ok(readyAt > pendingAt);
+  const catchUpEventIndexes = seedEvents.flatMap(({ channel }, index) =>
+    channel === 'sessions:event:session-1' ? [index] : [],
+  );
+  assert.ok(catchUpEventIndexes.length > 0);
+  assert.ok(
+    catchUpEventIndexes.every(
+      (index) => index > pendingAt && index < readyAt,
+    ),
+  );
   await recoveredCandidate.close();
   await observations.close();
 });
