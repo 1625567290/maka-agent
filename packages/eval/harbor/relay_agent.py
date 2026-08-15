@@ -388,7 +388,7 @@ cat "$tmp" > /etc/hosts
 printf %s {shlex.quote(PROXY_HOSTS_PREFIX)}
 printf '%s %s\\n' "$ip" "$host"
 """
-    probe = await environment.exec(script)
+    probe = await environment.exec(script, user="root")
     if probe.return_code != 0:
         raise RuntimeError("Maka Eval could not pin the Eval egress proxy hostname")
     reported = _sole_probe_line(probe, PROXY_HOSTS_PREFIX)

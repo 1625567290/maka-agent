@@ -333,14 +333,16 @@ class CellEgressNamespaceTest(unittest.TestCase):
         command: list[str],
         *,
         environment: dict[str, str] | None = None,
+        user: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         overrides = [
             argument
             for name, value in (environment or {}).items()
             for argument in ("--env", f"{name}={value}")
         ]
+        user_args = ["--user", user] if user else []
         return cls.run_compose(
-            ["exec", "--no-TTY", *overrides, service, *command], check=False
+            ["exec", "--no-TTY", *user_args, *overrides, service, *command], check=False
         )
 
     @classmethod
@@ -422,6 +424,7 @@ class CellEgressNamespaceTest(unittest.TestCase):
         self.assertEqual(self.curl([]).returncode, 0, "no HTTPS before any policy")
         self.assertEqual(self.probe_main(TCP_PROBE), "reachable")
         self.assertEqual(self.probe_main(UDP_PROBE), "reachable")
+        self.assertEqual(self.probe_main(DOCKER_DNS_PROBE), "reachable")
         self.assertEqual(self.ping().returncode, 0, "no ICMP before any policy")
 
         applied = self.exec_service(
@@ -469,15 +472,20 @@ class CellEnvironment:
     def __init__(self, service: str) -> None:
         self.service = service
 
-    async def exec(self, command: str, cwd=None, timeout_sec=None):
-        return self._run(self.service, command)
+    async def exec(self, command: str, cwd=None, timeout_sec=None, **kwargs):
+        user = kwargs.get("user")
+        return self._run(
+            self.service, command, user=user if isinstance(user, str) else None
+        )
 
     async def service_exec(self, command: str, *, service: str, **kwargs):
         return self._run(service, command)
 
     @staticmethod
-    def _run(service: str, command: str):
-        result = CellEgressNamespaceTest.exec_service(service, ["sh", "-c", command])
+    def _run(service: str, command: str, user: str | None = None):
+        result = CellEgressNamespaceTest.exec_service(
+            service, ["sh", "-c", command], user=user
+        )
         return types.SimpleNamespace(
             return_code=result.returncode, stdout=result.stdout, stderr=result.stderr
         )

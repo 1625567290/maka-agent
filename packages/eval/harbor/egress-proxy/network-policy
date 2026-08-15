@@ -15,14 +15,21 @@ remove_nftables() {
   nft delete table inet "$NFTABLES_RULESET_NAME" 2>/dev/null || true
 }
 
-PROXY_IP_CACHE=/tmp/maka-eval-proxy.ipv4
+PROXY_IPV4_PATH=/opt/maka-egress/proxy-ipv4
 
 resolve_proxy_ip() {
-  if [ -s "$PROXY_IP_CACHE" ]; then
-    cat "$PROXY_IP_CACHE"
+  # The proxy publishes this file before it is healthy. Reading it does not
+  # depend on Docker DNS, so deny-all then allow still has an address.
+  if [ ! -s "$PROXY_IPV4_PATH" ]; then
     return
   fi
-  getent ahostsv4 "$PROXY_HOST" | awk 'NR == 1 { print $1 }'
+  ip=$(tr -d ' \t\r\n' < "$PROXY_IPV4_PATH")
+  case "$ip" in
+    "" | *.*.*.*.* | *[!0-9.]*)
+      return
+      ;;
+  esac
+  printf '%s\n' "$ip"
 }
 
 # The only difference between the two modes this policy installs is whether the
@@ -68,7 +75,6 @@ setup_proxy_only() {
     echo "could not resolve Eval egress proxy" >&2
     exit 1
   fi
-  printf '%s\n' "$proxy_ip" > "$PROXY_IP_CACHE"
   apply_ruleset "$proxy_ip"
   echo "ok: Eval proxy-only egress applied ($proxy_ip:$PROXY_PORT)"
 }

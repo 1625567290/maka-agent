@@ -5,6 +5,7 @@ services:
         source: ${MAKA_EVAL_NETWORK_POLICY_PATH}
         target: /usr/local/bin/network-policy
         read_only: true
+      - maka-eval-egress-ca:/opt/maka-egress:ro
 
   main:
     depends_on:

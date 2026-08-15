@@ -321,10 +321,12 @@ class SubjectEnvironment:
         }
         self.namespace = namespace
         self.commands: list[str] = []
+        self.users: list[str | None] = []
         self.services: list[str] = []
 
-    async def exec(self, command: str, cwd=None, timeout_sec=None):
+    async def exec(self, command: str, cwd=None, timeout_sec=None, **kwargs):
         self.commands.append(command)
+        self.users.append(kwargs.get("user") if isinstance(kwargs.get("user"), str) else None)
         if "proxy-ipv4" in command:
             return types.SimpleNamespace(
                 return_code=0,
@@ -456,16 +458,28 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
         relay = load_relay()
 
         class MissingAddressEnvironment(SubjectEnvironment):
-            async def exec(self, command, cwd=None, timeout_sec=None):
+            async def exec(self, command, cwd=None, timeout_sec=None, **kwargs):
                 self.commands.append(command)
                 if "proxy-ipv4" in command:
                     return types.SimpleNamespace(return_code=1, stdout="", stderr="")
-                return await super().exec(command, cwd=cwd, timeout_sec=timeout_sec)
+                return await super().exec(command, cwd=cwd, timeout_sec=timeout_sec, **kwargs)
 
         with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
             with self.assertRaises(RuntimeError) as raised:
                 await relay._require_constrained_subject(MissingAddressEnvironment())
         self.assertIn("pin the Eval egress proxy hostname", str(raised.exception))
+
+    async def test_proxy_hostname_pin_runs_as_root(self):
+        relay = load_relay()
+        environment = SubjectEnvironment()
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            await relay._require_constrained_subject(environment)
+        pin_users = [
+            user
+            for command, user in zip(environment.commands, environment.users, strict=True)
+            if "proxy-ipv4" in command
+        ]
+        self.assertEqual(pin_users, ["root"])
 
 
 if __name__ == "__main__":
