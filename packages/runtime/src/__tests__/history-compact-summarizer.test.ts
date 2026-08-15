@@ -227,7 +227,9 @@ describe('buildLlmHistorySummarizer', () => {
     const messages = seen[0]!;
     const assistantCalls = messages.filter(
       (message) =>
-        message.role === 'assistant' && message.content.some((part) => part.type === 'tool-call'),
+        message.role === 'assistant' &&
+        typeof message.content !== 'string' &&
+        message.content.some((part) => part.type === 'tool-call'),
     );
     expect(assistantCalls).toHaveLength(1);
     expect(assistantCalls[0]?.content).toEqual([
@@ -237,7 +239,9 @@ describe('buildLlmHistorySummarizer', () => {
     expect(
       messages
         .filter((message) => message.role === 'tool')
-        .flatMap((message) => message.content.map((part) => part.toolCallId)),
+        .flatMap((message) =>
+          message.content.flatMap((part) => (part.type === 'tool-result' ? [part.toolCallId] : [])),
+        ),
     ).toEqual(['fc-a', 'fc-b']);
     assertStrictOpenAiToolCallFollowed(messages);
 
