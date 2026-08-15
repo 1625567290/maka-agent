@@ -94,9 +94,7 @@ test('two policy_error records increment the count rather than pinning it at one
 });
 
 test('unparseable and non-object lines are counted without changing attribution', () => {
-  const audit = Buffer.from(
-    '{"ruleId":"tbench_domain"}\n{not json\ngarbage\n123\n"x"\n',
-  );
+  const audit = Buffer.from('{"ruleId":"tbench_domain"}\n{not json\ngarbage\n123\n"x"\n');
   assert.deepEqual(collectEgressAuditArtifact(audit, true), inventory(audit, false, 0, 4));
 });
 
