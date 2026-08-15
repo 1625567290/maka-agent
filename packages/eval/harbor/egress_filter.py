@@ -235,6 +235,7 @@ def blocked_response(rule_id: str):
 def append_audit(rule_id: str, host: str, normalized_path: str) -> None:
     AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
     if AUDIT_PATH.exists() and AUDIT_PATH.stat().st_size >= MAX_AUDIT_BYTES:
+        write_truncation_marker()
         return
     record = {
         "ts": int(time.time() * 1000),
@@ -244,3 +245,40 @@ def append_audit(rule_id: str, host: str, normalized_path: str) -> None:
     }
     with AUDIT_PATH.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+
+
+def write_truncation_marker() -> None:
+    if audit_already_truncated():
+        return
+    record = {
+        "ts": int(time.time() * 1000),
+        "ruleId": "audit_truncated",
+        "host": "",
+        "normalizedPath": "",
+    }
+    prefix = ""
+    if AUDIT_PATH.exists() and AUDIT_PATH.stat().st_size > 0:
+        with AUDIT_PATH.open("rb") as stream:
+            stream.seek(-1, os.SEEK_END)
+            if stream.read(1) != b"\n":
+                prefix = "\n"
+    with AUDIT_PATH.open("a", encoding="utf-8") as stream:
+        stream.write(prefix + json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+
+
+def audit_already_truncated() -> bool:
+    if not AUDIT_PATH.exists():
+        return False
+    with AUDIT_PATH.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(max(0, size - 4096))
+        tail = stream.read().decode("utf-8", errors="ignore")
+    lines = [line for line in tail.splitlines() if line.strip()]
+    if not lines:
+        return False
+    try:
+        parsed = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("ruleId") == "audit_truncated"
