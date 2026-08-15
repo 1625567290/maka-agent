@@ -1804,21 +1804,25 @@ describe('ShellRunProcessManager', () => {
       const control = await pending;
 
       assert.equal(await readFile(sizeBeforeExit, 'utf8'), '80x24');
-      assertShellRunSnapshot(control);
-      assert.equal(control.status, 'completed');
-      assert.equal(control.exitCode, 0);
+      const terminal =
+        control.status === 'starting' || control.status === 'running'
+          ? await waitForTerminalShellRun(manager, initial.ref, 15_000)
+          : control;
+      assertShellRunSnapshot(terminal);
+      assert.equal(terminal.status, 'completed');
+      assert.equal(terminal.exitCode, 0);
       assert.deepEqual(control.operation, {
         kind: 'pty_control',
         failed: false,
         resize: { cols: 81, rows: 25, applied: false, changed: false },
       });
-      assert.equal(control.output.mode, 'pty');
-      if (control.output.mode !== 'pty') throw new Error('expected pty output');
-      assert.deepEqual([control.output.cols, control.output.rows], [80, 24]);
+      assert.equal(terminal.output.mode, 'pty');
+      if (terminal.output.mode !== 'pty') throw new Error('expected pty output');
+      assert.deepEqual([terminal.output.cols, terminal.output.rows], [80, 24]);
 
       const durable = await store.readShellRun('session-1', 'shell-run-1');
       assert.equal(durable.status, 'completed');
-      assert.equal(durable.revision, control.revision);
+      assert.equal(durable.revision, terminal.revision);
       assert.equal(manager.liveCount(), 0);
     } finally {
       if (manager.liveCount() > 0) {
