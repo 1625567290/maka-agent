@@ -338,8 +338,8 @@ function analyzeCss(rel, text) {
   };
 }
 
-function analyze(rel) {
-  const full = join(root, rel);
+function analyze(repoRoot, rel) {
+  const full = join(repoRoot, rel);
   const text = readFileSync(full, 'utf8');
   const role = roleFor(rel);
   if (rel.endsWith('.css')) {
@@ -352,7 +352,7 @@ function analyze(rel) {
 
 export function renderAstryxSurfaceInventory(repoRoot = root) {
   const { files, excluded } = listProductSurfaceFiles(repoRoot);
-  const rows = files.map(analyze);
+  const rows = files.map((rel) => analyze(repoRoot, rel));
 
   const bySev = { blocker: 0, polish: 0, aligned: 0 };
   for (const r of rows) bySev[r.severity] = (bySev[r.severity] || 0) + 1;
