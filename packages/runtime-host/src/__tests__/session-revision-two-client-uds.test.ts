@@ -320,11 +320,13 @@ async function verifyConcurrentRevisionAuthority(
       operationError('operation_conflict'),
     );
 
-    await desktop.startTurn({
+    const busyTurn = await desktop.startTurn({
       sessionId: busySessionId,
       turnId: 'busy-turn',
       content: { text: FAKE_ASK_USER_QUESTION_PROMPT },
     });
+    assert.equal(busyTurn.kind, 'started');
+    if (busyTurn.kind !== 'started') return;
     const busy = await querySession(desktop, busySessionId);
     await assert.rejects(
       tui.request('session.branch.create', {
@@ -335,6 +337,15 @@ async function verifyConcurrentRevisionAuthority(
       }),
       operationError('session_busy'),
     );
+    // This case only needs a live Turn to prove `session_busy`. Leaving the
+    // parked ask-question continuation for Host SIGTERM is what made
+    // composition close miss its 1s drain under CI load (#2295).
+    const stopped = await desktop.stopTurn({
+      sessionId: busySessionId,
+      turnId: 'busy-turn',
+      runId: busyTurn.turn.runId,
+    });
+    assert.equal(stopped.status, 'cancelled');
   } finally {
     await Promise.allSettled([desktop.close(), tui.close()]);
   }
