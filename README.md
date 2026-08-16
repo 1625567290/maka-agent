@@ -180,7 +180,7 @@ Maka stores workspace data under Electron `userData` by default:
 ```text
 <Electron userData>/workspaces/default/
   runtime.sqlite
-  llm-connections.json
+  connection-catalog.json
   credentials.json
   settings.json
   artifacts/

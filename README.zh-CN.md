@@ -178,7 +178,7 @@ Maka 默认把 workspace 数据放在 Electron `userData` 下：
 ```text
 <Electron userData>/workspaces/default/
   runtime.sqlite
-  llm-connections.json
+  connection-catalog.json
   credentials.json
   settings.json
   artifacts/

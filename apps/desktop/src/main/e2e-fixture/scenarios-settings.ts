@@ -1,8 +1,9 @@
 import { join } from 'node:path';
 import type { DailyReviewArchive } from '@maka/core/daily-review';
-import type { LlmConnection } from '@maka/core/llm-connections';
 import type { E2eFixtureScenario } from '@maka/core/e2e-fixture';
+import type { ConnectionCatalogEntryDraft } from '@maka/core/runtime-policy';
 import { createDefaultSettings } from '@maka/core/settings';
+import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
 import { openInteractiveScheduledTaskStoreForWrite } from '@maka/storage/scheduled-task-store';
 import {
   resolveStorageRoot,
@@ -42,68 +43,73 @@ export async function writeSettings(
   await writeJson(join(workspaceRoot, 'settings.json'), settings);
 }
 
-export async function writeConnections(workspaceRoot: string, now: number, scenario: E2eFixtureScenario): Promise<void> {
-  const connections: LlmConnection[] = [
-    {
-      slug: 'zai-live',
-      name: 'Z.ai Live Fixture',
-      providerType: 'zai-coding-plan',
-      baseUrl: 'https://api.z.ai/api/coding/paas/v4',
-      defaultModel: 'glm-5.1',
-      enabled: true,
-      models: [
-        model('glm-4.5', { functionCalling: true }, 128_000),
-        model('glm-4.5-air', { functionCalling: true }, 128_000),
-        model('glm-4.6', { reasoning: true, functionCalling: true }, 200_000),
-        model('glm-4.7', { reasoning: true, functionCalling: true }, 200_000),
-        model('glm-5', { reasoning: true, functionCalling: true }, 200_000),
-        model('glm-5-turbo', { reasoning: true, functionCalling: true }, 200_000),
-        model('glm-5.1', { vision: true, reasoning: true, functionCalling: true }, 1_000_000),
-      ],
-      modelSource: 'fetched',
-      modelsFetchedAt: now - 5 * 60_000,
-      lastTestStatus: 'verified',
-      lastTestAt: new Date(now - 4 * 60_000).toISOString(),
-      lastTestMessage: '连接已验证',
-      createdAt: now - 3_600_000,
-      updatedAt: now - 4 * 60_000,
-    },
-    {
-      slug: 'empty-fetched',
-      name: 'Fetched Empty Fixture',
-      providerType: 'openai-compatible',
-      baseUrl: 'https://empty.example.test/v1',
-      defaultModel: 'empty-placeholder',
-      enabled: true,
-      models: [],
-      modelSource: 'fetched',
-      modelsFetchedAt: now - 15 * 60_000,
-      lastTestStatus: 'verified',
-      lastTestAt: new Date(now - 15 * 60_000).toISOString(),
-      lastTestMessage: '连接已验证',
-      createdAt: now - 3_400_000,
-      updatedAt: now - 15 * 60_000,
-    },
-  ];
-  const focusSlug = scenario === 'fetched-empty' ? 'empty-fetched' : null;
-  const ordered = focusSlug
-    ? [
-        ...connections.filter((connection) => connection.slug === focusSlug),
-        ...connections.filter((connection) => connection.slug !== focusSlug),
-      ]
-    : connections;
-  await writeJson(join(workspaceRoot, 'llm-connections.json'), {
-    defaultSlug: focusSlug ?? 'zai-live',
-    connections: ordered,
-  });
-}
+const ZAI_FIXTURE_MODELS = [
+  'glm-4.5',
+  'glm-4.5-air',
+  'glm-4.6',
+  'glm-4.7',
+  'glm-5',
+  'glm-5-turbo',
+  'glm-5.1',
+] as const;
 
-function model(
-  id: string,
-  capabilities: NonNullable<LlmConnection['models']>[number]['capabilities'],
-  contextWindow: number,
-): NonNullable<LlmConnection['models']>[number] {
-  return { id, capabilities, contextWindow };
+export async function writeConnections(
+  workspaceRoot: string,
+  _now: number,
+  scenario: E2eFixtureScenario,
+): Promise<void> {
+  const zaiLive: ConnectionCatalogEntryDraft = {
+    slug: 'zai-live',
+    name: 'Z.ai Live Fixture',
+    providerType: 'zai-coding-plan',
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    enabled: true,
+    enabledModelIds: [...ZAI_FIXTURE_MODELS],
+  };
+  const emptyFetched: ConnectionCatalogEntryDraft = {
+    slug: 'empty-fetched',
+    name: 'Fetched Empty Fixture',
+    providerType: 'openai-compatible',
+    baseUrl: 'https://empty.example.test/v1',
+    enabled: true,
+    enabledModelIds: [],
+  };
+  const drafts =
+    scenario === 'fetched-empty' ? [emptyFetched, zaiLive] : [zaiLive, emptyFetched];
+  const capability = await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
+  const owner = await tryAcquireInteractiveRootOwner(capability);
+  if (!owner) throw new Error('Unable to acquire the connection catalog fixture root');
+  try {
+    const stores = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
+    let revision = 0;
+    let defaultConnectionId: string | undefined;
+    for (const draft of drafts) {
+      const created = await stores.connectionCatalog.create({
+        expectedCatalogRevision: revision,
+        connection: draft,
+      });
+      if (created.kind !== 'committed') {
+        throw new Error(`Failed to seed ${draft.slug}: ${created.kind}`);
+      }
+      revision = created.snapshot.revision;
+      if (draft.slug === 'zai-live') {
+        defaultConnectionId = created.snapshot.connections.find(
+          (connection) => connection.slug === 'zai-live',
+        )?.connectionId;
+      }
+    }
+    if (scenario !== 'fetched-empty' && defaultConnectionId) {
+      const defaulted = await stores.connectionCatalog.setDefaultTarget({
+        expectedCatalogRevision: revision,
+        target: { connectionId: defaultConnectionId, modelId: 'glm-5.1' },
+      });
+      if (defaulted.kind !== 'committed') {
+        throw new Error(`Failed to set the fixture default target: ${defaulted.kind}`);
+      }
+    }
+  } finally {
+    await owner.close();
+  }
 }
 
 export async function writeScheduledTasks(workspaceRoot: string, now: number): Promise<void> {
