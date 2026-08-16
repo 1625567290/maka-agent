@@ -1,8 +1,14 @@
 import {
   LONG_SIDEBAR_PROJECT_ID,
   LONG_SIDEBAR_PROJECT_NAME,
+  LONG_SIDEBAR_SESSION_PREFIX,
 } from '../src/main/e2e-fixture/seed-helpers';
+import type { Locator } from '@playwright/test';
 import { expect, test } from './fixtures';
+
+function sessionRow(sidebar: Locator, sessionId: string): Locator {
+  return sidebar.locator(`[data-session-id*=${JSON.stringify(sessionId)}]`);
+}
 
 test('project navigation and actions remain adjacent keyboard controls', async ({
   projectSidebarWindow: page,
@@ -63,6 +69,24 @@ test('project navigation and actions remain adjacent keyboard controls', async (
   await expect(action).toBeFocused();
 });
 
+test('task row action menu accepts pointer selection', async ({
+  projectSidebarWindow: page,
+}) => {
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[data-maka-contract="search-modal"]')).not.toBeVisible();
+
+  const sidebar = page.getByRole('navigation', { name: '任务列表' });
+  const taskRow = sessionRow(sidebar, `${LONG_SIDEBAR_SESSION_PREFIX}00`);
+  await taskRow.hover();
+  await taskRow.getByRole('button', { name: '任务操作', exact: true }).click();
+
+  const rename = page.getByRole('menuitem', { name: '重命名', exact: true });
+  await expect(rename).toBeVisible();
+  await rename.click();
+
+  await expect(page.getByRole('dialog', { name: '重命名任务' })).toBeVisible();
+});
+
 test('rail grouping survives a renderer reload', async ({ projectSidebarWindow: page }) => {
   await page.keyboard.press('Escape');
   await expect(page.locator('[data-maka-contract="search-modal"]')).not.toBeVisible();
@@ -79,7 +103,7 @@ test('rail grouping survives a renderer reload', async ({ projectSidebarWindow: 
     .toBe('project');
 
   await page.reload();
-  await expect(page.locator('[data-maka-contract="search-modal"]')).toBeVisible();
+  await expect(page.locator('[data-maka-contract="search-modal"][open]')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.locator('[data-maka-contract="search-modal"]')).not.toBeVisible();
 

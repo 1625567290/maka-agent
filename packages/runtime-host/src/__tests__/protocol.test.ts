@@ -1,3 +1,4 @@
+import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachments';
@@ -25,7 +26,6 @@ import {
   TURN_MESSAGE_CONTENT_MAX_BYTES,
   TURN_MESSAGE_TEXT_MAX_BYTES,
   RUNTIME_POLICY_OPERATION_SPECS,
-  RuntimeHostProtocolError,
 } from '../protocol/index.js';
 import { HOST_BOOTSTRAP_OPERATION_SPECS } from '../protocol/host-status.js';
 import { composeOperationSpecMaps } from '../protocol/operation-spec.js';
@@ -41,7 +41,7 @@ import {
 
 describe('Runtime Host bootstrap protocol', () => {
   test('publishes a new compatibility epoch for legacy Automation provenance', () => {
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 20);
+    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 21);
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {
@@ -105,6 +105,20 @@ describe('Runtime Host bootstrap protocol', () => {
       },
     };
     assert.deepEqual(decodeSessionContinuitySnapshot(waiting), waiting);
+    const retrying = {
+      ...continuitySnapshot('epoch-1'),
+      rootTurn: {
+        ...continuitySnapshot('epoch-1').rootTurn,
+        providerRetry: {
+          phase: 'scheduled' as const,
+          attempt: 8,
+          maxAttempts: 10,
+          delayMs: 40_000,
+          reason: 'rate_limit' as const,
+        },
+      },
+    };
+    assert.deepEqual(decodeSessionContinuitySnapshot(retrying), retrying);
     assert.throws(
       () =>
         decodeSessionContinuitySnapshot({
