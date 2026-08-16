@@ -157,6 +157,8 @@ test('registering a nested folder keeps that folder instead of the enclosing rep
 
 test('relink and relinkWithSessions keep a nested repository directory', async () => {
   const base = await mkdtemp(join(tmpdir(), 'maka-project-nested-relink-'));
+  const storage = join(base, 'storage');
+  const sessions = createSessionStore(storage);
   try {
     const parent = join(base, 'parent-project');
     const child = join(parent, 'child-project');
@@ -168,7 +170,7 @@ test('relink and relinkWithSessions keep a nested repository directory', async (
     await mkdir(elsewhere, { recursive: true });
     await mkdir(elsewhereTwo, { recursive: true });
     await execFileAsync('git', ['init', '--quiet'], { cwd: parent });
-    const catalog = createProjectCatalog(join(base, 'storage'), {
+    const catalog = createProjectCatalog(storage, {
       now: () => 1_000,
       createId: (() => {
         let id = 0;
@@ -181,20 +183,26 @@ test('relink and relinkWithSessions keep a nested repository directory', async (
     const originalSessions = await catalog.register(elsewhereTwo);
     const childPath = await realpath(child);
     const childTwoPath = await realpath(childTwo);
+    const assigned = await sessions.create(sessionInput(elsewhereTwo, originalSessions.id));
 
     const relinked = await catalog.relink(original.id, child);
     assert.equal(relinked.id, original.id);
     assert.notEqual(relinked.id, parentProject.id);
     assert.equal(relinked.preferredPath, childPath);
 
-    const { project: relinkedSessions } = await catalog.relinkWithSessions(
+    const { project: relinkedSessions, updatedSessionIds } = await catalog.relinkWithSessions(
       originalSessions.id,
       childTwo,
     );
     assert.equal(relinkedSessions.id, originalSessions.id);
     assert.notEqual(relinkedSessions.id, parentProject.id);
     assert.equal(relinkedSessions.preferredPath, childTwoPath);
+    assert.deepEqual(updatedSessionIds, [assigned.id]);
+    const header = await sessions.readHeaderSnapshot(assigned.id);
+    assert.equal(header.projectId, relinkedSessions.id);
+    assert.equal(header.cwd, childTwoPath);
   } finally {
+    await sessions.close?.();
     await rm(base, { recursive: true, force: true });
   }
 });
