@@ -252,19 +252,29 @@ test('returning to a live conversation settles output accumulated while away', a
   await expect(liveBubble).toContainText(backgroundSteering);
 
   expect((await liveBubble.textContent())?.split(accumulatedOutput)).toHaveLength(2);
-  const backgroundRestoreObserved = await page.evaluate(() => {
-    const observed = (
-      window as typeof window & {
-        __makaBackgroundRestoreObserved?: {
-          texts: string[];
-          maxActiveAnimations: number;
-          stop(): void;
-        };
-      }
-    ).__makaBackgroundRestoreObserved;
-    observed?.stop();
-    return observed;
-  });
+  // Playwright's toContainText is a DOM check. Stop on the next animation
+  // frame so the already-queued sample() records that settled paint first.
+  const backgroundRestoreObserved = await page.evaluate(
+    () =>
+      new Promise<{
+        texts: string[];
+        maxActiveAnimations: number;
+      } | undefined>((resolve) => {
+        window.requestAnimationFrame(() => {
+          const observed = (
+            window as typeof window & {
+              __makaBackgroundRestoreObserved?: {
+                texts: string[];
+                maxActiveAnimations: number;
+                stop(): void;
+              };
+            }
+          ).__makaBackgroundRestoreObserved;
+          observed?.stop();
+          resolve(observed);
+        });
+      }),
+  );
   expect(
     backgroundRestoreObserved?.texts.some((text) => text.includes(backgroundSteering)),
   ).toBe(true);
