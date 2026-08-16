@@ -13,7 +13,6 @@ import { writeConnections } from '../e2e-fixture/scenarios-settings.js';
 test('connection fixture seeds the Runtime Policy catalog, not llm-connections.json', async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), 'maka-connection-catalog-fixture-'));
   try {
-    await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
     await writeConnections(workspaceRoot, Date.now(), 'turn-narrative');
 
     await assert.rejects(
@@ -24,7 +23,6 @@ test('connection fixture seeds the Runtime Policy catalog, not llm-connections.j
     const capability = await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
     const owner = await tryAcquireInteractiveRootOwner(capability);
     assert.ok(owner);
-    if (!owner) return;
     try {
       const stores = await openInteractiveRuntimePolicyStoresForWrite(owner.lease);
       const snapshot = await stores.connectionCatalog.getSnapshot();

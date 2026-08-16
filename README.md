@@ -188,6 +188,7 @@ Maka stores workspace data under Electron `userData` by default:
 
 Current boundaries that matter:
 
+- The current connection catalog is `connection-catalog.json`. Existing `llm-connections.json` files stay on disk and are not imported;
 - Sessions, messages, execution ledgers, workflows, usage, Automations, and Daily Review live in `runtime.sqlite`;
 - Runtime credentials such as API keys, bot tokens, and proxy passwords currently live in local plaintext `credentials.json`, behind the OS account boundary, with POSIX directory mode `0700` and file mode `0600` enforced;
 - Subscription OAuth tokens (Claude, Codex, GitHub Copilot, and xAI) live in the same `credentials.json` — the single authority for Runtime Host clients. Pre-existing Electron `safeStorage` credential/token files are not imported; affected users must re-authenticate;

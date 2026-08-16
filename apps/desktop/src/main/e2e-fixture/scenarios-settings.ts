@@ -98,7 +98,10 @@ export async function writeConnections(
         )?.connectionId;
       }
     }
-    if (scenario !== 'fetched-empty' && defaultConnectionId) {
+    if (scenario !== 'fetched-empty') {
+      if (!defaultConnectionId) {
+        throw new Error('Failed to resolve the zai-live fixture connection id');
+      }
       const defaulted = await stores.connectionCatalog.setDefaultTarget({
         expectedCatalogRevision: revision,
         target: { connectionId: defaultConnectionId, modelId: 'glm-5.1' },
