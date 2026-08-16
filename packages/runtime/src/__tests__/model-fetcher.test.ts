@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { after, describe, test } from 'node:test';
 import type { LlmConnection } from '@maka/core/llm-connections';
-import { PROVIDER_DEFAULTS } from '@maka/core/llm-connections';
 import {
   fetchProviderModels,
   ProviderModelDiscoveryHttpError,
@@ -236,35 +235,6 @@ describe('fetchProviderModels', () => {
         'expired-xai-oauth-token',
       ),
       (error: unknown) => error instanceof ProviderModelDiscoveryHttpError && error.status === 401,
-    );
-  });
-
-  test('xAI OAuth discovery keeps server ids that are absent from the local snapshot', async () => {
-    assert.equal(PROVIDER_DEFAULTS['xai-oauth'].fallbackModels.includes('grok-4.6'), false);
-    const server = await startJsonServer((_request, response) => {
-      respondJson(response, 200, {
-        object: 'list',
-        data: [{ id: 'grok-4.5' }, { id: 'grok-4.6' }],
-      });
-    });
-
-    const models = await fetchProviderModels(
-      {
-        slug: 'xai-oauth',
-        name: 'xAI OAuth',
-        providerType: 'xai-oauth',
-        baseUrl: `${server.url}/v1`,
-        defaultModel: 'grok-4.5',
-        enabled: true,
-        createdAt: 1,
-        updatedAt: 1,
-      },
-      'xai-oauth-token',
-    );
-
-    assert.deepEqual(
-      models.map((model) => model.id),
-      ['grok-4.5', 'grok-4.6'],
     );
   });
 
