@@ -155,6 +155,50 @@ test('registering a nested folder keeps that folder instead of the enclosing rep
   }
 });
 
+test('relink and relinkWithSessions keep a nested repository directory', async () => {
+  const base = await mkdtemp(join(tmpdir(), 'maka-project-nested-relink-'));
+  try {
+    const parent = join(base, 'parent-project');
+    const child = join(parent, 'child-project');
+    const childTwo = join(parent, 'child-two');
+    const elsewhere = join(base, 'elsewhere');
+    const elsewhereTwo = join(base, 'elsewhere-two');
+    await mkdir(child, { recursive: true });
+    await mkdir(childTwo, { recursive: true });
+    await mkdir(elsewhere, { recursive: true });
+    await mkdir(elsewhereTwo, { recursive: true });
+    await execFileAsync('git', ['init', '--quiet'], { cwd: parent });
+    const catalog = createProjectCatalog(join(base, 'storage'), {
+      now: () => 1_000,
+      createId: (() => {
+        let id = 0;
+        return () => `project-${++id}`;
+      })(),
+    });
+
+    const parentProject = await catalog.register(parent);
+    const original = await catalog.register(elsewhere);
+    const originalSessions = await catalog.register(elsewhereTwo);
+    const childPath = await realpath(child);
+    const childTwoPath = await realpath(childTwo);
+
+    const relinked = await catalog.relink(original.id, child);
+    assert.equal(relinked.id, original.id);
+    assert.notEqual(relinked.id, parentProject.id);
+    assert.equal(relinked.preferredPath, childPath);
+
+    const { project: relinkedSessions } = await catalog.relinkWithSessions(
+      originalSessions.id,
+      childTwo,
+    );
+    assert.equal(relinkedSessions.id, originalSessions.id);
+    assert.notEqual(relinkedSessions.id, parentProject.id);
+    assert.equal(relinkedSessions.preferredPath, childTwoPath);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 async function resolveProjectLocationWithoutGit(path: string): Promise<ResolvedProjectLocation> {
   const stdout = await runProjectCatalogWithoutGit(
     'const [moduleUrl, path] = process.argv.slice(1); const { resolveProjectLocation } = await import(moduleUrl); console.log(JSON.stringify(await resolveProjectLocation({ path })));',

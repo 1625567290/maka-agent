@@ -845,7 +845,7 @@ async function resolveUserSelectedProjectLocation(path: string): Promise<Resolve
   if (
     resolved.kind !== 'git' ||
     !resolved.git ||
-    normalize(resolved.canonicalPath) === normalize(resolved.git.worktreeRoot)
+    resolved.canonicalPath === resolved.git.worktreeRoot
   ) {
     return resolved;
   }

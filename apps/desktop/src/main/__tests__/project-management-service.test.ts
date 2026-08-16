@@ -90,10 +90,7 @@ test('adding a nested folder selects that folder instead of the parent project',
     catalog: managementCatalog(catalog),
     chooseDirectory: async () => nextDirectory,
     selection: {
-      currentSelection: async () => ({
-        projectId: selected.length === 0 ? undefined : `project-${selected.length}`,
-        path: selected.at(-1) ?? (await realpath(parentPath)),
-      }),
+      currentSelection: async () => ({ projectId: undefined, path: parentPath }),
       setSelection: (_projectId, path) => selected.push(path),
     },
   });
@@ -167,9 +164,7 @@ test('does not silently replace a stale Project preference with another Project'
   const service = createProjectManagementService({
     capabilities: LOCAL_CAPABILITIES,
     catalog: {
-      list: async () => [
-        { id: 'other', name: 'Other', locations: [], available: true },
-      ],
+      list: async () => [{ id: 'other', name: 'Other', locations: [], available: true }],
       register: unexpected,
       relink: unexpected,
       rename: unexpected,
