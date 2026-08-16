@@ -450,12 +450,9 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
     clientInstanceId: runtimeHostClientInstanceId,
     generation: runtimeHostGeneration,
     candidateEntrypoint: new URL(
-      import.meta.resolve(
-        isE2e
-          ? "@maka/runtime-host/desktop-e2e-execution-candidate-main"
-          : "@maka/runtime-host/execution-candidate-main",
-      ),
+      import.meta.resolve("@maka/runtime-host/execution-candidate-main"),
     ),
+    ...(isE2e ? { desktopE2e: true } : {}),
     ipcMain,
     workspaceRoot,
     attachmentApprovals,
