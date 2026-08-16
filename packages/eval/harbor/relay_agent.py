@@ -359,6 +359,23 @@ async def _require_constrained_subject(environment: Any) -> None:
     await _pin_proxy_hostname(environment)
 
 
+HOSTS_ALIAS_AWK = r"""
+/^[[:space:]]*#/ { print; next }
+{
+  for (i = 2; i <= NF; i++) {
+    if ($i == host) next
+  }
+  print
+}
+"""
+
+
+def _valid_egress_proxy_host(host: str) -> bool:
+    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
+        return False
+    return all(character.isalnum() or character in ".-" for character in host)
+
+
 async def _pin_proxy_hostname(environment: Any) -> None:
     """Point the proxy hostname at the published IPv4 so Docker DNS can be refused.
 
@@ -367,12 +384,16 @@ async def _pin_proxy_hostname(environment: Any) -> None:
     127.0.0.11:53 without breaking HTTPS_PROXY.
     """
     host = os.environ.get("MAKA_EVAL_EGRESS_ALLOWED_HOST") or "maka-eval-mitmproxy"
-    if "/" in host or "\x00" in host or host in {".", ".."}:
+    if not _valid_egress_proxy_host(host):
         raise RuntimeError("Eval egress proxy host is invalid")
     script = f"""
 set -eu
 path={shlex.quote(PROXY_IPV4_PATH)}
 host={shlex.quote(host)}
+case "$host" in
+  ""|.*|*..*|*.) exit 1 ;;
+  *[!A-Za-z0-9.-]*) exit 1 ;;
+esac
 test -f "$path"
 ip=$(tr -d ' \\t\\r\\n' < "$path")
 case "$ip" in
@@ -381,7 +402,7 @@ esac
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 if [ -f /etc/hosts ]; then
-  grep -v "[[:space:]]$host$" /etc/hosts > "$tmp" || true
+  awk -v host="$host" {shlex.quote(HOSTS_ALIAS_AWK)} /etc/hosts > "$tmp"
 fi
 printf '%s %s\\n' "$ip" "$host" >> "$tmp"
 cat "$tmp" > /etc/hosts

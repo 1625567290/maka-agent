@@ -505,6 +505,44 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe_users, ["1000"])
         self.assertEqual(pin_users, ["root"])
 
+    async def test_invalid_proxy_hostname_is_rejected_before_hosts_rewrite(self):
+        relay = load_relay()
+        for host in (".*", "evil.com\n127.0.0.1 pwned", "foo bar", "foo..bar", ".hidden"):
+            with self.subTest(host=host):
+                environment = SubjectEnvironment()
+                with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_ALLOWED_HOST": host}):
+                    with self.assertRaisesRegex(RuntimeError, "proxy host is invalid"):
+                        await relay._pin_proxy_hostname(environment)
+                self.assertEqual(environment.commands, [])
+
+    async def test_proxy_hostname_pin_matches_hosts_aliases_exactly(self):
+        relay = load_relay()
+        environment = SubjectEnvironment()
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            await relay._require_constrained_subject(environment)
+        pin = next(command for command in environment.commands if "proxy-ipv4" in command)
+        self.assertIn("awk -v host=", pin)
+        self.assertNotIn("grep -v", pin)
+
+        completed = subprocess.run(
+            ["awk", "-v", "host=maka-eval-mitmproxy", relay.HOSTS_ALIAS_AWK],
+            input=(
+                "127.0.0.1 localhost\n"
+                "10.0.0.1 maka-eval-mitmproxy extra\n"
+                "10.0.0.2 prefix-maka-eval-mitmproxy\n"
+                "10.0.0.3 other.example\n"
+            ),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            completed.stdout,
+            "127.0.0.1 localhost\n"
+            "10.0.0.2 prefix-maka-eval-mitmproxy\n"
+            "10.0.0.3 other.example\n",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
