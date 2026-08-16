@@ -15,14 +15,15 @@ import {
 
 installRuntimeHostLogCapture();
 
-const parsed = parseInteractiveRuntimeHostCandidateArguments(process.argv.slice(2));
-const { desktopE2e, ...parsedOptions } = parsed;
-const options = desktopE2e
-  ? { ...parsedOptions, idleGraceMs: DESKTOP_E2E_IDLE_GRACE_MS }
-  : parsedOptions;
-
 let result: Awaited<ReturnType<typeof startExecutionRuntimeHostCandidate>>;
+let desktopE2e: true | undefined;
 try {
+  const parsed = parseInteractiveRuntimeHostCandidateArguments(process.argv.slice(2));
+  const { desktopE2e: parsedDesktopE2e, ...parsedOptions } = parsed;
+  desktopE2e = parsedDesktopE2e;
+  const options = desktopE2e
+    ? { ...parsedOptions, idleGraceMs: DESKTOP_E2E_IDLE_GRACE_MS }
+    : parsedOptions;
   result = await startExecutionRuntimeHostCandidate(
     options,
     desktopE2e ? createDesktopE2eExecutionCandidateDependencies() : {},
