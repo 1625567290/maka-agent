@@ -2325,7 +2325,6 @@ function AppShellContent({
   });
   useAppShellHostEffects({
     activeId,
-    hasModalOpen,
     setLiveBrowserSessionIds,
   });
   useAppShellBootstrapSubscriptions({
