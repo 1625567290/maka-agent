@@ -1,7 +1,11 @@
 import { join } from 'node:path';
 import type { DailyReviewArchive } from '@maka/core/daily-review';
 import type { E2eFixtureScenario } from '@maka/core/e2e-fixture';
-import type { ConnectionCatalogEntryDraft } from '@maka/core/runtime-policy';
+import type {
+  ConnectionCatalogEntryDraft,
+  ConnectionCatalogSnapshot,
+  ConnectionModel,
+} from '@maka/core/runtime-policy';
 import { createDefaultSettings } from '@maka/core/settings';
 import { openInteractiveRuntimePolicyStoresForWrite } from '@maka/storage/runtime-policy-stores';
 import { openInteractiveScheduledTaskStoreForWrite } from '@maka/storage/scheduled-task-store';
@@ -43,19 +47,19 @@ export async function writeSettings(
   await writeJson(join(workspaceRoot, 'settings.json'), settings);
 }
 
-const ZAI_FIXTURE_MODELS = [
-  'glm-4.5',
-  'glm-4.5-air',
-  'glm-4.6',
-  'glm-4.7',
-  'glm-5',
-  'glm-5-turbo',
-  'glm-5.1',
-] as const;
+const ZAI_FIXTURE_MODELS: readonly ConnectionModel[] = [
+  model('glm-4.5', { functionCalling: true }, 128_000),
+  model('glm-4.5-air', { functionCalling: true }, 128_000),
+  model('glm-4.6', { reasoning: true, functionCalling: true }, 200_000),
+  model('glm-4.7', { reasoning: true, functionCalling: true }, 200_000),
+  model('glm-5', { reasoning: true, functionCalling: true }, 200_000),
+  model('glm-5-turbo', { reasoning: true, functionCalling: true }, 200_000),
+  model('glm-5.1', { vision: true, reasoning: true, functionCalling: true }, 1_000_000),
+];
 
 export async function writeConnections(
   workspaceRoot: string,
-  _now: number,
+  now: number,
   scenario: E2eFixtureScenario,
 ): Promise<void> {
   const zaiLive: ConnectionCatalogEntryDraft = {
@@ -64,18 +68,17 @@ export async function writeConnections(
     providerType: 'zai-coding-plan',
     baseUrl: 'https://api.z.ai/api/coding/paas/v4',
     enabled: true,
-    enabledModelIds: [...ZAI_FIXTURE_MODELS],
+    enabledModelIds: ZAI_FIXTURE_MODELS.map((item) => item.id),
   };
-  const emptyFetched: ConnectionCatalogEntryDraft = {
-    slug: 'empty-fetched',
-    name: 'Fetched Empty Fixture',
+  const noModels: ConnectionCatalogEntryDraft = {
+    slug: 'no-models',
+    name: 'No Models Fixture',
     providerType: 'openai-compatible',
     baseUrl: 'https://empty.example.test/v1',
     enabled: true,
     enabledModelIds: [],
   };
-  const drafts =
-    scenario === 'fetched-empty' ? [emptyFetched, zaiLive] : [zaiLive, emptyFetched];
+  const drafts = scenario === 'settings-models' ? [noModels, zaiLive] : [zaiLive, noModels];
   const capability = await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
   if (!owner) throw new Error('Unable to acquire the connection catalog fixture root');
@@ -92,27 +95,81 @@ export async function writeConnections(
         throw new Error(`Failed to seed ${draft.slug}: ${created.kind}`);
       }
       revision = created.snapshot.revision;
-      if (draft.slug === 'zai-live') {
-        defaultConnectionId = created.snapshot.connections.find(
-          (connection) => connection.slug === 'zai-live',
-        )?.connectionId;
+      const connection = findFixtureConnection(created.snapshot, draft.slug);
+      if (draft.slug === 'zai-live' || scenario === 'settings-models') {
+        const credential = await stores.credentialVault.set({
+          locator: {
+            scope: 'connection',
+            connectionId: connection.connectionId,
+            kind: 'api_key',
+          },
+          expected: null,
+          secret: `fixture-key-${draft.slug}`,
+        });
+        if (credential.kind !== 'committed') {
+          throw new Error(`Failed to seed ${draft.slug} credential: ${credential.kind}`);
+        }
       }
-    }
-    if (scenario !== 'fetched-empty') {
-      if (!defaultConnectionId) {
-        throw new Error('Failed to resolve the zai-live fixture connection id');
+      if (draft.slug !== 'zai-live') continue;
+
+      defaultConnectionId = connection.connectionId;
+      const modelFetch = await stores.operations.beginModelFetch(connection.connectionId);
+      if (modelFetch.kind !== 'ready') {
+        throw new Error(`Failed to start the zai-live model fixture: ${modelFetch.kind}`);
       }
-      const defaulted = await stores.connectionCatalog.setDefaultTarget({
-        expectedCatalogRevision: revision,
-        target: { connectionId: defaultConnectionId, modelId: 'glm-5.1' },
+      const modelInventory = await stores.operations.completeModelFetch(modelFetch.ticket, {
+        models: ZAI_FIXTURE_MODELS,
+        source: 'fetched',
+        fetchedAt: now - 5 * 60_000,
       });
-      if (defaulted.kind !== 'committed') {
-        throw new Error(`Failed to set the fixture default target: ${defaulted.kind}`);
+      if (modelInventory.kind !== 'committed') {
+        throw new Error(`Failed to seed the zai-live model fixture: ${modelInventory.kind}`);
       }
+      revision = modelInventory.snapshot.revision;
+
+      const connectionTest = await stores.operations.beginConnectionTest(
+        connection.connectionId,
+        'glm-5.1',
+      );
+      if (connectionTest.kind !== 'ready') {
+        throw new Error(`Failed to start the zai-live test fixture: ${connectionTest.kind}`);
+      }
+      const tested = await stores.operations.completeConnectionTest(connectionTest.ticket, {
+        status: 'verified',
+        checkedAt: new Date(now - 4 * 60_000).toISOString(),
+      });
+      if (tested.kind !== 'committed') {
+        throw new Error(`Failed to seed the zai-live test fixture: ${tested.kind}`);
+      }
+      revision = tested.snapshot.revision;
+    }
+    if (!defaultConnectionId) {
+      throw new Error('Failed to resolve the zai-live fixture connection id');
+    }
+    const defaulted = await stores.connectionCatalog.setDefaultTarget({
+      expectedCatalogRevision: revision,
+      target: { connectionId: defaultConnectionId, modelId: 'glm-5.1' },
+    });
+    if (defaulted.kind !== 'committed') {
+      throw new Error(`Failed to set the fixture default target: ${defaulted.kind}`);
     }
   } finally {
     await owner.close();
   }
+}
+
+function findFixtureConnection(snapshot: ConnectionCatalogSnapshot, slug: string) {
+  const connection = snapshot.connections.find((item) => item.slug === slug);
+  if (!connection) throw new Error(`Committed fixture connection is missing: ${slug}`);
+  return connection;
+}
+
+function model(
+  id: string,
+  capabilities: NonNullable<ConnectionModel['capabilities']>,
+  contextWindow: number,
+): ConnectionModel {
+  return { id, capabilities, contextWindow };
 }
 
 export async function writeScheduledTasks(workspaceRoot: string, now: number): Promise<void> {
