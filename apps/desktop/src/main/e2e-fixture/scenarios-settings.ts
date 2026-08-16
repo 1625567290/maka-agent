@@ -249,12 +249,15 @@ export async function writeDailyReviewArchives(workspaceRoot: string, now: numbe
   const capability = await resolveStorageRoot({ path: workspaceRoot, kind: 'interactive' });
   const owner = await tryAcquireInteractiveRootOwner(capability);
   if (!owner) throw new Error('Unable to acquire the Daily Review fixture root');
-  const store = await openInteractiveDailyReviewAuthorityForWrite(owner.lease);
   try {
-    await store.publishArchive(daily, 180);
-    await store.publishArchive(deep, 180);
+    const store = await openInteractiveDailyReviewAuthorityForWrite(owner.lease);
+    try {
+      await store.publishArchive(daily, 180);
+      await store.publishArchive(deep, 180);
+    } finally {
+      store.close();
+    }
   } finally {
-    store.close();
     await owner.close();
   }
 }
