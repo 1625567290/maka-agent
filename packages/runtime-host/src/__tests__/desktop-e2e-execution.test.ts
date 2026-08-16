@@ -47,9 +47,10 @@ test('Desktop E2E compaction records a deterministic checkpoint', async () => {
   assert.deepEqual(result, {});
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]?.turnId, 'turn-1');
-  assert.equal(recorded[0]?.checkpoint.version, 2);
-  assert.ok(recorded[0]?.checkpoint.version === 2);
-  assert.equal(recorded[0].checkpoint.summary, 'Deterministic Desktop E2E context checkpoint.');
+  const checkpoint = recorded[0]!.checkpoint;
+  assert.equal(checkpoint.version, 2);
+  if (checkpoint.version !== 2) return;
+  assert.equal(checkpoint.summary, 'Deterministic Desktop E2E context checkpoint.');
 });
 
 function userEvent(): RuntimeEvent {
