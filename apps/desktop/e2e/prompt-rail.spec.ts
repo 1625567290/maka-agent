@@ -300,23 +300,24 @@ test('evicting a turn-owned sibling interaction hands focus back to the transcri
     if (!root) throw new Error('the chat scroll container is missing');
     const mounted = [...document.querySelectorAll<HTMLElement>('[data-virtual-turn-id]')]
       .map((turn) => turn.dataset.virtualTurnId ?? '');
+    const active = document.activeElement;
     return {
       retained: mounted.includes(turnId),
       scrollTop: Math.round(root.scrollTop),
       firstMounted: mounted[0] ?? null,
       lastMounted: mounted.at(-1) ?? null,
-      active: document.activeElement instanceof HTMLElement
-        ? (document.activeElement.className || document.activeElement.tagName)
-        : null,
+      focusOnTranscript: active instanceof HTMLElement
+        && active.classList.contains('maka-chat-message-list'),
       selectionCollapsed: document.getSelection()?.isCollapsed ?? true,
     };
   }, retainedTurnId), {
     message: 'the retained tail turn leaves after one jump to the top',
-  }).toMatchObject({ retained: false, scrollTop: 0 });
-  await expect.poll(() => page.evaluate(() => ({
-    focus: document.activeElement?.classList.contains('maka-chat-message-list') ?? false,
-    selection: document.getSelection()?.isCollapsed ?? true,
-  }))).toEqual({ focus: true, selection: true });
+  }).toMatchObject({
+    retained: false,
+    scrollTop: 0,
+    focusOnTranscript: true,
+    selectionCollapsed: true,
+  });
 });
 
 test('a tick is what the pointer lands on, not the scrollbar', async ({
