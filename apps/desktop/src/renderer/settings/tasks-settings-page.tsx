@@ -1,6 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { ProjectRecord } from '@maka/core/project';
-import type { SessionSummary } from '@maka/core/session';
 import { formatCompactTimestamp } from '@maka/core/relative-time';
 import { Button, EmptyState, MoreMenu, useMountedRef, useToast, useUiLocale } from '@maka/ui';
 import { Archive, ICON_SIZE, Search } from '@maka/ui/icons';
@@ -8,6 +7,7 @@ import { HStack, StackItem } from '@astryxdesign/core';
 import { List, ListItem } from '@astryxdesign/core/List';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import type { SessionPurgeOutcome } from '../app-shell-session-row-actions.js';
+import type { DesktopSessionSummary } from '../../preload/bridge-contract.js';
 import { getSettingsSharedCopy } from '../locales/settings-shared-copy.js';
 import { getSettingsTasksCopy } from '../locales/settings-tasks-copy.js';
 import { settingsActionErrorMessage } from './settings-error-copy';
@@ -20,7 +20,7 @@ import { archivedTaskRows, matchesArchivedTaskQuery } from './task-catalog-rows'
  * not have to understand.
  */
 export interface ArchivedTasksBridge {
-  sessions: readonly SessionSummary[];
+  sessions: readonly DesktopSessionSummary[];
   projects: readonly ProjectRecord[];
   onRestore(sessionId: string): void;
   onDelete(sessionId: string): void;
@@ -69,8 +69,10 @@ export function TasksSettingsPage(props: ArchivedTasksBridge) {
    * rather than something false.
    */
   const projectLabelOf = useCallback(
-    (session: SessionSummary): string | undefined =>
-      session.projectId ? projectNames.get(session.projectId) : copy.noProject,
+    (session: DesktopSessionSummary): string | undefined => {
+      if (session.profileKind === 'remote') return session.profileName;
+      return session.projectId ? projectNames.get(session.projectId) : copy.noProject;
+    },
     [copy.noProject, projectNames],
   );
 
