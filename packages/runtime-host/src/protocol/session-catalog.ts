@@ -4,7 +4,6 @@ import { isPermissionMode, type PermissionMode } from '@maka/core/permission';
 import { isSessionStartMode, type SessionStartMode } from '@maka/core/explore-agent';
 import {
   isSessionBlockedReason,
-  isSessionStatus,
   isSessionToolProfile,
   type SessionBlockedReason,
   type SessionStatus,
@@ -26,6 +25,7 @@ import {
 } from './codec.js';
 import { invalidProtocolFrame } from './errors.js';
 import { defineHostPathOperation, defineOperation } from './operation-spec.js';
+import { decodeSessionStatus } from './session-status.js';
 import {
   decodeWorkspaceProjection,
   decodeWorkspaceTarget,
@@ -644,7 +644,7 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     ...optionalEntityId(record, 'lastReadMessageId'),
     ...optionalTimestamp(record, 'lastMessageAt'),
     ...optionalText(record, 'lastMessagePreview', SESSION_CATALOG_PREVIEW_MAX_BYTES),
-    status: sessionStatus(record.status),
+    status: decodeSessionStatus(record.status),
     ...optionalBlockedReason(record),
     ...optionalTimestamp(record, 'statusUpdatedAt'),
     ...optionalEntityId(record, 'parentSessionId'),
@@ -865,11 +865,6 @@ function optionalThinkingLevel(
 ): Pick<SessionCatalogProjection, 'thinkingLevel'> | Record<string, never> {
   if (!Object.hasOwn(record, 'thinkingLevel')) return {};
   return { thinkingLevel: thinkingLevel(record.thinkingLevel) };
-}
-
-function sessionStatus(value: unknown): SessionStatus {
-  if (!isSessionStatus(value)) throw invalidProtocolFrame('Invalid Session status');
-  return value;
 }
 
 function backend(value: unknown): SessionCatalogProjection['backend'] {

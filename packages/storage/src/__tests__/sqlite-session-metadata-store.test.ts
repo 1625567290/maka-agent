@@ -133,6 +133,236 @@ describe('SqliteSessionMetadataStore', () => {
     }
   });
 
+  test('migrates v24 legacy session statuses to active exactly once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-session-status-v24-'));
+    const path = join(root, 'state.sqlite');
+    const sessionIds = ['legacy-review', 'legacy-done', 'legacy-both', 'legacy-unchanged'];
+    const migrationSnapshots = new Map<
+      string,
+      {
+        readonly committedAt: number;
+        readonly metadataVersion: number;
+        readonly statusUpdatedAt?: number;
+      }
+    >();
+    const persistedRowsAfterMigration: Array<{
+      readonly sessionId: string;
+      readonly status: string;
+      readonly payloadStatus: string;
+      readonly metadataVersion: number;
+    }> = [];
+    try {
+      const setup = createSqliteSessionMetadataStore(path, { now: () => 10 });
+      for (const id of sessionIds) {
+        await setup.create(
+          fullHeader({
+            id,
+            status: 'active',
+            blockedReason: undefined,
+            statusUpdatedAt: id === 'legacy-done' ? 404 : id === 'legacy-both' ? 505 : 303,
+          }),
+        );
+      }
+      setup.close();
+
+      const legacy = new DatabaseSync(path);
+      try {
+        legacy
+          .prepare(
+            `
+              UPDATE session_metadata
+              SET status = ?, metadata_version = ?, committed_at = ?
+              WHERE session_id = ?
+            `,
+          )
+          .run('review', 7, 100, 'legacy-review');
+        legacy
+          .prepare(
+            `
+              UPDATE session_metadata
+              SET
+                payload_json = json_set(payload_json, '$.status', ?),
+                metadata_version = ?,
+                committed_at = ?
+              WHERE session_id = ?
+            `,
+          )
+          .run('done', 11, 4_000_000_000_000, 'legacy-done');
+        legacy
+          .prepare(
+            `
+              UPDATE session_metadata
+              SET
+                status = ?,
+                payload_json = json_set(payload_json, '$.status', ?),
+                metadata_version = ?,
+                committed_at = ?
+              WHERE session_id = ?
+            `,
+          )
+          .run('review', 'done', 17, 500, 'legacy-both');
+        legacy
+          .prepare(
+            `
+              UPDATE session_metadata
+              SET metadata_version = ?, committed_at = ?
+              WHERE session_id = ?
+            `,
+          )
+          .run(13, 300, 'legacy-unchanged');
+        legacy
+          .prepare(
+            `UPDATE session_metadata_schema SET version = 24 WHERE scope = 'session_metadata'`,
+          )
+          .run();
+      } finally {
+        legacy.close();
+      }
+
+      const migrationStartedAt = Date.now();
+      const migrated = createSqliteSessionMetadataStore(path, { now: () => 20 });
+      try {
+        assert.equal(migrated.schemaVersion(), 25);
+        assert.deepEqual((await migrated.read('legacy-review')).header.status, 'active');
+        assert.deepEqual((await migrated.read('legacy-done')).header.status, 'active');
+        assert.deepEqual((await migrated.read('legacy-both')).header.status, 'active');
+        assert.equal((await migrated.read('legacy-review')).metadataVersion, 8);
+        assert.equal((await migrated.read('legacy-done')).metadataVersion, 12);
+        assert.equal((await migrated.read('legacy-both')).metadataVersion, 18);
+        assert.equal((await migrated.read('legacy-unchanged')).metadataVersion, 13);
+        assert.ok((await migrated.read('legacy-review')).committedAt >= migrationStartedAt);
+        assert.equal((await migrated.read('legacy-done')).committedAt, 4_000_000_000_000);
+        assert.ok((await migrated.read('legacy-both')).committedAt >= migrationStartedAt);
+        assert.equal((await migrated.read('legacy-unchanged')).committedAt, 300);
+        assert.equal((await migrated.read('legacy-review')).header.statusUpdatedAt, 303);
+        assert.equal((await migrated.read('legacy-done')).header.statusUpdatedAt, 404);
+        assert.equal((await migrated.read('legacy-both')).header.statusUpdatedAt, 505);
+        for (const sessionId of sessionIds) {
+          const record = await migrated.read(sessionId);
+          migrationSnapshots.set(sessionId, {
+            committedAt: record.committedAt,
+            metadataVersion: record.metadataVersion,
+            statusUpdatedAt: record.header.statusUpdatedAt,
+          });
+        }
+        const page = await migrated.listCatalogPage({}, undefined, 10);
+        assert.deepEqual(page.records.map((record) => record.header.id).sort(), [
+          'legacy-both',
+          'legacy-done',
+          'legacy-review',
+          'legacy-unchanged',
+        ]);
+        assert.equal(page.hasMore, false);
+      } finally {
+        migrated.close();
+      }
+
+      const persisted = new DatabaseSync(path);
+      try {
+        const rows = (
+          persisted
+            .prepare(
+              `
+              SELECT
+                session_id AS sessionId,
+                status,
+                json_extract(payload_json, '$.status') AS payloadStatus,
+                metadata_version AS metadataVersion
+              FROM session_metadata
+              ORDER BY session_id
+            `,
+            )
+            .all() as Array<{
+            readonly sessionId: string;
+            readonly status: string;
+            readonly payloadStatus: string;
+            readonly metadataVersion: number;
+          }>
+        ).map((row) => ({ ...row }));
+        persistedRowsAfterMigration.push(...rows);
+        assert.deepEqual(rows, [
+          {
+            sessionId: 'legacy-both',
+            status: 'active',
+            payloadStatus: 'active',
+            metadataVersion: 18,
+          },
+          {
+            sessionId: 'legacy-done',
+            status: 'active',
+            payloadStatus: 'active',
+            metadataVersion: 12,
+          },
+          {
+            sessionId: 'legacy-review',
+            status: 'active',
+            payloadStatus: 'active',
+            metadataVersion: 8,
+          },
+          {
+            sessionId: 'legacy-unchanged',
+            status: 'active',
+            payloadStatus: 'active',
+            metadataVersion: 13,
+          },
+        ]);
+      } finally {
+        persisted.close();
+      }
+
+      const reopened = createSqliteSessionMetadataStore(path, { now: () => 30 });
+      try {
+        for (const sessionId of sessionIds) {
+          const record = await reopened.read(sessionId);
+          assert.deepEqual(
+            {
+              committedAt: record.committedAt,
+              metadataVersion: record.metadataVersion,
+              statusUpdatedAt: record.header.statusUpdatedAt,
+            },
+            migrationSnapshots.get(sessionId),
+          );
+        }
+      } finally {
+        reopened.close();
+      }
+
+      const reopenedPersisted = new DatabaseSync(path);
+      try {
+        const rows = (
+          reopenedPersisted
+            .prepare(
+              `
+                SELECT
+                  session_id AS sessionId,
+                  status,
+                  json_extract(payload_json, '$.status') AS payloadStatus
+                FROM session_metadata
+                ORDER BY session_id
+              `,
+            )
+            .all() as Array<{
+            readonly sessionId: string;
+            readonly status: string;
+            readonly payloadStatus: string;
+          }>
+        ).map((row) => ({ ...row }));
+        assert.deepEqual(
+          rows,
+          persistedRowsAfterMigration.map(({ sessionId, status, payloadStatus }) => ({
+            sessionId,
+            status,
+            payloadStatus,
+          })),
+        );
+      } finally {
+        reopenedPersisted.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test('atomically retires a revision family with CAS and tombstone retries', async () => {
     const store = createSqliteSessionMetadataStore(':memory:', { now: () => 100 });
     const root = fullHeader({
