@@ -6,7 +6,9 @@ import {
   appendManualLocalMemoryEntryDraft,
   findLocalMemoryEntryDraftRange,
   setLocalMemoryEntryStatusDraft,
+  stableLocalMemoryIdMaterial,
 } from '@maka/core/local-memory';
+import { webSha256Digest } from '../local-memory-digest';
 import { useToast, useUiLocale } from '@maka/ui';
 import { openPathFailureCopy, openPathActionLabel } from '../open-path';
 import { settingsActionErrorMessage } from './settings-error-copy';
@@ -430,10 +432,13 @@ export function useMemoryDocumentController(props: MemoryDocumentControllerProps
   }
 
   async function addManualMemoryEntry() {
+    const { timestamp, material } = stableLocalMemoryIdMaterial(newMemoryContent, Date.now());
     const result = appendManualLocalMemoryEntryDraft(draft, {
       title: newMemoryTitle,
       content: newMemoryContent,
       tags: newMemoryTags.split(','),
+      now: timestamp,
+      sha256: await webSha256Digest(material),
     });
     if (!result.ok) {
       switch (result.reason) {
