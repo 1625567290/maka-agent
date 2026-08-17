@@ -2,7 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, rmSync, statSync } from 'node:fs';
 import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
-import { writeJsonAtomic } from './metering-checkpoint.js';
+import { signMeteringCheckpoint, writeJsonAtomic } from './metering-checkpoint.js';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { basename, dirname, join } from 'node:path';
 import type { Readable } from 'node:stream';
@@ -698,11 +698,14 @@ async function startMeteringProxy(
   // not finish.
   let checkpointWrites = Promise.resolve();
   const persistCheckpoint = () => {
-    const value = {
-      schemaVersion: PROVIDER_USAGE_CHECKPOINT_SCHEMA,
-      profile: selected,
-      ...snapshot(),
-    };
+    const value = signMeteringCheckpoint(
+      {
+        schemaVersion: PROVIDER_USAGE_CHECKPOINT_SCHEMA,
+        profile: selected,
+        ...snapshot(),
+      },
+      resultToken,
+    );
     checkpointWrites = checkpointWrites.then(() =>
       writeJsonAtomic(checkpointPath, value).catch(() => undefined),
     );

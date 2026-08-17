@@ -7,8 +7,11 @@ import { recoverExternalMetering } from '../external-subject.js';
 import {
   METERING_CHECKPOINT_LIMIT_BYTES,
   readBoundedRegularFile,
+  signMeteringCheckpoint,
   writeJsonAtomic,
 } from '../metering-checkpoint.js';
+
+const METERING_SECRET = '0123456789abcdef0123456789abcdef';
 
 const usage = {
   inputTokens: 1,
@@ -55,19 +58,54 @@ test('refuses a metering checkpoint that is not a bounded regular file', async (
   try {
     await mkdir(agent, { recursive: true });
 
+    await writeFile(
+      path,
+      `${JSON.stringify(signMeteringCheckpoint(checkpoint, METERING_SECRET))}\n`,
+    );
+    assert.ok(
+      await recoverExternalMetering({ trialPath, meteringSecret: METERING_SECRET }, 'codex'),
+    );
+
+    // Schema-valid unsigned JSON is what a subject can write. Recovery must
+    // refuse it: the file is a bounded regular checkpoint, not evidence.
     await writeFile(path, `${JSON.stringify(checkpoint)}\n`);
-    assert.ok(await recoverExternalMetering({ trialPath }, 'codex'));
+    assert.equal(
+      await recoverExternalMetering({ trialPath, meteringSecret: METERING_SECRET }, 'codex'),
+      undefined,
+    );
+
+    const forged = signMeteringCheckpoint({ ...checkpoint, admittedRequests: 99 }, METERING_SECRET);
+    await writeFile(path, `${JSON.stringify({ ...forged, admittedRequests: 1 })}\n`);
+    assert.equal(
+      await recoverExternalMetering({ trialPath, meteringSecret: METERING_SECRET }, 'codex'),
+      undefined,
+    );
+
+    await writeFile(
+      path,
+      `${JSON.stringify(signMeteringCheckpoint(checkpoint, 'ff'.repeat(16)))}\n`,
+    );
+    assert.equal(
+      await recoverExternalMetering({ trialPath, meteringSecret: METERING_SECRET }, 'codex'),
+      undefined,
+    );
 
     await rm(path);
     await symlink('/etc/hosts', path);
     assert.equal(await readBoundedRegularFile(path), undefined);
-    assert.equal(await recoverExternalMetering({ trialPath }, 'codex'), undefined);
+    assert.equal(
+      await recoverExternalMetering({ trialPath, meteringSecret: METERING_SECRET }, 'codex'),
+      undefined,
+    );
 
     await rm(path);
     await writeFile(path, 'x'.repeat(METERING_CHECKPOINT_LIMIT_BYTES + 1));
     await chmod(path, 0o644);
     assert.equal(await readBoundedRegularFile(path), undefined);
-    assert.equal(await recoverExternalMetering({ trialPath }, 'codex'), undefined);
+    assert.equal(
+      await recoverExternalMetering({ trialPath, meteringSecret: METERING_SECRET }, 'codex'),
+      undefined,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

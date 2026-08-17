@@ -224,10 +224,16 @@ async function runHarnessAttempt(
 }
 
 function relayContext(state: RelayState, signal?: AbortSignal): SubjectExecutionContext {
+  const resultToken = randomBytes(16).toString('hex');
+  const metadata: JsonObject = {
+    trialName: state.trialName,
+    trialPath: state.trialPath,
+    meteringSecret: resultToken,
+  };
   return {
     cwd: state.cwd,
     taskInput: state.taskInput,
-    metadata: { trialName: state.trialName, trialPath: state.trialPath },
+    metadata,
     ...(signal ? { signal } : {}),
     execute: async (input) => {
       signal?.throwIfAborted();
@@ -240,7 +246,6 @@ function relayContext(state: RelayState, signal?: AbortSignal): SubjectExecution
           return [target, value];
         }),
       );
-      const resultToken = randomBytes(16).toString('hex');
       if (
         !sendRelayMessage(state.transport, 'execute', {
           token: state.token,

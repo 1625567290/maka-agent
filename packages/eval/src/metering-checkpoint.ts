@@ -1,9 +1,11 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, open, rename, writeFile } from 'node:fs/promises';
 
 // One JSON snapshot of proxy counts. Anything larger is not a checkpoint the
 // wrapper writes; it is treated as absent rather than parsed.
 export const METERING_CHECKPOINT_LIMIT_BYTES = 64 * 1024;
+const MAC_PATTERN = /^[0-9a-f]{64}$/u;
 
 let atomicWriteSequence = 0;
 
@@ -44,4 +46,30 @@ export async function readBoundedRegularFile(
   } finally {
     await handle.close();
   }
+}
+
+// The wrapper signs with the relay result token, which is host-issued and
+// stripped from the wrapper environment before the subject starts. A subject
+// that writes a schema-valid file cannot produce this mac.
+export function signMeteringCheckpoint(
+  body: Record<string, unknown>,
+  secret: string,
+): Record<string, unknown> {
+  return { ...body, mac: createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex') };
+}
+
+export function meteringCheckpointMacMatches(
+  record: Record<string, unknown>,
+  secret: string,
+): boolean {
+  const mac = record.mac;
+  if (typeof mac !== 'string' || !MAC_PATTERN.test(mac)) return false;
+  const body = { ...record };
+  delete body.mac;
+  const expected = Buffer.from(
+    createHmac('sha256', secret).update(JSON.stringify(body)).digest('hex'),
+    'hex',
+  );
+  const actual = Buffer.from(mac, 'hex');
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
