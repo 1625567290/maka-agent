@@ -87,7 +87,11 @@ download and verifier phases retain their native network policy. Build the pinne
 `maka-eval-egress-proxy:12.2.3` image from `harbor/egress-proxy/Dockerfile` before running the
 cohort. `MAKA_EVAL_EGRESS_NAMESPACE_TEST=1 python3 harbor/test_cell_egress_namespace.py` brings up
 the overlay and the checked-in policy and asserts that contract in a real cell namespace; it needs
-a Docker daemon and outbound network, and skips otherwise. This URL policy is a blocklist for known
+a Docker daemon and outbound network, and skips otherwise. Official CI does not set that
+variable: the live cell needs a kernel that can load the checked-in `table inet` ruleset
+(`NFT_FIB_INET`), which Docker Desktop and the default runners do not provide. The rule
+text — including that `127.0.0.11` is rejected before `fib daddr type local accept` — is
+locked by `lifecycle-boundaries.test.ts` and the Harbor contract tests. This URL policy is a blocklist for known
 benchmark and public-solution contamination surfaces, not a complete defense against a deliberately
 invented lookup channel. It classifies HTTP(S) requests and `CONNECT` hosts against the blocklist, and
 kills tunnels that fall back to raw TCP. Collected Maka runtime files

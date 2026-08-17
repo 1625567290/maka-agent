@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import importlib
+import inspect
 import os
 import shlex
 import subprocess
@@ -326,9 +327,12 @@ class SubjectEnvironment:
         self.users: list[str | None] = []
         self.services: list[str] = []
 
-    async def exec(self, command: str, cwd=None, timeout_sec=None, **kwargs):
+    async def exec(self, command: str, cwd=None, env=None, timeout_sec=None, user=None):
+        # Harbor 0.20.0 BaseEnvironment.exec takes user= as a named argument,
+        # not **kwargs. Absorbing unknown keywords here would hide a TypeError
+        # against the real Docker environment.
         self.commands.append(command)
-        explicit = kwargs.get("user") if isinstance(kwargs.get("user"), str) else None
+        explicit = str(user) if user is not None else None
         self.users.append(explicit if explicit is not None else self.default_user)
         if "proxy-ipv4" in command:
             return types.SimpleNamespace(
@@ -461,16 +465,29 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
         relay = load_relay()
 
         class MissingAddressEnvironment(SubjectEnvironment):
-            async def exec(self, command, cwd=None, timeout_sec=None, **kwargs):
-                self.commands.append(command)
+            async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
                 if "proxy-ipv4" in command:
+                    self.commands.append(command)
+                    explicit = str(user) if user is not None else None
+                    self.users.append(
+                        explicit if explicit is not None else self.default_user
+                    )
                     return types.SimpleNamespace(return_code=1, stdout="", stderr="")
-                return await super().exec(command, cwd=cwd, timeout_sec=timeout_sec, **kwargs)
+                return await super().exec(
+                    command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+                )
 
+        environment = MissingAddressEnvironment()
         with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
             with self.assertRaises(RuntimeError) as raised:
-                await relay._require_constrained_subject(MissingAddressEnvironment())
+                await relay._require_constrained_subject(environment)
         self.assertIn("pin the Eval egress proxy hostname", str(raised.exception))
+        pin_users = [
+            user
+            for command, user in zip(environment.commands, environment.users, strict=True)
+            if "proxy-ipv4" in command
+        ]
+        self.assertEqual(pin_users, ["root"])
 
     async def test_proxy_hostname_pin_runs_as_root(self):
         relay = load_relay()
@@ -507,7 +524,14 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_proxy_hostname_is_rejected_before_hosts_rewrite(self):
         relay = load_relay()
-        for host in (".*", "evil.com\n127.0.0.1 pwned", "foo bar", "foo..bar", ".hidden"):
+        for host in (
+            ".*",
+            "proxy*",
+            "evil.com\n127.0.0.1 pwned",
+            "foo bar",
+            "foo..bar",
+            ".hidden",
+        ):
             with self.subTest(host=host):
                 environment = SubjectEnvironment()
                 with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_ALLOWED_HOST": host}):
@@ -521,8 +545,7 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
             await relay._require_constrained_subject(environment)
         pin = next(command for command in environment.commands if "proxy-ipv4" in command)
-        self.assertIn("awk -v host=", pin)
-        self.assertNotIn("grep -v", pin)
+        self.assertIn(relay.HOSTS_ALIAS_AWK, pin)
 
         completed = subprocess.run(
             ["awk", "-v", "host=maka-eval-mitmproxy", relay.HOSTS_ALIAS_AWK],
@@ -531,6 +554,7 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
                 "10.0.0.1 maka-eval-mitmproxy extra\n"
                 "10.0.0.2 prefix-maka-eval-mitmproxy\n"
                 "10.0.0.3 other.example\n"
+                "10.0.0.4 other.example maka-eval-mitmproxy\n"
             ),
             check=True,
             capture_output=True,
@@ -542,6 +566,89 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
             "10.0.0.2 prefix-maka-eval-mitmproxy\n"
             "10.0.0.3 other.example\n",
         )
+
+    def test_harbor_0_20_0_exec_declares_user_as_a_named_parameter(self):
+        # Harbor 0.20.0 BaseEnvironment.exec / DockerEnvironment.exec:
+        #   (command, cwd=None, env=None, timeout_sec=None, user=None)
+        # A **kwargs-only double would absorb user= and hide a TypeError
+        # against that signature.
+        parameter = inspect.signature(SubjectEnvironment.exec).parameters["user"]
+        self.assertNotEqual(parameter.kind, inspect.Parameter.VAR_KEYWORD)
+        inspect.signature(SubjectEnvironment.exec).bind(
+            None, "true", user="root"
+        )
+
+    def test_published_ipv4_requires_four_0_255_octets(self):
+        relay = load_relay()
+        accepted = ("172.18.0.2", "0.0.0.0", "255.255.255.255", "10.0.0.1")
+        rejected = (
+            "999.1.1.1",
+            "1.2.3",
+            "1..2.3",
+            "1.2.3.4.5",
+            "01.2.3.4",
+            "1.2.3.08",
+            "...",
+            "",
+            "172.18.0.2/32",
+            "localhost",
+        )
+        for ip in accepted:
+            with self.subTest(ip=ip):
+                self.assertTrue(relay._valid_published_ipv4(ip))
+        for ip in rejected:
+            with self.subTest(ip=ip):
+                self.assertFalse(relay._valid_published_ipv4(ip))
+
+        for ip in (*accepted, *rejected):
+            with self.subTest(awk=ip):
+                completed = subprocess.run(
+                    ["awk", relay.IPV4_OCTET_AWK],
+                    input=f"{ip}\n",
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    completed.returncode == 0,
+                    relay._valid_published_ipv4(ip),
+                    ip,
+                )
+
+    def test_network_policy_uses_the_same_ipv4_octet_check(self):
+        relay = load_relay()
+        policy = Path(__file__).with_name("egress-proxy").joinpath("network-policy")
+        self.assertIn(relay.IPV4_OCTET_AWK.strip(), policy.read_text())
+
+    def test_network_policy_rejects_docker_dns_before_local_accept(self):
+        policy = Path(__file__).with_name("egress-proxy").joinpath("network-policy").read_text()
+        reject = policy.index("ip daddr 127.0.0.11 reject")
+        local = policy.index("fib daddr type local accept")
+        self.assertLess(reject, local)
+
+    async def test_malformed_published_proxy_address_fails_closed(self):
+        relay = load_relay()
+
+        class BadAddressEnvironment(SubjectEnvironment):
+            async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+                if "proxy-ipv4" in command:
+                    self.commands.append(command)
+                    explicit = str(user) if user is not None else None
+                    self.users.append(
+                        explicit if explicit is not None else self.default_user
+                    )
+                    return types.SimpleNamespace(
+                        return_code=0,
+                        stdout="MAKA-EVAL-PROXY-HOST-V1 999.1.1.1 maka-eval-mitmproxy\n",
+                        stderr="",
+                    )
+                return await super().exec(
+                    command, cwd=cwd, env=env, timeout_sec=timeout_sec, user=user
+                )
+
+        with patch.dict(os.environ, {"MAKA_EVAL_EGRESS_REQUIRED": "1"}):
+            with self.assertRaises(RuntimeError) as raised:
+                await relay._require_constrained_subject(BadAddressEnvironment())
+        self.assertIn("pin the Eval egress proxy hostname", str(raised.exception))
 
 
 if __name__ == "__main__":

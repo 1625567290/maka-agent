@@ -29,6 +29,18 @@ resolve_proxy_ip() {
       return
       ;;
   esac
+  # Same four-octet program as relay_agent.IPV4_OCTET_AWK.
+  if ! printf '%s\n' "$ip" | awk '
+BEGIN { FS = "." }
+NF != 4 { exit 1 }
+{
+  for (i = 1; i <= 4; i++) {
+    if ($i !~ /^(0|[1-9][0-9]*)$/ || $i + 0 > 255) exit 1
+  }
+}
+'; then
+    return
+  fi
   printf '%s\n' "$ip"
 }
 

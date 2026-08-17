@@ -369,11 +369,33 @@ HOSTS_ALIAS_AWK = r"""
 }
 """
 
+# Four decimal octets 0-255, no empty fields and no leading zeros. The same
+# program is embedded in egress-proxy/network-policy; the contract test
+# requires the two copies to stay identical.
+IPV4_OCTET_AWK = r"""
+BEGIN { FS = "." }
+NF != 4 { exit 1 }
+{
+  for (i = 1; i <= 4; i++) {
+    if ($i !~ /^(0|[1-9][0-9]*)$/ || $i + 0 > 255) exit 1
+  }
+}
+"""
+
+_PUBLISHED_IPV4 = re.compile(
+    r"^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$"
+)
+
 
 def _valid_egress_proxy_host(host: str) -> bool:
     if not host or host.startswith(".") or host.endswith(".") or ".." in host:
         return False
     return all(character.isalnum() or character in ".-" for character in host)
+
+
+def _valid_published_ipv4(ip: str) -> bool:
+    return bool(_PUBLISHED_IPV4.fullmatch(ip))
 
 
 async def _pin_proxy_hostname(environment: Any) -> None:
@@ -399,6 +421,9 @@ ip=$(tr -d ' \\t\\r\\n' < "$path")
 case "$ip" in
   ""|*.*.*.*.*|*[!0-9.]*) exit 1 ;;
 esac
+if ! printf '%s\\n' "$ip" | awk {shlex.quote(IPV4_OCTET_AWK)}; then
+  exit 1
+fi
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 if [ -f /etc/hosts ]; then
@@ -409,12 +434,14 @@ cat "$tmp" > /etc/hosts
 printf %s {shlex.quote(PROXY_HOSTS_PREFIX)}
 printf '%s %s\\n' "$ip" "$host"
 """
+    # Harbor 0.20.0 BaseEnvironment.exec and DockerEnvironment.exec take user=;
+    # DockerEnvironment._compose_exec forwards it as `docker compose exec -u`.
     probe = await environment.exec(script, user="root")
     if probe.return_code != 0:
         raise RuntimeError("Maka Eval could not pin the Eval egress proxy hostname")
     reported = _sole_probe_line(probe, PROXY_HOSTS_PREFIX)
     ip, _, pinned = reported.partition(" ")
-    if pinned != host or not ip or ip.count(".") != 3:
+    if pinned != host or not _valid_published_ipv4(ip):
         raise RuntimeError("Maka Eval could not pin the Eval egress proxy hostname")
 
 

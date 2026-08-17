@@ -472,10 +472,9 @@ class CellEnvironment:
     def __init__(self, service: str) -> None:
         self.service = service
 
-    async def exec(self, command: str, cwd=None, timeout_sec=None, **kwargs):
-        user = kwargs.get("user")
+    async def exec(self, command: str, cwd=None, env=None, timeout_sec=None, user=None):
         return self._run(
-            self.service, command, user=user if isinstance(user, str) else None
+            self.service, command, user=str(user) if user is not None else None
         )
 
     async def service_exec(self, command: str, *, service: str, **kwargs):

@@ -840,6 +840,9 @@ test('eight-arm spec adds Pi with the same pinned DeepSeek execution contract', 
   assert.doesNotMatch(networkPolicy, /meta mark \S+ (?:accept|return)/u);
   assert.match(networkPolicy, /ip daddr 127\.0\.0\.11 reject/u);
   assert.doesNotMatch(networkPolicy, /127\.0\.0\.11 (?:udp|tcp) dport 53 reject/u);
+  const dockerDnsReject = networkPolicy.indexOf('ip daddr 127.0.0.11 reject');
+  const localAccept = networkPolicy.indexOf('fib daddr type local accept');
+  assert.ok(dockerDnsReject >= 0 && localAccept > dockerDnsReject);
   assert.match(networkPolicy, /\/opt\/maka-egress\/proxy-ipv4/u);
   assert.doesNotMatch(networkPolicy, /\bgetent\b/u);
   assert.match(egressCompose, /proxy-ipv4/u);
