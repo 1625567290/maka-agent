@@ -30,6 +30,18 @@ export default {
       from: 'resources/workers/filesystem-worker.js',
       to: 'workers/filesystem-worker.js',
     },
+    ...(process.platform === 'win32'
+      ? [
+          {
+            from: 'resources/windows-sandbox/maka-windows-sandbox.exe',
+            to: 'windows-sandbox/maka-windows-sandbox.exe',
+          },
+          {
+            from: 'resources/licenses/cargo/THIRD_PARTY_NOTICES.txt',
+            to: 'licenses/cargo/THIRD_PARTY_NOTICES.txt',
+          },
+        ]
+      : []),
     {
       from: '../../LICENSE',
       to: 'licenses/maka/LICENSE',
