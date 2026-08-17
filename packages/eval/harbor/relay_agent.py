@@ -391,7 +391,13 @@ _PUBLISHED_IPV4 = re.compile(
 def _valid_egress_proxy_host(host: str) -> bool:
     if not host or host.startswith(".") or host.endswith(".") or ".." in host:
         return False
-    return all(character.isalnum() or character in ".-" for character in host)
+    # Match the pin script's `*[!A-Za-z0-9.-]*` class. str.isalnum() also
+    # accepts Unicode letters, which the shell would later reject as a pin
+    # failure instead of an invalid host.
+    return all(
+        (character.isalnum() and character.isascii()) or character in ".-"
+        for character in host
+    )
 
 
 def _valid_published_ipv4(ip: str) -> bool:

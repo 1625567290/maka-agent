@@ -531,6 +531,7 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
             "foo bar",
             "foo..bar",
             ".hidden",
+            "maka-évál",
         ):
             with self.subTest(host=host):
                 environment = SubjectEnvironment()
@@ -580,7 +581,7 @@ class SubjectCapabilityTest(unittest.IsolatedAsyncioTestCase):
 
     def test_published_ipv4_requires_four_0_255_octets(self):
         relay = load_relay()
-        accepted = ("172.18.0.2", "0.0.0.0", "255.255.255.255", "10.0.0.1")
+        accepted = ("172.18.0.2", "0.1.2.3", "255.255.255.255", "10.0.0.1")
         rejected = (
             "999.1.1.1",
             "1.2.3",
