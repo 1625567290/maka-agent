@@ -333,12 +333,81 @@ function validateAssetNotices() {
   }
 }
 
+/**
+ * Say what drifted, not just that something did.
+ *
+ * The comparison is byte-exact over a 15k-line generated file, so "stale" on
+ * its own leaves whoever hit it — often on a CI runner whose OS they are not
+ * holding — with nothing to act on. The two shapes worth separating are a
+ * changed dependency closure, which the suggested command fixes, and identical
+ * packages whose license bytes moved, which usually means something upstream
+ * or environmental rather than a missed regeneration.
+ */
+function describeNoticeDrift(committed, generated) {
+  // Split on either ending. A CRLF checkout would otherwise leave `\r` on every
+  // extracted name, reporting the same packages as both added and removed and
+  // hiding the text-drift branch below — the diagnostic would misdescribe
+  // exactly the environment-specific failure it exists to explain.
+  const linesOf = (text) => text.split(/\r?\n/);
+  const packagesIn = (text) =>
+    new Set(
+      linesOf(text)
+        .filter((line) => line.startsWith('Package: '))
+        .map((line) => line.slice('Package: '.length).trim()),
+    );
+  const committedPackages = packagesIn(committed);
+  const generatedPackages = packagesIn(generated);
+  const onlyGenerated = [...generatedPackages].filter((name) => !committedPackages.has(name));
+  const onlyCommitted = [...committedPackages].filter((name) => !generatedPackages.has(name));
+
+  const lines = [];
+  const list = (label, names) => {
+    if (names.length === 0) return;
+    const shown = names.slice(0, 10);
+    lines.push(`  ${label} (${names.length}):`);
+    for (const name of shown) lines.push(`    ${name}`);
+    if (names.length > shown.length) lines.push(`    …and ${names.length - shown.length} more`);
+  };
+  list('present in the closure but missing from the committed file', onlyGenerated);
+  list('committed but no longer in the closure', onlyCommitted);
+
+  if (onlyGenerated.length === 0 && onlyCommitted.length === 0) {
+    const committedLines = linesOf(committed);
+    const generatedLines = linesOf(generated);
+    const limit = Math.max(committedLines.length, generatedLines.length);
+    let index = 0;
+    while (index < limit && committedLines[index] === generatedLines[index]) index += 1;
+    lines.push('  the same packages are listed, so the difference is in the notice text itself');
+    if (index === limit) {
+      // Every line matches once endings are normalized, so the bytes differ only
+      // in how the lines end. Naming that is the whole answer — regenerating
+      // will not help, and the repository already forces LF through
+      // .gitattributes, so a CRLF checkout means that rule did not take effect.
+      lines.push('  every line matches once line endings are normalized:');
+      lines.push(`    committed uses CRLF: ${committed.includes('\r\n')}`);
+      lines.push(`    generated uses CRLF: ${generated.includes('\r\n')}`);
+      lines.push('  check .gitattributes and the checkout, not the dependency closure');
+    } else {
+      lines.push(`  first difference at line ${index + 1}:`);
+      lines.push(`    committed:  ${JSON.stringify(committedLines[index] ?? '<end of file>')}`);
+      lines.push(`    generated:  ${JSON.stringify(generatedLines[index] ?? '<end of file>')}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 validateAssetNotices();
 const generated = renderNotice();
 if (checkOnly) {
-  if (!existsSync(outputPath) || readFileSync(outputPath, 'utf8') !== generated) {
+  if (!existsSync(outputPath)) {
     throw new Error(
-      'Production dependency notices are stale. Run npm run generate:third-party-notices.',
+      `Production dependency notices are missing at ${outputPath}. Run npm run generate:third-party-notices.`,
+    );
+  }
+  const committed = readFileSync(outputPath, 'utf8');
+  if (committed !== generated) {
+    throw new Error(
+      `Production dependency notices are stale. Run npm run generate:third-party-notices.\n${describeNoticeDrift(committed, generated)}`,
     );
   }
   console.log('[third-party-notices] OK — production dependency inventory is current.');
