@@ -40,8 +40,25 @@ import {
 } from '../protocol/turn.js';
 
 describe('Runtime Host bootstrap protocol', () => {
-  test('publishes a new compatibility epoch for legacy Automation provenance', () => {
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 21);
+  test('publishes a new compatibility epoch for the narrowed connection update result', () => {
+    // The pair, not either number: an epoch-21 Host still answers a connection
+    // update this way when the selection strands its default target, so a wire
+    // set that no longer accepts it has to have left epoch 21 behind. Asserting
+    // `> 21` rather than a literal keeps a later increment from colliding here.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 21);
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          requestId: 'connection-update-legacy',
+          operation: 'connection.catalog.update',
+          ok: true,
+          result: {
+            kind: 'invalid_default_target',
+            target: { connectionId: '2a42da77-afac-4fb1-bff1-e7d6e6e55e9f', modelId: 'gpt-5' },
+          },
+        }),
+      isInvalidFrame,
+    );
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {
