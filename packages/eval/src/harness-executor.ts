@@ -227,7 +227,7 @@ function relayContext(state: RelayState, signal?: AbortSignal): SubjectExecution
   return {
     cwd: state.cwd,
     taskInput: state.taskInput,
-    metadata: { trialName: state.trialName },
+    metadata: { trialName: state.trialName, trialPath: state.trialPath },
     ...(signal ? { signal } : {}),
     execute: async (input) => {
       signal?.throwIfAborted();
@@ -354,7 +354,10 @@ async function startTrial(
   const environmentConfig = resolveEnvironmentConfig(options);
   const networkPolicyPath = resolveNetworkPolicyPath(options);
   const relayPath = resolve(dirname(fileURLToPath(import.meta.url)), '../harbor');
-  const executionEnvironment = egressExecutionEnvironment(options.egressProxy);
+  const executionEnvironment = {
+    ...UNATTENDED_EXECUTION_ENVIRONMENT,
+    ...egressExecutionEnvironment(options.egressProxy),
+  };
   const environment = preparationEnvironment(
     relayPath,
     [...subjectCredentialNames, ...cell.subject.credentials],
@@ -634,10 +637,21 @@ function mergeExecutionEnvironment(
 ): Record<string, string> {
   const overlap = Object.keys(required).filter((name) => Object.hasOwn(subject, name));
   if (overlap.length > 0) {
-    throw new Error(`subject environment overrides Eval egress policy: ${overlap.join(', ')}`);
+    throw new Error(
+      `subject environment overrides Eval execution environment: ${overlap.join(', ')}`,
+    );
   }
   return { ...subject, ...required };
 }
+
+// Every subject runs unattended in a fresh container, where a package manager
+// that stops to ask a question is indistinguishable from one that hung. That is
+// a property of the environment, not of any one arm: tasks install packages, and
+// subjects only decide when.
+const UNATTENDED_EXECUTION_ENVIRONMENT: Readonly<Record<string, string>> = {
+  DEBIAN_FRONTEND: 'noninteractive',
+  TZ: 'Etc/UTC',
+};
 
 function egressExecutionEnvironment(
   options: HarnessOptions['egressProxy'],
