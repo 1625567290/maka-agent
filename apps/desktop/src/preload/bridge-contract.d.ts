@@ -47,8 +47,6 @@ import type { E2eFixtureState } from '@maka/core/e2e-fixture';
 import type { ExternalSessionSummary } from '@maka/core/external-session';
 import type {
   GitReviewReadResult,
-  GitReviewMutationAction,
-  GitReviewMutationResult,
   GitReviewSource,
 } from '@maka/core/git-review';
 import type {
@@ -59,7 +57,7 @@ import type {
   ArtifactTextReadResult,
 } from '@maka/core/artifacts';
 import type { CapabilitySnapshotCollection, PermissionSnapshot } from '@maka/core/capabilities';
-import type { LocalMemoryState, LocalMemoryEntryPreview } from '@maka/core/local-memory';
+import type { LocalMemoryState } from '@maka/core/local-memory';
 import type {
   AuthorizationUrlPayload,
   SubscriptionAccountState,
@@ -117,7 +115,7 @@ import type {
 } from '@maka/runtime/stream-graph-read-model';
 import type { BotStatus, WechatBridgeQrCodeResult } from '@maka/runtime/bots';
 import type { ShellRunPtyDataEvent, ShellRunPtySnapshot } from '@maka/runtime/shell-run-contract';
-import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry, SkillGovernanceDetails } from '@maka/ui';
+import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry } from '@maka/ui';
 import type { ConfigCategory } from '@maka/storage';
 import type { OnboardingMilestone, OnboardingMilestoneId, OnboardingState } from '@maka/core/onboarding';
 import type {
@@ -153,10 +151,6 @@ export type DesktopReviseBeforeTurnInput = ReviseBeforeTurnInput & {
   /** Stable target identity for retrying one Desktop copy action. */
   copyId: string;
 };
-
-export type LocalMemoryMutationResult =
-  | { ok: true; state: LocalMemoryState; entry?: LocalMemoryEntryPreview; proposal?: LocalMemoryEntryPreview }
-  | { ok: false; state: LocalMemoryState; reason: string; message: string };
 
 export type PermissionActionResult =
   | { ok: true }
@@ -687,13 +681,6 @@ export interface MakaBridge {
       source: GitReviewSource;
       baseBranch?: string;
     }): Promise<GitReviewReadResult>;
-    mutate(input: {
-      sessionId: string;
-      source: Extract<GitReviewSource, 'unstaged' | 'staged'>;
-      revision: string;
-      path: string;
-      action: GitReviewMutationAction;
-    }): Promise<GitReviewMutationResult>;
   };
   goal: {
     /** The session's current goal (null when none is set). */
@@ -727,7 +714,6 @@ export interface MakaBridge {
     remove(serverId: string): Promise<McpConfigFile>;
     cancelInstall(serverId: string): Promise<McpConfigFile>;
     test(serverId: string): Promise<McpTestResult>;
-    reconnect(serverId: string): Promise<McpServerStatus>;
     subscribeChanges(handler: (statuses: McpServerStatus[]) => void): () => void;
   };
   settings: {
@@ -768,7 +754,6 @@ export interface MakaBridge {
       id: OnboardingMilestoneId,
       status: 'completed' | 'skipped',
     ): Promise<OnboardingSnapshot>;
-    clearMilestone(id: OnboardingMilestoneId): Promise<OnboardingSnapshot>;
   };
   taskReadiness: {
     getSnapshot(
@@ -796,13 +781,6 @@ export interface MakaBridge {
   };
   memory: {
     getState(sessionId?: string): Promise<LocalMemoryState>;
-    listProposals(): Promise<ReadonlyArray<LocalMemoryEntryPreview>>;
-    propose(input: { title: string; content: string; scope?: 'workspace' | 'session'; sessionId?: string }): Promise<LocalMemoryMutationResult>;
-    remember(input: { title: string; content: string; scope?: 'workspace' | 'session'; sessionId?: string }): Promise<LocalMemoryMutationResult>;
-    approveProposal(proposalId: string): Promise<LocalMemoryMutationResult>;
-    rejectProposal(proposalId: string): Promise<LocalMemoryMutationResult>;
-    archiveEntry(entryId: string, reason?: string): Promise<LocalMemoryMutationResult>;
-    restoreEntry(entryId: string): Promise<LocalMemoryMutationResult>;
     save(content: string): Promise<LocalMemoryState>;
     reset(): Promise<LocalMemoryState>;
     restoreLatestBackup(): Promise<{ ok: true; state: LocalMemoryState } | { ok: false; state: LocalMemoryState; message: string }>;
@@ -1062,7 +1040,6 @@ export interface MakaBridge {
   };
   artifacts: {
     list(sessionId: string, opts?: { includeDeleted?: boolean }): Promise<ArtifactDescriptor[]>;
-    get(sessionId: string, artifactId: string): Promise<ArtifactDescriptor | null>;
     readText(sessionId: string, artifactId: string): Promise<ArtifactTextReadResult>;
     readBinary(sessionId: string, artifactId: string): Promise<ArtifactBinaryReadResult>;
     delete(sessionId: string, artifactId: string): Promise<void>;
@@ -1096,10 +1073,6 @@ export interface MakaBridge {
       | { ok: true; skill: SkillEntry }
       | { ok: false; reason: 'not_found' | 'already_exists' | 'blocked_path' | 'write_failed' }
     >;
-    details(skillId: string): Promise<
-      | { ok: true; details: SkillGovernanceDetails }
-      | { ok: false; reason: 'not_found' | 'invalid_id' }
-    >;
     previewUpdate(skillId: string): Promise<
       | { ok: true; preview: ManagedSkillUpdatePreview }
       | { ok: false; reason: 'not_managed' | 'source_missing' | 'metadata_error' | 'blocked_path' | 'read_failed' }
@@ -1115,10 +1088,6 @@ export interface MakaBridge {
     setPinned(skillRef: string, pinned: boolean): Promise<
       | { ok: true; skill: SkillEntry }
       | { ok: false; reason: 'not_found' | 'blocked_path' | 'state_error' | 'write_failed' }
-    >;
-    createStarter(): Promise<
-      | { ok: true; created: boolean; skill: SkillEntry; filePath: string }
-      | { ok: false; reason: 'blocked_path' | 'already_exists' | 'write_failed' }
     >;
     delete(idOrRef: string): Promise<
       | { ok: true }

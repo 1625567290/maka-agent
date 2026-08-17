@@ -83,8 +83,6 @@ import type { E2eFixtureState } from '@maka/core/e2e-fixture';
 import type { ExternalSessionSummary } from '@maka/core/external-session';
 import type {
   GitReviewReadResult,
-  GitReviewMutationAction,
-  GitReviewMutationResult,
   GitReviewSource,
 } from '@maka/core/git-review';
 import type {
@@ -95,7 +93,7 @@ import type {
   ArtifactTextReadResult,
 } from '@maka/core/artifacts';
 import type { CapabilitySnapshotCollection, PermissionSnapshot } from '@maka/core/capabilities';
-import type { LocalMemoryEntryPreview, LocalMemoryState } from '@maka/core/local-memory';
+import type { LocalMemoryState } from '@maka/core/local-memory';
 import type {
   AuthorizationUrlPayload,
   SubscriptionAccountState,
@@ -138,7 +136,7 @@ import type {
 import type { BotStatus, WechatBridgeQrCodeResult } from '@maka/runtime/bots';
 import type { ShellRunPtyDataEvent, ShellRunPtySnapshot } from '@maka/runtime/shell-run-contract';
 import type { GoalState } from '@maka/runtime/goal-state';
-import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry, SkillGovernanceDetails } from '@maka/ui';
+import type { BundledSkillCatalogEntry, ManagedSkillSourceEntry, ManagedSkillUpdatePreview, SkillEntry } from '@maka/ui';
 import type { ConfigCategory } from '@maka/storage';
 import {
   SENSITIVE_PLACEHOLDER,
@@ -173,10 +171,6 @@ import {
   projectDesktopTurnRecord,
   type DesktopSessionSummary,
 } from '../shared/desktop-session-projection.js';
-
-type LocalMemoryMutationResult =
-  | { ok: true; state: LocalMemoryState; entry?: LocalMemoryEntryPreview; proposal?: LocalMemoryEntryPreview }
-  | { ok: false; state: LocalMemoryState; reason: string; message: string };
 
 let activeRuntimeHost: DesktopTargetScope | undefined;
 let activeRuntimeHostGeneration = 0;
@@ -1824,15 +1818,6 @@ const makaBridge = {
     }): Promise<GitReviewReadResult> {
       return invokeSessionInput('git-review:read', input);
     },
-    mutate(input: {
-      sessionId: string;
-      source: Extract<GitReviewSource, 'unstaged' | 'staged'>;
-      revision: string;
-      path: string;
-      action: GitReviewMutationAction;
-    }): Promise<GitReviewMutationResult> {
-      return invokeSessionInput('git-review:mutate', input);
-    },
   },
   goal: {
     get(sessionId: string): Promise<GoalState | null> {
@@ -1912,9 +1897,6 @@ const makaBridge = {
     test(serverId: string): Promise<McpTestResult> {
       return invokeActiveRuntimeHost('mcp:test', serverId);
     },
-    reconnect(serverId: string): Promise<McpServerStatus> {
-      return invokeActiveRuntimeHost('mcp:reconnect', serverId);
-    },
     subscribeChanges(handler: (statuses: McpServerStatus[]) => void): () => void {
       return subscribeActiveRuntimeHostEvent('mcp:changed', handler);
     },
@@ -1934,13 +1916,6 @@ const makaBridge = {
       const scope = await activeRuntimeHostRef();
       const snapshot = await ipcRenderer.invoke(
         'onboarding:setMilestone', scope, id, status,
-      ) as OnboardingSnapshot;
-      return projectOnboardingSnapshot(scope, snapshot);
-    },
-    async clearMilestone(id: OnboardingMilestoneId): Promise<OnboardingSnapshot> {
-      const scope = await activeRuntimeHostRef();
-      const snapshot = await ipcRenderer.invoke(
-        'onboarding:clearMilestone', scope, id,
       ) as OnboardingSnapshot;
       return projectOnboardingSnapshot(scope, snapshot);
     },
@@ -1981,31 +1956,6 @@ const makaBridge = {
       return sessionId
         ? invokeRuntimeHostForSession('memory:getState', sessionId)
         : invokeActiveRuntimeHost('memory:getState');
-    },
-    listProposals(): Promise<ReadonlyArray<LocalMemoryEntryPreview>> {
-      return invokeActiveRuntimeHost('memory:listProposals');
-    },
-    propose(input: { title: string; content: string; scope?: 'workspace' | 'session'; sessionId?: string }): Promise<LocalMemoryMutationResult> {
-      return input.sessionId
-        ? invokeSessionInput('memory:propose', input as typeof input & { sessionId: string })
-        : invokeActiveRuntimeHost('memory:propose', input);
-    },
-    remember(input: { title: string; content: string; scope?: 'workspace' | 'session'; sessionId?: string }): Promise<LocalMemoryMutationResult> {
-      return input.sessionId
-        ? invokeSessionInput('memory:remember', input as typeof input & { sessionId: string })
-        : invokeActiveRuntimeHost('memory:remember', input);
-    },
-    approveProposal(proposalId: string): Promise<LocalMemoryMutationResult> {
-      return invokeActiveRuntimeHost('memory:approveProposal', proposalId);
-    },
-    rejectProposal(proposalId: string): Promise<LocalMemoryMutationResult> {
-      return invokeActiveRuntimeHost('memory:rejectProposal', proposalId);
-    },
-    archiveEntry(entryId: string, reason?: string): Promise<LocalMemoryMutationResult> {
-      return invokeActiveRuntimeHost('memory:archiveEntry', entryId, reason);
-    },
-    restoreEntry(entryId: string): Promise<LocalMemoryMutationResult> {
-      return invokeActiveRuntimeHost('memory:restoreEntry', entryId);
     },
     save(content: string): Promise<LocalMemoryState> {
       return invokeActiveRuntimeHost('memory:save', content);
@@ -2598,9 +2548,6 @@ const makaBridge = {
     list(sessionId: string, opts?: { includeDeleted?: boolean }): Promise<ArtifactDescriptor[]> {
       return invokeProjectedSessionRuntimeHost('artifacts:list', sessionId, opts);
     },
-    get(sessionId: string, artifactId: string): Promise<ArtifactDescriptor | null> {
-      return invokeProjectedSessionRuntimeHost('artifacts:get', sessionId, artifactId);
-    },
     readText(sessionId: string, artifactId: string): Promise<ArtifactTextReadResult> {
       return invokeSessionRuntimeHost('artifacts:readText', sessionId, artifactId);
     },
@@ -2663,12 +2610,6 @@ const makaBridge = {
     > {
       return invokeActiveRuntimeHost('skills:installManaged', sourceId);
     },
-    details(skillId: string): Promise<
-      | { ok: true; details: SkillGovernanceDetails }
-      | { ok: false; reason: 'not_found' | 'invalid_id' }
-    > {
-      return invokeActiveRuntimeHost('skills:details', skillId);
-    },
     previewUpdate(skillId: string): Promise<
       | { ok: true; preview: ManagedSkillUpdatePreview }
       | { ok: false; reason: 'not_managed' | 'source_missing' | 'metadata_error' | 'blocked_path' | 'read_failed' }
@@ -2695,12 +2636,6 @@ const makaBridge = {
         }
     > {
       return invokeActiveRuntimeHost('skills:setPinned', skillRef, pinned);
-    },
-    createStarter(): Promise<
-      | { ok: true; created: boolean; skill: SkillEntry; filePath: string }
-      | { ok: false; reason: 'blocked_path' | 'already_exists' | 'write_failed' }
-    > {
-      return invokeActiveRuntimeHost('skills:createStarter');
     },
     delete(idOrRef: string): Promise<
       | { ok: true }

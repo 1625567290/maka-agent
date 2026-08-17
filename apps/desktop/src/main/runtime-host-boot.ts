@@ -1004,7 +1004,6 @@ function registerHostClientIpc(
       (await settingsStore.get()).onboarding.milestones,
     upsertMilestone: (id, status) =>
       settingsStore.upsertOnboardingMilestone(id, status),
-    clearMilestone: (id) => settingsStore.clearOnboardingMilestone(id),
     hasCredential: (connection) =>
       readWithFallback(async () => {
         if (!providerAuthRequiresSecret(connection.providerType)) return true;
