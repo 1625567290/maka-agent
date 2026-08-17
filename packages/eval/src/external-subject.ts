@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { readBoundedRegularFile } from './metering-checkpoint.js';
 import type { JsonObject } from './experiment.js';
 import type { NormalizedUsage } from './result.js';
 import type { SubjectAdapter } from './runner.js';
@@ -235,7 +235,7 @@ export async function recoverExternalMetering(
 > {
   if (!profile || typeof metadata.trialPath !== 'string') return undefined;
   const path = join(metadata.trialPath, 'agent', `${profile}.provider-usage.json`);
-  const bytes = await readFile(path).catch(() => undefined);
+  const bytes = await readBoundedRegularFile(path);
   if (!bytes) return undefined;
   let value: unknown;
   try {
