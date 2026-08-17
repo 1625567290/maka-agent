@@ -363,6 +363,18 @@ describe('local MEMORY.md contract', () => {
 
     const markdown = defaultLocalMemoryMarkdown(nodeSha256, createdAt);
     assert.match(markdown, /id=mem-e060c48e23fe4573/);
+    assert.match(markdown, /createdAt=1700000000000/);
+
+    const exampleContent =
+      '这里写你希望 Maka 记住的长期偏好。默认不会提供给模型；需要在设置里单独开启“模型上下文可读取”。';
+    const fractional = defaultLocalMemoryMarkdown(nodeSha256, -1.7);
+    const { timestamp } = stableLocalMemoryIdMaterial(exampleContent, -1.7);
+    assert.equal(timestamp, 0);
+    assert.match(
+      fractional,
+      new RegExp(`id=${stableLocalMemoryEntryId(exampleContent, timestamp, nodeSha256)}`),
+    );
+    assert.match(fractional, /createdAt=0/);
     const added = appendManualLocalMemoryEntryDraft('# Maka Memory\n', {
       title: 'Theme',
       content,

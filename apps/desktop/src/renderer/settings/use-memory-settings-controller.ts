@@ -432,30 +432,46 @@ export function useMemoryDocumentController(props: MemoryDocumentControllerProps
   }
 
   async function addManualMemoryEntry() {
-    const { timestamp, material } = stableLocalMemoryIdMaterial(newMemoryContent, Date.now());
-    const result = appendManualLocalMemoryEntryDraft(draft, {
-      title: newMemoryTitle,
-      content: newMemoryContent,
-      tags: newMemoryTags.split(','),
-      now: timestamp,
-      sha256: await webSha256Digest(material),
-    });
-    if (!result.ok) {
-      switch (result.reason) {
-        case 'empty_title':
-          toast.error(copy.text.emptyTitle, copy.text.emptyTitleDetail);
-          return;
-        case 'empty_content':
-          toast.error(copy.text.emptyContent, copy.text.emptyContentDetail);
-          return;
-        case 'oversize':
-          toast.error(copy.text.draftOversize, copy.text.oversizeDetail);
-          return;
-      }
+    const title = newMemoryTitle;
+    const content = newMemoryContent;
+    const tags = newMemoryTags.split(',');
+    const currentDraft = draft;
+    const currentHost = host;
+    if (!title.trim()) {
+      toast.error(copy.text.emptyTitle, copy.text.emptyTitleDetail);
+      return;
     }
+    if (!content.trim()) {
+      toast.error(copy.text.emptyContent, copy.text.emptyContentDetail);
+      return;
+    }
+
     try {
       await runMemoryWriteAction('save', async (isCurrent) => {
-        const next = await window.maka.memory.save(result.draft, host);
+        const { timestamp, material } = stableLocalMemoryIdMaterial(content, Date.now());
+        const sha256 = await webSha256Digest(material);
+        if (!isCurrent()) return;
+        const result = appendManualLocalMemoryEntryDraft(currentDraft, {
+          title,
+          content,
+          tags,
+          now: timestamp,
+          sha256,
+        });
+        if (!result.ok) {
+          switch (result.reason) {
+            case 'empty_title':
+              toast.error(copy.text.emptyTitle, copy.text.emptyTitleDetail);
+              return;
+            case 'empty_content':
+              toast.error(copy.text.emptyContent, copy.text.emptyContentDetail);
+              return;
+            case 'oversize':
+              toast.error(copy.text.draftOversize, copy.text.oversizeDetail);
+              return;
+          }
+        }
+        const next = await window.maka.memory.save(result.draft, currentHost);
         if (!isCurrent()) return;
         setState(next);
         setDraft(next.content);
@@ -466,7 +482,7 @@ export function useMemoryDocumentController(props: MemoryDocumentControllerProps
         setNewMemoryTitle('');
         setNewMemoryTags('');
         setNewMemoryContent('');
-        toast.success(copy.text.addedDraft, newMemoryTitle.trim());
+        toast.success(copy.text.addedDraft, title.trim());
       });
     } catch (error) {
       toast.error(copy.text.saveFailed, settingsActionErrorMessage(error, locale));

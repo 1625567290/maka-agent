@@ -250,12 +250,13 @@ export function normalizeLocalMemorySettings(input: unknown): LocalMemorySetting
 export function defaultLocalMemoryMarkdown(sha256: Sha256Digest, now = Date.now()): string {
   const exampleContent =
     '这里写你希望 Maka 记住的长期偏好。默认不会提供给模型；需要在设置里单独开启“模型上下文可读取”。';
-  const exampleId = stableLocalMemoryEntryId(exampleContent, now, sha256);
+  const { timestamp } = stableLocalMemoryIdMaterial(exampleContent, now);
+  const exampleId = stableLocalMemoryEntryId(exampleContent, timestamp, sha256);
   return [
     '# Maka Memory',
     '',
     '## 示例：我的偏好',
-    `<!-- maka-memory: id=${exampleId} origin=manual createdAt=${now} -->`,
+    `<!-- maka-memory: id=${exampleId} origin=manual createdAt=${timestamp} -->`,
     exampleContent,
     '',
   ].join('\n');
