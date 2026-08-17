@@ -22,6 +22,7 @@ import {
 } from '@maka/storage/root-authority';
 import { openInteractiveTaskLedgerStoreForWrite } from '@maka/storage/task-ledger-authority';
 import { removePosixEndpointDirectories } from './fixtures/endpoint-hygiene.js';
+import { requireStartedTurn } from './fixtures/execution-host-suite.js';
 import {
   connectRuntimeHost,
   RuntimeHostOperationError,
@@ -320,13 +321,13 @@ async function verifyConcurrentRevisionAuthority(
       operationError('operation_conflict'),
     );
 
-    const busyTurn = await desktop.startTurn({
-      sessionId: busySessionId,
-      turnId: 'busy-turn',
-      content: { text: FAKE_ASK_USER_QUESTION_PROMPT },
-    });
-    assert.equal(busyTurn.kind, 'started');
-    if (busyTurn.kind !== 'started') return;
+    const busyTurn = requireStartedTurn(
+      await desktop.startTurn({
+        sessionId: busySessionId,
+        turnId: 'busy-turn',
+        content: { text: FAKE_ASK_USER_QUESTION_PROMPT },
+      }),
+    );
     try {
       const busy = await querySession(desktop, busySessionId);
       await assert.rejects(
@@ -340,13 +341,16 @@ async function verifyConcurrentRevisionAuthority(
       );
     } finally {
       // This case only needs a live Turn to prove `session_busy`. Leaving the
-      // parked ask-question continuation for Host SIGTERM is what made
-      // composition close miss its 1s drain under CI load (#2295).
-      const stopped = await desktop.stopTurn({
-        sessionId: busySessionId,
-        turnId: 'busy-turn',
-        runId: busyTurn.turn.runId,
-      });
+      // parked ask-question continuation for Host SIGTERM leaves live
+      // interactions at close, which poisons composition shutdown (#2295).
+      const stopped = await desktop.stopTurn(
+        {
+          sessionId: busySessionId,
+          turnId: 'busy-turn',
+          runId: busyTurn.runId,
+        },
+        PROCESS_TIMEOUT_MS,
+      );
       assert.equal(stopped.status, 'cancelled');
     }
   } finally {
