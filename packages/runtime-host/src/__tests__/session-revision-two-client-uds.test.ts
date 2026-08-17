@@ -328,6 +328,12 @@ async function verifyConcurrentRevisionAuthority(
         content: { text: FAKE_ASK_USER_QUESTION_PROMPT },
       }),
     );
+    // This case only needs a live Turn to prove `session_busy`. Leaving the
+    // parked ask-question continuation for Host SIGTERM leaves live
+    // interactions at close, which poisons composition shutdown (#2295).
+    // Cleanup must still run if the assertion fails, but it must not replace
+    // that failure with a stopTurn error.
+    let assertionError: unknown;
     try {
       const busy = await querySession(desktop, busySessionId);
       await assert.rejects(
@@ -339,10 +345,10 @@ async function verifyConcurrentRevisionAuthority(
         }),
         operationError('session_busy'),
       );
-    } finally {
-      // This case only needs a live Turn to prove `session_busy`. Leaving the
-      // parked ask-question continuation for Host SIGTERM leaves live
-      // interactions at close, which poisons composition shutdown (#2295).
+    } catch (error) {
+      assertionError = error;
+    }
+    try {
       const stopped = await desktop.stopTurn(
         {
           sessionId: busySessionId,
@@ -352,7 +358,16 @@ async function verifyConcurrentRevisionAuthority(
         PROCESS_TIMEOUT_MS,
       );
       assert.equal(stopped.status, 'cancelled');
+    } catch (cleanupError) {
+      if (assertionError !== undefined) {
+        throw new AggregateError(
+          [assertionError, cleanupError],
+          'session_busy check failed and parked-turn cleanup failed',
+        );
+      }
+      throw cleanupError;
     }
+    if (assertionError !== undefined) throw assertionError;
   } finally {
     await Promise.allSettled([desktop.close(), tui.close()]);
   }
