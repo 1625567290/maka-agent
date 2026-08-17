@@ -13,6 +13,7 @@ import type { ScheduledTask } from '@maka/core/scheduled-task';
 import type { ProjectRecord } from '@maka/core/project';
 import type { QuoteRef } from '@maka/core/events';
 import type { SessionSummary } from '@maka/core/session';
+import type { ChatDefaultPermissionMode } from '@maka/core/settings';
 import type { SlashCommandIdForSurface } from '@maka/core/slash-command-catalog';
 import type { UiLocale, UiLocalePreference } from '@maka/core/ui-locale';
 import { collapseSessionRevisions } from '@maka/core/session-revisions';
@@ -84,6 +85,8 @@ import {
   removeStagedCompanionQuote,
   stageCompanionQuote,
 } from './quote-companion-panel-state';
+import { UNRESOLVED_NEW_TASK_DRAFT_KEY } from './new-task-reload-intent';
+import { useNewTaskChoice } from './use-new-task-choice';
 import { sideChatTitleFromPrompt } from './side-chat-command';
 import { parseDesktopSlashCommand } from './desktop-slash-command';
 import {
@@ -197,6 +200,7 @@ import { useComposerMentions } from './use-composer-mentions';
 import { useAppShellSessionWorkspace } from './use-app-shell-session-workspace';
 import { useShellMemoryPill } from './use-shell-memory-pill';
 import { useShellConnections } from './use-shell-connections';
+import { useNewTaskTarget } from './use-new-task-target';
 import { useShellChatModel } from './use-shell-chat-model';
 import { useShellLiveTurn } from './use-shell-live-turn';
 import { useShellLayout } from './use-shell-layout';
@@ -219,6 +223,7 @@ function rebaseWorkspaceFileReferences(
     )
     .map((reference) => ({ ...reference, start: reference.start - offset }));
 }
+
 import { useSettingsModal } from './use-settings-modal';
 import { useSystemUiLocale } from './use-system-ui-locale';
 import {
@@ -231,7 +236,18 @@ import type { SideNavImperativeCollapseHandle } from '@astryxdesign/core/SideNav
 type ComposerImportOwner = {
   sessionId: string | undefined;
   navSection: NavSelection['section'];
+  newTaskDraftKey?: string;
 };
+
+function newTaskDraftKey(target: {
+  profileId: string;
+  hostId: string;
+  projectId: string | null;
+} | undefined): string {
+  return target
+    ? JSON.stringify(['new-task', target.profileId, target.hostId, target.projectId])
+    : UNRESOLVED_NEW_TASK_DRAFT_KEY;
+}
 
 /**
  * Grace period before the committed-history fallback force-settles an
@@ -382,7 +398,10 @@ function AppShellContent({
     epochs.set(sessionId, (epochs.get(sessionId) ?? 0) + 1);
   }, []);
 
-  const attachmentDraftKey = activeId ?? 'new-session';
+  const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
+  const newTask = useNewTaskTarget({ toastApi, uiLocale });
+  const currentNewTaskDraftKey = newTaskDraftKey(newTask.target);
+  const attachmentDraftKey = activeId ?? currentNewTaskDraftKey;
   const {
     pendingAttachments,
     pickAttachments,
@@ -404,6 +423,8 @@ function AppShellContent({
   const [pendingCollaborationModeBySession, setPendingCollaborationModeBySession] = useState<Record<string, boolean>>({});
   const [newChatSwarmModeActive, setNewChatSwarmModeActive] = useState(false);
   const [newChatGraphModeActive, setNewChatGraphModeActive] = useState(false);
+  const [newTaskPermissionChoice, setNewTaskPermissionChoice] =
+    useNewTaskChoice<ChatDefaultPermissionMode>(currentNewTaskDraftKey);
   const [pendingOrchestrationModeBySession, setPendingOrchestrationModeBySession] = useState<Record<string, boolean>>({});
   const [historyLoadPendingSessionId, setHistoryLoadPendingSessionId] = useState<string>();
   const [transcriptTurnIndex, setTranscriptTurnIndex] = useState<{
@@ -443,38 +464,62 @@ function AppShellContent({
     uiLocale,
     sessionId: activeId,
   });
-  const defaultHostConnections = useShellConnections({ toastApi, uiLocale });
+  const newTaskHost = newTask.selectedHost
+    ? { profileId: newTask.selectedHost.profile.id, hostId: newTask.selectedHost.hostId }
+    : undefined;
+  const newTaskConnections = useShellConnections({
+    toastApi,
+    uiLocale,
+    target: { kind: 'new-task', host: newTaskHost },
+  });
+  const defaultHostConnections = useShellConnections({
+    toastApi,
+    uiLocale,
+    target: { kind: 'default' },
+  });
   const sessionHostConnections = useShellConnections({
     toastApi,
     uiLocale,
-    activeSessionId: activeId,
+    target: { kind: 'session', sessionId: activeId },
   });
-  const connections = activeId
-    ? sessionHostConnections.snapshot.connections
-    : defaultHostConnections.snapshot.connections;
-  const defaultConnection = activeId
-    ? sessionHostConnections.snapshot.defaultConnection
-    : defaultHostConnections.snapshot.defaultConnection;
-  const connectionModelChoices = activeId
-    ? sessionHostConnections.snapshot.chatModelChoices
-    : defaultHostConnections.snapshot.chatModelChoices;
+  const startupConnectionSnapshot =
+    initialOnboardingSnapshot ?? onboarding.mountedSnapshotHandoff;
+  const newTaskUsesDefaultHost =
+    newTask.catalog.hosts.length === 0 ||
+    newTask.selectedProfileId === newTask.catalog.defaultProfileId;
+  let newTaskConnectionSnapshot = newTaskConnections.snapshot;
+  if (!newTaskConnections.hasSnapshot && newTaskUsesDefaultHost) {
+    newTaskConnectionSnapshot = defaultHostConnections.hasSnapshot
+      ? defaultHostConnections.snapshot
+      : startupConnectionSnapshot
+        ? {
+            connections: startupConnectionSnapshot.connections,
+            defaultConnection: startupConnectionSnapshot.defaultSlug,
+            chatModelChoices: startupConnectionSnapshot.chatModelChoices,
+          }
+        : defaultHostConnections.snapshot;
+  }
+  const activeConnectionSnapshot = activeId
+    ? sessionHostConnections.snapshot
+    : newTaskConnectionSnapshot;
+  const connections = activeConnectionSnapshot.connections;
+  const defaultConnection = activeConnectionSnapshot.defaultConnection;
+  const connectionModelChoices = activeConnectionSnapshot.chatModelChoices;
   const refreshConnections = activeId
-    ? () => sessionHostConnections.refreshConnections(activeId)
-    : () => defaultHostConnections.refreshConnections();
-  function refreshConnectionProjections(sessionId?: string): Promise<void> {
+    ? sessionHostConnections.refreshConnections
+    : newTaskConnections.refreshConnections;
+  function refreshConnectionProjections(): Promise<void> {
     return Promise.all([
       defaultHostConnections.refreshConnections(),
-      ...(sessionId ? [sessionHostConnections.refreshConnections(sessionId)] : []),
+      newTaskConnections.refreshConnections(),
+      ...(activeId ? [sessionHostConnections.refreshConnections()] : []),
     ]).then(() => undefined);
   }
   function handleConnectionEvent(event: ConnectionEvent): void {
     defaultHostConnections.handleConnectionEvent(event);
+    newTaskConnections.handleConnectionEvent(event);
     if (activeId) sessionHostConnections.handleConnectionEvent(event);
   }
-  useLayoutEffect(() => {
-    if (activeId) void sessionHostConnections.refreshConnections(activeId);
-  }, [activeId]);
-  const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
   const onboardingState = onboarding.snapshot?.state;
   const onboardingSettled = hasSettledInitialOnboarding(onboarding.snapshot?.milestones ?? []);
   const onboardingActivationCandidate = getOnboardingActivationCandidate(
@@ -504,7 +549,6 @@ function AppShellContent({
     userLabel,
     setUserLabel,
     defaultPermissionMode,
-    defaultThinkingLevel,
     setDefaultPermissionMode,
     refreshShellSettings,
   } = useShellAppearance({
@@ -517,6 +561,11 @@ function AppShellContent({
   const desktopConversationCopy = getDesktopConversationCopy(uiLocale);
   const terminalPanelCopy = desktopConversationCopy.terminalPanel;
   const workbarCopy = desktopConversationCopy.workbar;
+  const newTaskPermissionMode =
+    newTaskPermissionChoice ??
+    newTask.selectedHost?.chatDefaults.permissionMode ??
+    'ask';
+  const setNewTaskPermissionMode = setNewTaskPermissionChoice;
   useEffect(() => {
     if (!isAppUpdateInstallFailure(appUpdateStatus)) {
       notifiedInstallErrorRef.current = null;
@@ -792,6 +841,15 @@ function AppShellContent({
   const activeSessionSendOutcome = activeSession
     ? onboarding.snapshot?.sessionSendOutcomes[activeSession.id]
     : undefined;
+  const composerProfileId = activeId
+    ? activeDesktopSession?.profileId
+    : newTask.selectedProfileId;
+  const composerProfileName = activeId
+    ? activeDesktopSession?.profileName
+    : newTask.selectedHost?.profile.name;
+  const modelSettingsOwnsComposerHost =
+    composerProfileId !== undefined &&
+    composerProfileId === newTask.catalog.defaultProfileId;
   const {
     chatModelChoices,
     activeConnection,
@@ -814,10 +872,14 @@ function AppShellContent({
     chatModelChoices: connectionModelChoices,
     sessionSendOutcome: activeSessionSendOutcome,
     defaultConnection,
-    activationCandidate: onboardingActivationCandidate,
+    newTaskKey: currentNewTaskDraftKey,
+    activationCandidate: modelSettingsOwnsComposerHost
+      ? onboardingActivationCandidate
+      : undefined,
     activeSession,
     persistedComposerDefaults,
-    defaultThinkingLevel,
+    usePersistedComposerDefaults: modelSettingsOwnsComposerHost,
+    defaultThinkingLevel: newTask.selectedHost?.chatDefaults.thinkingLevel,
     openSettingsSection,
   });
   const newChatProviderType = newChatModel
@@ -922,7 +984,7 @@ function AppShellContent({
     refreshSessions,
     saveComposerDefaults,
     sessionsRef,
-    setDefaultPermissionMode,
+    setNewTaskPermissionMode,
     setPendingPermissionModeBySession,
     setPendingSessionModelBySession,
     setSessions,
@@ -1257,7 +1319,7 @@ function AppShellContent({
   const activeBoundarySurface = deriveDesktopExecutionBoundarySurface(
     activeId,
     activeExecutionBoundary,
-    activeId ? (activeSessionForView?.permissionMode ?? 'ask') : defaultPermissionMode,
+    activeId ? (activeSessionForView?.permissionMode ?? 'ask') : newTaskPermissionMode,
   );
   const activePermissionMode = activeBoundarySurface.permissionMode;
   const planMode = usePlanModeState(activeSessionForView);
@@ -1336,14 +1398,20 @@ function AppShellContent({
     // refreshSessions() overwrites the seed.
     const next = seedSessions(snapshot.sessions);
     bootstrapSelectionLease.reconcile(collapseSessionRevisions(next));
-    // Seed the default Host while its live connection snapshot catches up.
-    defaultHostConnections.setSnapshot({
+    if (releaseSelectionLease) bootstrapSelectionLease.release();
+  }, [initialOnboardingSnapshot, onboarding.mountedSnapshotHandoff, onboarding.error]);
+  useEffect(() => {
+    const snapshot = initialOnboardingSnapshot ?? onboarding.mountedSnapshotHandoff;
+    if (!snapshot) return;
+    defaultHostConnections.seedSnapshot({
       connections: snapshot.connections,
       defaultConnection: snapshot.defaultSlug,
       chatModelChoices: snapshot.chatModelChoices,
     });
-    if (releaseSelectionLease) bootstrapSelectionLease.release();
-  }, [initialOnboardingSnapshot, onboarding.mountedSnapshotHandoff, onboarding.error]);
+  }, [
+    initialOnboardingSnapshot,
+    onboarding.mountedSnapshotHandoff,
+  ]);
   // PR110c (@kenji review): suppress hero AND the fallback EmptyChatHero
   // while the initial snapshot is in flight. Otherwise sessions.length===0
   // + snapshot===null flashes the prompt-suggestion EmptyChatHero before
@@ -1760,18 +1828,11 @@ function AppShellContent({
     projectCapabilities,
     activeProjectCapabilities,
     localProjects,
-    selectedProjectId,
     currentProjectId,
     currentProject,
-    projectPickerPending,
     projectPickerPendingRef,
     projectPickerRequestRef,
     refreshProjects,
-    addProject,
-    selectProject,
-    selectNoProject,
-    prepareDefaultProject,
-    prepareProject,
     relinkProject,
     renameProject,
     archiveProject,
@@ -1797,30 +1858,72 @@ function AppShellContent({
   // Where a NEW chat starts. Built unconditionally and handed to the composer,
   // which renders it only while no session owns it — the project is fixed once
   // the first message creates one, so there is nothing to pick after that.
+  const selectedNewTaskHost = newTask.catalog.hosts.find(
+    (host) => host.profile.id === newTask.selectedProfileId,
+  );
+  const selectedNewTaskProject = newTask.currentProject?.name ??
+    (newTask.selectedProjectId === null && newTask.selectedHost?.capabilities.selectNoProject
+      ? getConversationCopy(uiLocale).workspace.noProject
+      : undefined);
+  const selectedNewTaskBranch =
+    newTask.selectedHost &&
+      newTask.selectedProjectId === newTask.selectedHost.selectedProjectId
+      ? newTask.selectedHost.branch
+      : undefined;
+  const newTaskCatalogNeedsRetry = Boolean(newTask.error) || newTask.catalog.hosts.some(
+    (host) => host.readiness === 'ready' && host.state === 'error',
+  );
   const workspacePicker: WorkspacePickerModel = {
-    label:
-      currentProject?.name ??
-      (currentProjectId === null && projectCapabilities.selectNoProject
-        ? getConversationCopy(uiLocale).workspace.noProject
-        : undefined),
-    branch: currentProjectId === null ? null : projectInfo?.projectGit.branch,
-    pending: projectPickerPending,
-    projects: projects.filter((project) => project.archivedAt === undefined),
-    selectedProjectId: currentProjectId,
-    ...(projectCapabilities.chooseClientDirectory
-      ? { onAdd: () => void addProject() }
+    label: selectedNewTaskProject ?? selectedNewTaskHost?.profile.name ??
+      (newTask.error ? getShellCopy(uiLocale).projectActions.catalogUnavailable : undefined),
+    ...(selectedNewTaskHost?.profile.kind === 'remote'
+      ? { hostBadge: selectedNewTaskHost.profile.name }
       : {}),
-    onSelectProject: (projectId: string) => {
-      void selectProject(projectId);
-    },
-    ...(projectCapabilities.chooseClientDirectory
-      ? { onRelink: (projectId: string) => void relinkProject(projectId, true) }
-      : {}),
-    ...(projectCapabilities.selectNoProject
-      ? { onSelectNoProject: selectNoProject }
+    branch: newTask.selectedProjectId === null ? null : selectedNewTaskBranch,
+    pending: newTask.pending || (newTask.refreshing && newTask.catalog.hosts.length === 0),
+    selectedGroupId: newTask.selectedProfileId,
+    groups: newTask.catalog.hosts.map((host) => {
+      if (host.readiness !== 'ready' || host.state !== 'available') {
+        return {
+          id: host.profile.id,
+          label: host.profile.name,
+          status: host.readiness === 'ready'
+            ? host.message
+            : getShellCopy(uiLocale).projectActions.runtimeHostReadiness[host.readiness],
+          disabled: true,
+          projects: [],
+        };
+      }
+      const selectedProjectId = host.profile.id === newTask.selectedProfileId
+        ? newTask.selectedProjectId
+        : host.selectedProjectId;
+      return {
+        id: host.profile.id,
+        label: host.profile.name,
+        projects: host.projects.filter((project) => project.archivedAt === undefined),
+        selectedProjectId,
+        onSelectProject: (projectId: string) => newTask.selectProject(host, projectId),
+        ...(host.capabilities.chooseClientDirectory
+          ? {
+              onAdd: () => void newTask.addProject(host),
+              onRelink: (projectId: string) => void newTask.relinkProject(host, projectId),
+            }
+          : {}),
+        ...(host.capabilities.selectNoProject
+          ? { onSelectNoProject: () => newTask.selectNoProject(host) }
+          : {}),
+      };
+    }),
+    ...(newTaskCatalogNeedsRetry
+      ? {
+          retry: {
+            label: getShellCopy(uiLocale).projectActions.retryCatalog,
+            onClick: () => void newTask.refresh().catch(() => undefined),
+          },
+        }
       : {}),
   };
-  const taskReadinessWorkspace = activeSession?.cwd ?? projectInfo?.projectPath;
+  const taskReadinessWorkspace = activeSession?.cwd ?? newTask.projectPath;
   const taskReadinessRequest = {
     ...resolveTaskReadinessModelTarget(activeSession, activeSessionSendOutcome, newChatModel),
     ...(taskReadinessWorkspace ? { cwd: taskReadinessWorkspace } : {}),
@@ -1829,13 +1932,16 @@ function AppShellContent({
     taskReadinessRequest,
     onboarding.snapshot,
     activeId,
+    activeId ? undefined : newTask.target,
   );
   const taskReadinessNotice = deriveTaskReadinessNotice(taskReadiness.snapshot, uiLocale);
   const ignoreTaskReadinessModelTarget =
     activeSession !== undefined && activeSessionSendOutcome?.kind !== 'blocked';
-  const taskSubmissionHardBlocked = isTaskSubmissionHardBlocked(taskReadiness.snapshot, {
-    ignoreModelTarget: ignoreTaskReadinessModelTarget,
-  });
+  const taskSubmissionHardBlocked =
+    (!activeId && !newTask.target) ||
+    isTaskSubmissionHardBlocked(taskReadiness.snapshot, {
+      ignoreModelTarget: ignoreTaskReadinessModelTarget,
+    });
   // The titlebar names the directory the ACTIVE session runs in, so it reads
   // the same projected project state the picker does — `projectInfo` already
   // resolves to the session's own cwd once a session owns it.
@@ -1875,17 +1981,15 @@ function AppShellContent({
     composerRef,
     isShellSurfaceOwnerActive,
     openSessionInChat,
-    newChatProjectId: selectedProjectId,
+    newTaskTarget: newTask.target,
     sessionStartPendingRef,
     refreshOnboarding: onboarding.refresh,
     refreshSessions,
     showModelSetupToast,
     toastApi,
   });
-  // Sidebar Project groups come from the Local catalog. Until new tasks have
-  // an explicit Host selector, expose their actions only when Local is also
-  // the default target; otherwise the default-scoped commands would mutate a
-  // different catalog with the same Project id.
+  // Sidebar Project groups are Local. Their catalog mutations remain on the
+  // default-scoped bridge until Settings receives its own Host selector.
   const projectRowActions: Parameters<typeof SessionListPanel>[0]['projectActions'] =
     projectCapabilities.setLocalDefault
       ? {
@@ -1895,7 +1999,8 @@ function AppShellContent({
           onRestore: restoreProject,
           ...(projectCapabilities.chooseClientDirectory
             ? {
-                onRelink: (projectId: string) => relinkProject(projectId).then(() => undefined),
+                onRelink: (projectId: string) =>
+                  relinkProject(projectId).then(() => undefined),
               }
             : {}),
         }
@@ -1907,12 +2012,13 @@ function AppShellContent({
   const { mentionSkills, searchMentionFiles } = useComposerMentions({
     skills,
     sessionId: activeId,
-    projectPath: projectInfo?.projectPath,
+    projectPath: activeId ? projectInfo?.projectPath : newTask.projectPath,
+    newTaskTarget: activeId ? undefined : newTask.target,
     newSessionModel: newChatModel,
     newSessionCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
     // Refresh only; Desktop Main re-reads the authoritative default before
     // constructing the Runtime Host preview target.
-    newSessionPermissionMode: defaultPermissionMode,
+    newSessionPermissionMode: newTaskPermissionMode,
   });
 
   const { applyE2eFixture } = useStableActions(createAppShellE2eFixtureActions, {
@@ -1961,13 +2067,14 @@ function AppShellContent({
     upsertSessionSummary,
     newChatModel: newChatModel ?? null,
     pendingNewChatThinkingLevel: newChatThinkingLevel ?? null,
+    newChatPermissionMode: newTaskPermissionMode,
     newChatCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
     newChatOrchestrationMode: newChatGraphModeActive
       ? 'graph'
       : newChatSwarmModeActive
         ? 'swarm'
         : 'default',
-    newChatProjectId: selectedProjectId,
+    newTaskTarget: newTask.target,
   });
 
   const { handleTurnFooterAction } = useStableActions(createAppShellTurnActions, {
@@ -2502,6 +2609,9 @@ function AppShellContent({
     return {
       sessionId: activeIdRef.current,
       navSection: navSelectionRef.current.section,
+      ...(activeIdRef.current === undefined
+        ? { newTaskDraftKey: currentNewTaskDraftKey }
+        : {}),
     };
   }
 
@@ -2519,7 +2629,9 @@ function AppShellContent({
    * send pull a user out of 技能 and into 设置 · 模型.
    */
   function isShellSurfaceOwnerActive(owner: ComposerImportOwner): boolean {
-    return navSelectionRef.current.section === owner.navSection && activeIdRef.current === owner.sessionId;
+    return navSelectionRef.current.section === owner.navSection &&
+      activeIdRef.current === owner.sessionId &&
+      (owner.sessionId !== undefined || owner.newTaskDraftKey === currentNewTaskDraftKey);
   }
 
   /** …and the owner was captured on the chat surface. */
@@ -2549,11 +2661,13 @@ function AppShellContent({
   }
 
   async function createSession() {
-    if (await prepareDefaultProject()) openNewTaskSurface();
+    openNewTaskSurface();
   }
 
   async function createSessionInProject(projectId: string) {
-    if (await prepareProject(projectId)) openNewTaskSurface();
+    if (!newTask.localHost) return;
+    newTask.selectProject(newTask.localHost, projectId);
+    openNewTaskSurface();
   }
 
   function openScheduledTaskForm() {
@@ -2621,16 +2735,24 @@ function AppShellContent({
     const copy = modelSetupToastCopy(reason, description, uiLocale);
     toastApi.toast({
       title: copy.title,
-      description: copy.description,
+      description: !modelSettingsOwnsComposerHost && composerProfileName
+        ? shellCopy.configureModelsOnHost(composerProfileName)
+        : copy.description,
       variant: 'error',
       duration: 8000,
-      action: {
-        label: shellCopy.openModelSettings,
-        onClick: () => openSettingsSection('models'),
-      },
+      ...(modelSettingsOwnsComposerHost
+        ? {
+            action: {
+              label: shellCopy.openModelSettings,
+              onClick: () => openSettingsSection('models'),
+            },
+          }
+        : {}),
     });
-    openSettingsSection('models');
+    if (modelSettingsOwnsComposerHost) openSettingsSection('models');
   }
+
+  const canStageComposerContext = activeId !== undefined || newTask.target !== undefined;
 
   const activeMessageLoadError = activeId ? messageLoadErrorBySession[activeId] : undefined;
   let activeTranscriptRange;
@@ -2973,6 +3095,7 @@ function AppShellContent({
                   boundaryUnreadableNotice={boundaryUnreadableNotice}
                   activeInteraction={activeInteraction}
                   activeId={activeId}
+                  newTaskDraftKey={currentNewTaskDraftKey}
                   stopPendingBySession={stopPendingBySession}
                   activeSandboxBoundary={activeSandboxBoundary}
                   respondToSandboxBoundary={respondToSandboxBoundary}
@@ -3012,14 +3135,16 @@ function AppShellContent({
                   onRemoveAttachment={removeAttachment}
                   pendingQuotes={pendingQuotes}
                   onRemoveQuote={removeQuote}
-                  onPasteAsQuote={addQuote}
+                  onPasteAsQuote={canStageComposerContext ? addQuote : undefined}
                   onPickAttachments={
-                    revisionDraft && activeId === revisionDraft.draftSessionId
+                    !canStageComposerContext ||
+                      (revisionDraft && activeId === revisionDraft.draftSessionId)
                       ? undefined
                       : pickAttachments
                   }
                   onAttachFilePaths={
-                    revisionDraft && activeId === revisionDraft.draftSessionId
+                    !canStageComposerContext ||
+                      (revisionDraft && activeId === revisionDraft.draftSessionId)
                       ? undefined
                       : attachFilePaths
                   }
@@ -3040,13 +3165,18 @@ function AppShellContent({
                   newChatProviderType={newChatProviderType}
                   onPickNewChatModel={(input) => {
                     setPendingNewChatModel(input);
-                    saveComposerDefaults({ model: input });
+                    if (modelSettingsOwnsComposerHost) saveComposerDefaults({ model: input });
                   }}
                   newChatThinkingLevels={newChatThinkingLevels}
                   newChatThinkingLevel={newChatThinkingLevel}
                   onNewChatThinkingLevelChange={(level) => setPendingNewChatThinkingLevel(level ?? null)}
-                  onOpenModelSettings={() => openSettingsSection('models')}
+                  onOpenModelSettings={modelSettingsOwnsComposerHost
+                    ? () => openSettingsSection('models')
+                    : undefined}
                   noModelConnection={connections.length === 0}
+                  noModelHint={!modelSettingsOwnsComposerHost && composerProfileName
+                    ? shellCopy.configureModelsOnHost(composerProfileName)
+                    : undefined}
                   sendBlocked={
                     Boolean(workspaceReadinessRecovery) ||
                     sessionHealthNotice?.tone === 'destructive' ||
@@ -3250,8 +3380,10 @@ function AppShellContent({
                   taskReadinessNotice?.action === 'workspace_picker'
                     ? activeSession
                       ? openNewTaskSurface
-                      : projectCapabilities.chooseClientDirectory
-                        ? () => void addProject()
+                      : newTask.selectedHost?.capabilities.chooseClientDirectory
+                        ? () => {
+                            if (newTask.selectedHost) void newTask.addProject(newTask.selectedHost);
+                          }
                         : undefined
                     : taskReadiness.refresh
                 }
