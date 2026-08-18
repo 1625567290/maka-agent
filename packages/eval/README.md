@@ -42,8 +42,11 @@ Single-arm results are not drawn from the same run as the multi-arm cohort. Task
 
 External provider metering does not depend on the subject exiting cleanly. The wrapper's proxy writes
 `agent/<profile>.provider-usage.json` at the start of every request, at its settlement, and at the
-moment the provider states admission, renaming it into place so a reader sees one whole snapshot or
-the previous one. Admission is recorded when it is observed rather than when the request finishes,
+moment the provider states admission, chmodding the temporary file to `0644` and then renaming it
+into place so a reader sees one whole snapshot or the previous one, already readable. Recovery
+reads at most 64 KiB and only from a regular file, and accepts the snapshot only when its HMAC
+matches the host-issued relay result token. A subject that replaces the path with a symlink, a
+large write, or schema-valid forged JSON cannot feed the host. Admission is recorded when it is observed rather than when the request finishes,
 because the model work has been done and billed whether or not this process survives to see the
 stream end. When the result frame is missing — the wrapper was killed rather than asked to stop —
 the executor recovers usage from that file. A run that was cut off after admitted model work is
