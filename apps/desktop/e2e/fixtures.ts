@@ -339,6 +339,7 @@ async function withE2eWindow(
 
 export const test = base.extend<{
   window: Page;
+  onboardingWindow: Page;
   gitReviewWindow: { page: Page; projectRoot: string };
   invocableSkillsWindow: Page;
   linkColorWindow: Page;
@@ -349,6 +350,14 @@ export const test = base.extend<{
   // Seeded: a pre-staged connection clears onboarding so the composer is ready.
   window: async ({}, use) => {
     await withE2eWindow({ seed: true, readinessSelector: COMPOSER_INPUT, locale: 'zh' }, use);
+  },
+  onboardingWindow: async ({}, use) => {
+    await withE2eWindow({
+      seed: false,
+      readinessSelector: '[data-maka-contract="onboarding-card"]',
+      locale: 'zh',
+      showWindow: true,
+    }, use);
   },
   gitReviewWindow: async ({}, use) => {
     await withE2eWindow(
