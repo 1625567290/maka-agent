@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createReadStream } from 'node:fs';
 import { chmod, lstat, mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, join, posix, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { decodeJsonObject, type ExperimentCell, type JsonObject } from './experiment.js';
 import {
@@ -32,6 +32,12 @@ import type { EvalResult } from './result.js';
 
 export type HarnessFramework = 'harbor' | 'pier';
 type RelayTransportStage = 'ready' | 'execute' | 'receive' | 'decision';
+
+const PIER_FRAMEWORK_LOG_MOUNTS = Object.freeze([
+  { directory: 'agent', target: '/logs/agent' },
+  { directory: 'verifier', target: '/logs/verifier' },
+  { directory: 'artifacts', target: '/logs/artifacts' },
+]);
 
 interface RelayTransportFailure {
   readonly stage: RelayTransportStage;
@@ -195,7 +201,12 @@ async function runHarnessAttempt(
           : await waitForTrial(state.child, { phase: 'completion' });
         finalizationEvidence = completed;
         if (!finalizationConfirmed(completed)) throw new Error('Trial did not finalize cleanly');
-        const verification = await readVerification(state, cell, Boolean(options.egressProxy));
+        const verification = await readVerification(
+          state,
+          cell,
+          framework,
+          Boolean(options.egressProxy),
+        );
         verificationConfirmedBeforeCancellation = !hostCancellationObserved;
         return verification;
       },
@@ -381,7 +392,7 @@ async function startTrial(
   const task = decodeTask(framework, options, cell);
   const timeoutMultiplier = positive(cell.budget.timeoutMultiplier, 'budget.timeoutMultiplier');
   const egressPaths = await resolveEgressPaths(options);
-  const environmentConfig = resolveEnvironmentConfig(options, egressPaths);
+  const environmentConfig = resolveEnvironmentConfig(options, egressPaths, framework, trialPath);
   const networkPolicyPath = egressPaths?.networkPolicyPath;
   const executionEnvironment = {
     ...UNATTENDED_EXECUTION_ENVIRONMENT,
@@ -751,6 +762,7 @@ function inspectEgressAudit(audit: Buffer): {
 async function readVerification(
   state: RelayState,
   cell: ExperimentCell,
+  framework: HarnessFramework,
   expectEgressAudit: boolean,
 ): Promise<ExecutorVerification> {
   const result = JSON.parse(await readFile(join(state.trialPath, 'result.json'), 'utf8')) as {
@@ -777,7 +789,7 @@ async function readVerification(
         failureReason: `failed to read egress audit log ${egressAuditPath}${code ? ` (${code})` : ''}`,
         artifacts: [
           { kind: 'trial', framework: cell.executor.kind, trialName: state.trialName },
-          ...(await collectedArtifactInventory(state.trialPath)),
+          ...(await collectedArtifactInventory(state.trialPath, framework)),
           { kind: 'egress-audit-unreadable', path: EGRESS_AUDIT_ARTIFACT_PATH },
         ],
       };
@@ -796,14 +808,20 @@ async function readVerification(
     failureReason: audit.failureReason ?? (score === null ? 'verifier produced no reward' : null),
     artifacts: [
       { kind: 'trial', framework: cell.executor.kind, trialName: state.trialName },
-      ...(await collectedArtifactInventory(state.trialPath)),
+      ...(await collectedArtifactInventory(state.trialPath, framework)),
       ...audit.artifacts,
     ],
   };
 }
 
-async function collectedArtifactInventory(trialPath: string): Promise<JsonObject[]> {
-  const root = join(trialPath, 'artifacts', 'logs', 'artifacts');
+async function collectedArtifactInventory(
+  trialPath: string,
+  framework: HarnessFramework,
+): Promise<JsonObject[]> {
+  const root =
+    framework === 'pier'
+      ? join(trialPath, 'artifacts')
+      : join(trialPath, 'artifacts', 'logs', 'artifacts');
   const files: JsonObject[] = [];
   const targets = [
     join(root, basename(MAKA_RUNTIME_ARTIFACT_PATH)),
@@ -910,6 +928,18 @@ function decodeHarnessOptions(value: JsonObject, framework: HarnessFramework): H
       ? { tasksRootEnv: machinePathEnv(options.tasksRootEnv, 'tasksRootEnv') }
       : {}),
   };
+  if (framework === 'pier') {
+    const reservedTargets = PIER_FRAMEWORK_LOG_MOUNTS.map((mount) => mount.target);
+    const collision = decoded.mounts.find((mount) => {
+      const target = posix.normalize(mount.target);
+      return reservedTargets.some(
+        (reserved) => target === reserved || target.startsWith(`${reserved}/`),
+      );
+    });
+    if (collision) {
+      throw new Error(`Pier mount target ${collision.target} is reserved for framework logs`);
+    }
+  }
   for (const name of [
     decoded.pythonPathEnv,
     decoded.trialsRootEnv,
@@ -980,8 +1010,22 @@ interface ResolvedEgressPaths {
 function resolveEnvironmentConfig(
   options: HarnessOptions,
   egressPaths: ResolvedEgressPaths | undefined,
+  framework: HarnessFramework,
+  trialPath: string,
 ): JsonObject {
-  const base = { ...options.environment, mounts: resolveMounts(options.mounts) };
+  const configuredMounts = resolveMounts(options.mounts);
+  const mounts =
+    framework === 'pier'
+      ? [
+          ...configuredMounts,
+          ...PIER_FRAMEWORK_LOG_MOUNTS.map(({ directory, target }) => ({
+            type: 'bind',
+            source: join(trialPath, directory),
+            target,
+          })),
+        ]
+      : configuredMounts;
+  const base = { ...options.environment, mounts };
   if (!options.egressProxy) return base;
   if (!egressPaths) throw new Error('egress proxy paths are unavailable');
   return { ...base, extra_docker_compose: [egressPaths.composePath] };
