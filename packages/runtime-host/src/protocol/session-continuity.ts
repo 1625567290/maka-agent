@@ -31,7 +31,7 @@ import {
   type SessionTranscriptBootstrap,
 } from './session-transcript.js';
 
-export const SESSION_CONTINUITY_SCHEMA_VERSION = 3 as const;
+export const SESSION_CONTINUITY_SCHEMA_VERSION = 4 as const;
 export const SESSION_CONTINUITY_SNAPSHOT_MAX_BYTES = 56 * 1024;
 // Leave transport headroom for the response envelope and request correlation.
 export const SUBSCRIPTION_OPEN_RESULT_MAX_BYTES = 92 * 1024;
@@ -59,7 +59,6 @@ export interface SessionContinuityIdentity {
   createdAt: number;
   lastUsedAt: number;
   isArchived: boolean;
-  archivedAt?: number;
 }
 
 export interface SessionContinuitySnapshot {
@@ -868,7 +867,6 @@ function decodeSessionContinuityIdentity(value: unknown): SessionContinuityIdent
     'createdAt',
     'lastUsedAt',
     'isArchived',
-    'archivedAt',
   ]);
   assertRequiredKeys(record, 'Session continuity identity', [
     'sessionId',
@@ -888,9 +886,6 @@ function decodeSessionContinuityIdentity(value: unknown): SessionContinuityIdent
     createdAt: requireCount(record.createdAt, 'createdAt'),
     lastUsedAt: requireCount(record.lastUsedAt, 'lastUsedAt'),
     isArchived: record.isArchived,
-    ...(record.archivedAt === undefined
-      ? {}
-      : { archivedAt: requireCount(record.archivedAt, 'archivedAt') }),
   };
 }
 

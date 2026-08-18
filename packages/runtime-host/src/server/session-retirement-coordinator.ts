@@ -49,7 +49,7 @@ type RetirementStores = Pick<
   | 'listPendingSessionRetirementCleanupIds'
   | 'completeSessionRetirementCleanup'
   | 'removeSessionsVersioned'
-  | 'setSessionsLifecycleVersioned'
+  | 'setSessionsArchivedVersioned'
 >;
 
 type RetirementRoot = Pick<RootTurnCoordinator, 'readRootState'>;
@@ -206,12 +206,7 @@ export class HostSessionRetirementCoordinator {
       return await this.#withStableFamily(input.sessionId, async (family) => {
         const target = requireFamilyRecord(family, input.sessionId);
         const archived = input.state === 'archived';
-        if (
-          [...family.records.values()].every(
-            ({ header }) =>
-              header.isArchived === archived && (header.status === 'archived') === archived,
-          )
-        ) {
+        if ([...family.records.values()].every(({ header }) => header.isArchived === archived)) {
           return lifecycleSuccess(
             projectSessionCatalogRecord(await this.#stores.readCatalogRecord(input.sessionId)),
           );
@@ -220,7 +215,7 @@ export class HostSessionRetirementCoordinator {
         if (!archived) {
           let committed = false;
           try {
-            await this.#stores.setSessionsLifecycleVersioned(versionedFamily(family), 'active');
+            await this.#stores.setSessionsArchivedVersioned(versionedFamily(family), false);
             committed = true;
             this.#goals.unarchiveSessions(family.sessionIds);
             await this.#refreshFamily(family);
@@ -240,10 +235,7 @@ export class HostSessionRetirementCoordinator {
           await this.#finalizeWorkspacePatches(family.sessionIds);
           await this.#disposeBackends(family.sessionIds);
           const committable = await this.#refreshFamilyRecords(family);
-          await this.#stores.setSessionsLifecycleVersioned(
-            versionedFamily(committable),
-            'archived',
-          );
+          await this.#stores.setSessionsArchivedVersioned(versionedFamily(committable), true);
           committed = true;
           handles.goal.commit();
           handles.scheduledTasks.commit();

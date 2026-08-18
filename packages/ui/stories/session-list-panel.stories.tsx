@@ -36,12 +36,11 @@ function makeSession(input: {
   llmConnectionSlug?: string;
 }): SessionSummary {
   const status = input.status ?? 'active';
-  const isArchived = input.isArchived ?? status === 'archived';
   return {
     id: input.id,
     name: input.name,
     isFlagged: input.isFlagged ?? false,
-    isArchived,
+    isArchived: input.isArchived ?? false,
     labels: [],
     hasUnread: input.hasUnread ?? false,
     status,
@@ -183,12 +182,6 @@ const statusSessions = [
     status: 'blocked',
     blockedReason: 'auth',
     lastMessageAt: NOW - 20 * 60 * 1000,
-  }),
-  makeSession({
-    id: 'status-archived',
-    name: '归档的旧实验',
-    status: 'archived',
-    lastMessageAt: NOW - 8 * 24 * 60 * 60 * 1000,
   }),
   makeSession({
     id: 'status-aborted',

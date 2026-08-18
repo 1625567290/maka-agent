@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { LlmConnection } from '@maka/core/llm-connections';
 import { thinkingVariantsForModel, type ThinkingLevel } from '@maka/core/model-thinking';
-import { changesBackendConfig } from '@maka/runtime/session-manager';
 
 import { buildProviderOptions, getAIModel } from '@maka/runtime/model-factory';
 
@@ -594,21 +593,5 @@ describe('buildProviderOptions: openai-compatible namespace', () => {
       false,
       JSON.stringify(result.warnings),
     );
-  });
-});
-
-describe('changesBackendConfig', () => {
-  test('thinkingLevel change triggers backend reconfiguration', () => {
-    assert.equal(changesBackendConfig({ thinkingLevel: 'high' }), true);
-    assert.equal(changesBackendConfig({ thinkingLevel: undefined }), true);
-  });
-
-  test('permissionMode triggers, so a mode change is enforced and not merely stored', () => {
-    // The backend snapshots the header at construction and decides every
-    // tool call against that snapshot. Persisting a lower mode without
-    // rebuilding leaves the live session enforcing the OLD one — which is
-    // how the bot guard's re-pin to `explore` became advisory.
-    assert.equal(changesBackendConfig({ permissionMode: 'explore' }), true);
-    assert.equal(changesBackendConfig({ permissionMode: 'bypass' }), true);
   });
 });

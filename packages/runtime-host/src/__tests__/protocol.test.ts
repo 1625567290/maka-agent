@@ -69,7 +69,7 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('keeps the subscription queue Epoch correlated', () => {
-    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 3);
+    assert.equal(SESSION_CONTINUITY_SCHEMA_VERSION, 4);
     const opened = {
       requestId: 'open-1',
       operation: 'subscription.open',

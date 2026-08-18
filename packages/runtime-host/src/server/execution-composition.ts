@@ -1158,7 +1158,7 @@ export async function createExecutionRuntimeHostComposition(
       isSessionDeliverable: async (sessionId) => {
         try {
           const header = await stores.sessionStore.readHeaderSnapshot(sessionId);
-          return !header.isArchived && header.status !== 'archived';
+          return !header.isArchived;
         } catch (error) {
           if (isSessionNotFoundError(error)) return false;
           throw error;

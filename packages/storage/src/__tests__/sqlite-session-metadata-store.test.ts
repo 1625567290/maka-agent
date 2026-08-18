@@ -15,7 +15,7 @@ import {
   MAX_EXECUTION_BOUNDARY_SERIALIZED_BYTES,
   type SandboxBoundarySettlement,
 } from '@maka/core/sandbox-boundary';
-import { type SessionHeader } from '@maka/core/session';
+import type { SessionHeader, SessionHeaderPatch } from '@maka/core/session';
 import type { AgentGraphOperatorProvisionRequest } from '@maka/core/agent-graph-topology';
 import {
   createSqliteSessionMetadataStore,
@@ -23,6 +23,7 @@ import {
   SessionMetadataVersionConflictError,
   SQLITE_SESSION_METADATA_SCHEMA_VERSION,
   StoredSessionMessageIncompatibleError,
+  type SessionConfigurationMetadataUpdate,
   type SqliteSessionMetadataStoreFailpoint,
 } from '../sqlite-session-metadata-store.js';
 import {
@@ -159,7 +160,6 @@ describe('SqliteSessionMetadataStore', () => {
     >();
     const persistedRowsAfterMigration: Array<{
       readonly sessionId: string;
-      readonly status: string;
       readonly payloadStatus: string;
       readonly metadataVersion: number;
     }> = [];
@@ -179,6 +179,16 @@ describe('SqliteSessionMetadataStore', () => {
 
       const legacy = new DatabaseSync(path);
       try {
+        legacy.exec(`
+          ALTER TABLE session_metadata ADD COLUMN status TEXT;
+          ALTER TABLE session_metadata ADD COLUMN status_updated_at INTEGER;
+          UPDATE session_metadata
+          SET
+            status = json_extract(payload_json, '$.status'),
+            status_updated_at = json_extract(payload_json, '$.statusUpdatedAt');
+          CREATE INDEX session_metadata_by_status
+            ON session_metadata(status, status_updated_at DESC, session_id);
+        `);
         legacy
           .prepare(
             `
@@ -277,7 +287,6 @@ describe('SqliteSessionMetadataStore', () => {
               `
               SELECT
                 session_id AS sessionId,
-                status,
                 json_extract(payload_json, '$.status') AS payloadStatus,
                 metadata_version AS metadataVersion
               FROM session_metadata
@@ -286,7 +295,6 @@ describe('SqliteSessionMetadataStore', () => {
             )
             .all() as Array<{
             readonly sessionId: string;
-            readonly status: string;
             readonly payloadStatus: string;
             readonly metadataVersion: number;
           }>
@@ -295,25 +303,21 @@ describe('SqliteSessionMetadataStore', () => {
         assert.deepEqual(rows, [
           {
             sessionId: 'legacy-both',
-            status: 'active',
             payloadStatus: 'active',
             metadataVersion: 18,
           },
           {
             sessionId: 'legacy-done',
-            status: 'active',
             payloadStatus: 'active',
             metadataVersion: 12,
           },
           {
             sessionId: 'legacy-review',
-            status: 'active',
             payloadStatus: 'active',
             metadataVersion: 8,
           },
           {
             sessionId: 'legacy-unchanged',
-            status: 'active',
             payloadStatus: 'active',
             metadataVersion: 13,
           },
@@ -347,7 +351,6 @@ describe('SqliteSessionMetadataStore', () => {
               `
                 SELECT
                   session_id AS sessionId,
-                  status,
                   json_extract(payload_json, '$.status') AS payloadStatus
                 FROM session_metadata
                 ORDER BY session_id
@@ -355,15 +358,13 @@ describe('SqliteSessionMetadataStore', () => {
             )
             .all() as Array<{
             readonly sessionId: string;
-            readonly status: string;
             readonly payloadStatus: string;
           }>
         ).map((row) => ({ ...row }));
         assert.deepEqual(
           rows,
-          persistedRowsAfterMigration.map(({ sessionId, status, payloadStatus }) => ({
+          persistedRowsAfterMigration.map(({ sessionId, payloadStatus }) => ({
             sessionId,
-            status,
             payloadStatus,
           })),
         );
@@ -372,6 +373,349 @@ describe('SqliteSessionMetadataStore', () => {
       }
     } finally {
       await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('migrates v26 archive signals onto one canonical archive field exactly once', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-session-archive-v26-'));
+    const path = join(root, 'state.sqlite');
+    const changedSessionIds = [
+      'json-only',
+      'sql-only',
+      'sql-status-only',
+      'json-status',
+      'archived-at-only',
+      'missing-json-false',
+    ] as const;
+    try {
+      const setup = createSqliteSessionMetadataStore(path, { now: () => 10 });
+      await setup.create(fullHeader({ id: 'active-unchanged' }));
+      await setup.create(fullHeader({ id: 'missing-json-false' }));
+      await setup.create(fullHeader({ id: 'canonical-archived', isArchived: true }));
+      await setup.create(
+        fullHeader({
+          id: 'json-only',
+          status: 'blocked',
+          blockedReason: 'tool_failed',
+          statusUpdatedAt: 101,
+        }),
+      );
+      await setup.create(
+        fullHeader({
+          id: 'sql-only',
+          status: 'blocked',
+          blockedReason: 'tool_failed',
+          statusUpdatedAt: 151,
+        }),
+      );
+      await setup.create(
+        fullHeader({
+          id: 'sql-status-only',
+          status: 'blocked',
+          blockedReason: 'permission_required',
+          statusUpdatedAt: 202,
+        }),
+      );
+      await setup.create(
+        fullHeader({
+          id: 'json-status',
+          status: 'blocked',
+          blockedReason: 'auth',
+          statusUpdatedAt: 303,
+        }),
+      );
+      await setup.create(
+        fullHeader({
+          id: 'archived-at-only',
+          status: 'blocked',
+          blockedReason: 'unknown',
+          statusUpdatedAt: 404,
+        }),
+      );
+      setup.close();
+
+      const legacy = new DatabaseSync(path);
+      try {
+        legacy.exec(`
+          ALTER TABLE session_metadata ADD COLUMN status TEXT;
+          ALTER TABLE session_metadata ADD COLUMN status_updated_at INTEGER;
+          UPDATE session_metadata
+          SET
+            status = json_extract(payload_json, '$.status'),
+            status_updated_at = json_extract(payload_json, '$.statusUpdatedAt');
+          CREATE INDEX session_metadata_by_status
+            ON session_metadata(status, status_updated_at DESC, session_id);
+          UPDATE session_metadata_schema SET version = 26 WHERE scope = 'session_metadata';
+        `);
+        legacy
+          .prepare(
+            `UPDATE session_metadata
+             SET payload_json = json_set(payload_json, '$.isArchived', json('true'))
+             WHERE session_id = 'json-only'`,
+          )
+          .run();
+        legacy
+          .prepare(`UPDATE session_metadata SET is_archived = 1 WHERE session_id = 'sql-only'`)
+          .run();
+        legacy
+          .prepare(
+            `UPDATE session_metadata SET status = 'archived' WHERE session_id = 'sql-status-only'`,
+          )
+          .run();
+        legacy
+          .prepare(
+            `UPDATE session_metadata
+             SET payload_json = json_set(payload_json, '$.status', 'archived')
+             WHERE session_id = 'json-status'`,
+          )
+          .run();
+        legacy
+          .prepare(
+            `UPDATE session_metadata
+             SET payload_json = json_set(payload_json, '$.archivedAt', 505)
+             WHERE session_id = 'archived-at-only'`,
+          )
+          .run();
+        legacy
+          .prepare(
+            `UPDATE session_metadata
+             SET payload_json = json_remove(payload_json, '$.isArchived')
+             WHERE session_id = 'missing-json-false'`,
+          )
+          .run();
+      } finally {
+        legacy.close();
+      }
+
+      const migrationStartedAt = Date.now();
+      const migrated = createSqliteSessionMetadataStore(path, { now: () => 20 });
+      const snapshots = new Map<string, { metadataVersion: number; committedAt: number }>();
+      try {
+        assert.equal(migrated.schemaVersion(), SQLITE_SESSION_METADATA_SCHEMA_VERSION);
+        for (const sessionId of ['active-unchanged', 'canonical-archived']) {
+          const record = await migrated.read(sessionId);
+          assert.equal(record.metadataVersion, 1);
+          assert.equal(record.committedAt, 10);
+          snapshots.set(sessionId, {
+            metadataVersion: record.metadataVersion,
+            committedAt: record.committedAt,
+          });
+        }
+        assert.equal((await migrated.read('active-unchanged')).header.isArchived, false);
+        assert.equal((await migrated.read('canonical-archived')).header.isArchived, true);
+
+        for (const sessionId of changedSessionIds) {
+          const record = await migrated.read(sessionId);
+          assert.equal(record.header.isArchived, sessionId !== 'missing-json-false');
+          assert.equal(record.metadataVersion, 2);
+          assert.ok(record.committedAt >= migrationStartedAt);
+          assert.equal('archivedAt' in record.header, false);
+          snapshots.set(sessionId, {
+            metadataVersion: record.metadataVersion,
+            committedAt: record.committedAt,
+          });
+        }
+
+        const jsonStatus = await migrated.read('json-status');
+        assert.equal(jsonStatus.header.status, 'active');
+        assert.equal(jsonStatus.header.blockedReason, undefined);
+        assert.equal(jsonStatus.header.statusUpdatedAt, undefined);
+
+        for (const [sessionId, blockedReason, statusUpdatedAt] of [
+          ['json-only', 'tool_failed', 101],
+          ['sql-only', 'tool_failed', 151],
+          ['sql-status-only', 'permission_required', 202],
+          ['archived-at-only', 'unknown', 404],
+        ] as const) {
+          const record = await migrated.read(sessionId);
+          assert.equal(record.header.status, 'blocked');
+          assert.equal(record.header.blockedReason, blockedReason);
+          assert.equal(record.header.statusUpdatedAt, statusUpdatedAt);
+        }
+      } finally {
+        migrated.close();
+      }
+
+      const persisted = new DatabaseSync(path);
+      try {
+        const columns = persisted
+          .prepare('PRAGMA table_info(session_metadata)')
+          .all() as unknown as Array<{ readonly name: string }>;
+        assert.equal(
+          columns.some(({ name }) => name === 'status'),
+          false,
+        );
+        assert.equal(
+          columns.some(({ name }) => name === 'status_updated_at'),
+          false,
+        );
+        assert.equal(
+          persisted
+            .prepare(
+              "SELECT 1 AS found FROM sqlite_schema WHERE type = 'index' AND name = 'session_metadata_by_status'",
+            )
+            .get(),
+          undefined,
+        );
+        const archiveRows = persisted
+          .prepare(
+            `SELECT
+               session_id AS sessionId,
+               is_archived AS sqlArchived,
+               json_type(payload_json, '$.isArchived') AS jsonArchivedType,
+               json_type(payload_json, '$.archivedAt') AS archivedAtType
+             FROM session_metadata
+             ORDER BY session_id`,
+          )
+          .all() as unknown as Array<{
+          readonly sessionId: string;
+          readonly sqlArchived: number;
+          readonly jsonArchivedType: string;
+          readonly archivedAtType: string | null;
+        }>;
+        for (const row of archiveRows) {
+          const expectedArchived =
+            row.sessionId !== 'active-unchanged' && row.sessionId !== 'missing-json-false';
+          assert.equal(row.sqlArchived, expectedArchived ? 1 : 0);
+          assert.equal(row.jsonArchivedType, expectedArchived ? 'true' : 'false');
+          assert.equal(row.archivedAtType, null);
+        }
+      } finally {
+        persisted.close();
+      }
+
+      const reopened = createSqliteSessionMetadataStore(path, { now: () => 30 });
+      try {
+        for (const [sessionId, snapshot] of snapshots) {
+          const record = await reopened.read(sessionId);
+          assert.deepEqual(
+            { metadataVersion: record.metadataVersion, committedAt: record.committedAt },
+            snapshot,
+          );
+        }
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('rejects a session metadata schema newer than the supported version', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'maka-session-schema-fence-'));
+    const path = join(root, 'state.sqlite');
+    const newerSchemaVersion = SQLITE_SESSION_METADATA_SCHEMA_VERSION + 1;
+    try {
+      const setup = createSqliteSessionMetadataStore(path);
+      setup.close();
+      const newer = new DatabaseSync(path);
+      try {
+        newer
+          .prepare(
+            `UPDATE session_metadata_schema SET version = ? WHERE scope = 'session_metadata'`,
+          )
+          .run(newerSchemaVersion);
+      } finally {
+        newer.close();
+      }
+      assert.throws(
+        () => createSqliteSessionMetadataStore(path),
+        new RegExp(
+          `schema ${newerSchemaVersion} is newer than supported version ${SQLITE_SESSION_METADATA_SCHEMA_VERSION}`,
+          'u',
+        ),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test('changes archive state without overwriting execution status', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:', { now: () => 100 });
+    try {
+      const header = fullHeader({
+        status: 'blocked',
+        blockedReason: 'tool_failed',
+        statusUpdatedAt: 20,
+      });
+      await store.create(header);
+
+      const [archived] = await store.setArchivedVersioned(
+        [{ sessionId: header.id, expectedVersion: 1 }],
+        true,
+      );
+
+      assert.equal(archived?.header.isArchived, true);
+      assert.equal(archived?.header.status, 'blocked');
+      assert.equal(archived?.header.blockedReason, 'tool_failed');
+      assert.equal(archived?.header.statusUpdatedAt, 20);
+      assert.equal('archivedAt' in (archived?.header ?? {}), false);
+
+      const [restored] = await store.setArchivedVersioned(
+        [{ sessionId: header.id, expectedVersion: 2 }],
+        false,
+      );
+
+      assert.equal(restored?.header.isArchived, false);
+      assert.equal(restored?.header.status, 'blocked');
+      assert.equal(restored?.header.blockedReason, 'tool_failed');
+      assert.equal(restored?.header.statusUpdatedAt, 20);
+
+      const unchanged = await store.setArchivedVersioned(
+        [{ sessionId: header.id, expectedVersion: 3 }],
+        false,
+      );
+      assert.equal(unchanged[0]?.metadataVersion, 3);
+      assert.equal(unchanged[0]?.committedAt, restored?.committedAt);
+    } finally {
+      store.close();
+    }
+  });
+
+  test('rejects Session lifecycle fields through generic metadata writes', async () => {
+    const store = createSqliteSessionMetadataStore(':memory:');
+    try {
+      const header = fullHeader();
+      await store.create(header);
+
+      await assert.rejects(
+        store.update(header.id, { isArchived: true } as unknown as SessionHeaderPatch),
+        /Session archive state requires the dedicated lifecycle writer/u,
+      );
+      await assert.rejects(
+        store.update(header.id, { archivedAt: 123 } as unknown as SessionHeaderPatch),
+        /Invalid session header/u,
+      );
+      await assert.rejects(
+        store.updateSessionConfiguration(header.id, {
+          expectedVersion: 1,
+          configuration: {
+            backend: header.backend,
+            llmConnectionSlug: header.llmConnectionSlug,
+            connectionLocked: header.connectionLocked,
+            model: header.model,
+            thinkingLevel: header.thinkingLevel,
+            permissionMode: header.permissionMode,
+            collaborationMode: header.collaborationMode ?? 'agent',
+            orchestrationMode: header.orchestrationMode ?? 'default',
+            labels: header.labels,
+            isArchived: true,
+          } as unknown as SessionConfigurationMetadataUpdate['configuration'],
+          lifecycle: { kind: 'preserve' },
+        }),
+        /Session archive state requires the dedicated lifecycle writer/u,
+      );
+      await assert.rejects(
+        store.create({ ...fullHeader({ id: 'polluted' }), archivedAt: 123 } as SessionHeader),
+        /Invalid session header/u,
+      );
+
+      const current = await store.read(header.id);
+      assert.equal(current.metadataVersion, 1);
+      assert.equal(current.header.isArchived, false);
+      assert.equal('archivedAt' in current.header, false);
+    } finally {
+      store.close();
     }
   });
 
@@ -387,7 +731,6 @@ describe('SqliteSessionMetadataStore', () => {
       revisionIndex: undefined,
       revisionState: undefined,
       isArchived: false,
-      archivedAt: undefined,
       status: 'active',
       blockedReason: undefined,
     });
@@ -401,7 +744,6 @@ describe('SqliteSessionMetadataStore', () => {
       revisionIndex: 2,
       revisionState: 'committed',
       isArchived: false,
-      archivedAt: undefined,
       status: 'active',
       blockedReason: undefined,
     });
@@ -410,12 +752,12 @@ describe('SqliteSessionMetadataStore', () => {
       await store.create(revision);
 
       await assert.rejects(
-        store.setLifecycleVersioned(
+        store.setArchivedVersioned(
           [
             { sessionId: root.id, expectedVersion: 1 },
             { sessionId: revision.id, expectedVersion: 2 },
           ],
-          'archived',
+          true,
         ),
         SessionMetadataVersionConflictError,
       );
@@ -425,22 +767,23 @@ describe('SqliteSessionMetadataStore', () => {
         assert.equal(current.header.isArchived, false);
       }
 
-      const archived = await store.setLifecycleVersioned(
+      const archived = await store.setArchivedVersioned(
         [
           { sessionId: root.id, expectedVersion: 1 },
           { sessionId: revision.id, expectedVersion: 1 },
         ],
-        'archived',
+        true,
       );
       assert.deepEqual(
         archived.map((record) => ({
           id: record.header.id,
           revision: record.metadataVersion,
+          isArchived: record.header.isArchived,
           status: record.header.status,
         })),
         [
-          { id: revision.id, revision: 2, status: 'archived' },
-          { id: root.id, revision: 2, status: 'archived' },
+          { id: revision.id, revision: 2, isArchived: true, status: 'active' },
+          { id: root.id, revision: 2, isArchived: true, status: 'active' },
         ],
       );
 
@@ -1237,8 +1580,7 @@ describe('SqliteSessionMetadataStore', () => {
           id: 'archived',
           name: 'Archived',
           isArchived: true,
-          archivedAt: 50,
-          status: 'archived',
+          status: 'active',
           blockedReason: undefined,
           lastMessageAt: 50,
           labels: ['shared'],

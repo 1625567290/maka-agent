@@ -13,7 +13,7 @@ import {
   isSessionStartModeLabel as isExecutionSemanticLabel,
   sessionStartModeSpec,
 } from '@maka/core/explore-agent';
-import type { SessionHeader } from '@maka/core/session';
+import type { SessionHeader, SessionHeaderPatch } from '@maka/core/session';
 import {
   isSessionNotFoundError,
   SessionMetadataConflictError,
@@ -388,7 +388,7 @@ export class HostSessionCatalogCoordinator {
                 input.expectedRevision,
                 input.patch.labels,
               );
-        const patch: Partial<SessionHeader> = {
+        const patch: SessionHeaderPatch = {
           ...(input.patch.name === undefined ? {} : normalizeSessionNamePatch(input.patch.name)),
           ...(labels === undefined ? {} : { labels }),
           ...(input.patch.isFlagged === undefined ? {} : { isFlagged: input.patch.isFlagged }),
@@ -427,7 +427,7 @@ export class HostSessionCatalogCoordinator {
         if (current.revision !== input.expectedRevision) {
           return configurationSuccess(revisionConflict(input.expectedRevision, current.revision));
         }
-        if (current.header.isArchived || current.header.status === 'archived') {
+        if (current.header.isArchived) {
           return configurationFailure(
             'operation_conflict',
             'Archived Session configuration cannot be changed',

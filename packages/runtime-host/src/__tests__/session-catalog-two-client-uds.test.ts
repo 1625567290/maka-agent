@@ -462,6 +462,7 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
       });
       const retirementIterator = retirementSubscription[Symbol.asyncIterator]();
       const beforeArchive = await querySession(desktop, created.id);
+      assert.equal(beforeArchive.status, 'active');
       const heartbeat = await desktop.request('scheduled-task.mutate', {
         kind: 'create',
         input: {
@@ -494,9 +495,11 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         }),
       );
       assert.equal(archived.isArchived, true);
+      assert.equal(archived.status, beforeArchive.status);
       assert.equal((await querySession(tui, created.id)).isArchived, true);
       const archivedContinuity = await nextProjection(retirementIterator);
       assert.equal(archivedContinuity.snapshot.session.isArchived, true);
+      assert.equal(archivedContinuity.snapshot.session.status, beforeArchive.status);
       assert.ok(archived.revision > beforeArchive.revision);
 
       const restored = requireSessionProjection(
@@ -506,8 +509,10 @@ test('two Clients share stable Session creation, CAS configuration, and catalog 
         }),
       );
       assert.equal(restored.isArchived, false);
+      assert.equal(restored.status, beforeArchive.status);
       const restoredContinuity = await nextProjection(retirementIterator);
       assert.equal(restoredContinuity.snapshot.session.isArchived, false);
+      assert.equal(restoredContinuity.snapshot.session.status, beforeArchive.status);
 
       assert.deepEqual(
         await desktop.request('session.remove', {

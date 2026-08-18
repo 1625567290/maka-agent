@@ -9,7 +9,6 @@ describe('session status contract', () => {
       'running',
       'waiting_for_user',
       'blocked',
-      'archived',
       'aborted',
     ]);
     for (const status of SESSION_STATUSES) {
@@ -17,5 +16,6 @@ describe('session status contract', () => {
     }
     assert.equal(isSessionStatus('review'), false);
     assert.equal(isSessionStatus('done'), false);
+    assert.equal(isSessionStatus('archived'), false);
   });
 });
