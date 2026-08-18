@@ -128,7 +128,7 @@ export async function connectOwnedRuntimeHostWithDependencies(
       },
     );
     if (result.kind !== 'connected') {
-      settleOwnedLaunch(launch);
+      releaseOwnedLaunch(launch);
       return result;
     }
     const host = await launch?.spawned.catch(() => undefined);
@@ -151,16 +151,20 @@ export async function connectOwnedRuntimeHostWithDependencies(
     return { kind: 'connected', connection: ownedConnection, host };
   } catch {
     await connection?.close().catch(() => undefined);
-    settleOwnedLaunch(launch);
+    releaseOwnedLaunch(launch);
     return { kind: 'failed', reason: 'host_unresponsive' };
   }
 }
 
-function settleOwnedLaunch(
+function releaseOwnedLaunch(
   launch: ReturnType<typeof launchOwnedRuntimeHostCandidate> | undefined,
 ): void {
   if (!launch) return;
-  void launch.spawned.then((host) => host.settle(1_000)).catch(() => undefined);
+  void launch.spawned
+    .then((host) => {
+      host.releaseToEnvironment();
+    })
+    .catch(() => undefined);
 }
 
 export async function connectOrSpawnRuntimeHostWithDependencies(
