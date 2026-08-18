@@ -143,11 +143,17 @@ export async function connectOwnedRuntimeHostWithDependencies(
       return { kind: 'failed', reason: 'existing_host' };
     }
     return { kind: 'connected', connection: ownedConnection, host };
-  } catch {
+  } catch (error) {
     await connection?.close().catch(() => undefined);
     const host = await launch?.spawned.catch(() => undefined);
     await host?.settle(1_000);
-    return { kind: 'failed', reason: 'host_unresponsive' };
+    const message = error instanceof Error ? error.message : '';
+    return {
+      kind: 'failed',
+      reason: message.includes('election deadline elapsed')
+        ? 'startup_timeout'
+        : 'host_unresponsive',
+    };
   }
 }
 

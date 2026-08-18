@@ -47,6 +47,32 @@ test('owned connection keeps a fresh Host alive for its full election window', a
   }
 });
 
+test('owned connect names a missed election instead of a bare failed kind', async () => {
+  const rootPath = await mkdtemp(join(tmpdir(), 'maka-owned-startup-timeout-'));
+  const result = await connectOwnedRuntimeHostWithDependencies(
+    {
+      rootPath,
+      surface: 'run',
+      protocol: {
+        min: RUNTIME_HOST_PROTOCOL_VERSION,
+        max: RUNTIME_HOST_PROTOCOL_VERSION,
+      },
+      compositionId: INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
+      electionDeadlineMs: 1,
+    },
+    {
+      launchCandidate: () => ({
+        spawned: new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Runtime Host election deadline elapsed')), 20);
+        }),
+      }),
+    },
+  );
+
+  assert.equal(result.kind, 'failed');
+  assert.equal(ownedConnectFailure(result), 'failed:startup_timeout');
+});
+
 test('owned Host exits promptly after its first connection closes', async () => {
   const rootPath = await mkdtemp(join(tmpdir(), 'maka-owned-first-disconnect-'));
   const result = await connectOwnedRuntimeHostWithDependencies(
@@ -58,12 +84,15 @@ test('owned Host exits promptly after its first connection closes', async () => 
         max: RUNTIME_HOST_PROTOCOL_VERSION,
       },
       compositionId: INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
-      electionDeadlineMs: 2_000,
+      // Connection is not the promptness claim. Two seconds is enough on an
+      // idle machine and too little under a full CI suite, where spawn plus
+      // handshake routinely miss the window and surface as `failed`.
+      electionDeadlineMs: 8_000,
     },
     { launchCandidate: launchOwnedRuntimeHostCandidate },
   );
 
-  assert.equal(result.kind, 'connected');
+  assert.equal(result.kind, 'connected', ownedConnectFailure(result));
   if (result.kind !== 'connected') return;
   await result.connection.close();
   assert.equal(await result.host.settle(500), true);
@@ -138,3 +167,12 @@ test('pre-cancelled hosted execution does not start a Runtime Host', async () =>
   assert.equal(result.kind, 'indeterminate');
   assert.deepEqual(await readdir(rootPath), []);
 });
+
+function ownedConnectFailure(
+  result: Awaited<ReturnType<typeof connectOwnedRuntimeHostWithDependencies>>,
+): string {
+  if (result.kind === 'connected') return 'connected';
+  if (result.kind === 'failed') return `failed:${result.reason}`;
+  if (result.kind === 'upgrade_required') return 'upgrade_required';
+  return `incompatible:${result.handshake.replacement}`;
+}
