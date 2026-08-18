@@ -95,7 +95,7 @@ test('owned connect returns a missed election without waiting for a late candida
 
     assert.ok(launched >= 1, 'launchCandidate must run before the election ends');
     assert.equal(result.kind, 'failed');
-    assert.equal(ownedConnectFailure(result), 'failed:startup_timeout');
+    assert.equal(connectFailure(result), 'failed:startup_timeout');
     assert.equal(spawnedSettled, false);
 
     resolveSpawned({
@@ -156,7 +156,7 @@ test('a late owned candidate stays alive after another client adopts it', {
     );
 
     assert.equal(missed.kind, 'failed');
-    assert.equal(ownedConnectFailure(missed), 'failed:startup_timeout');
+    assert.equal(connectFailure(missed), 'failed:startup_timeout');
 
     const host = await waitForDefined(
       () => launchedHost,
@@ -184,12 +184,26 @@ test('a late owned candidate stays alive after another client adopts it', {
     );
 
     try {
-      assert.equal(adopted.kind, 'connected', adoptedConnectFailure(adopted));
+      assert.equal(adopted.kind, 'connected', connectFailure(adopted));
       if (adopted.kind !== 'connected') return;
 
+      let released = 0;
+      let settled = 0;
       lateDelivered = true;
-      resolveLate(host);
+      resolveLate({
+        ...host,
+        releaseToEnvironment() {
+          released += 1;
+          host.releaseToEnvironment();
+        },
+        async settle(timeoutMs) {
+          settled += 1;
+          return host.settle(timeoutMs);
+        },
+      });
       await lateSpawned;
+      assert.equal(released, 1);
+      assert.equal(settled, 0);
 
       const diagnostics = await adopted.connection.queryHostDiagnostics();
       assert.equal(diagnostics.pid, host.pid);
@@ -222,7 +236,7 @@ test('owned Host exits promptly after its first connection closes', async () => 
     { launchCandidate: launchOwnedRuntimeHostCandidate },
   );
 
-  assert.equal(result.kind, 'connected', ownedConnectFailure(result));
+  assert.equal(result.kind, 'connected', connectFailure(result));
   if (result.kind !== 'connected') return;
   await result.connection.close();
   assert.equal(await result.host.settle(500), true);
@@ -298,17 +312,10 @@ test('pre-cancelled hosted execution does not start a Runtime Host', async () =>
   assert.deepEqual(await readdir(rootPath), []);
 });
 
-function ownedConnectFailure(
-  result: Awaited<ReturnType<typeof connectOwnedRuntimeHostWithDependencies>>,
-): string {
-  if (result.kind === 'connected') return 'connected';
-  if (result.kind === 'failed') return `failed:${result.reason}`;
-  if (result.kind === 'upgrade_required') return 'upgrade_required';
-  return `incompatible:${result.handshake.replacement}`;
-}
-
-function adoptedConnectFailure(
-  result: Awaited<ReturnType<typeof connectOrSpawnRuntimeHostWithDependencies>>,
+function connectFailure(
+  result:
+    | Awaited<ReturnType<typeof connectOwnedRuntimeHostWithDependencies>>
+    | Awaited<ReturnType<typeof connectOrSpawnRuntimeHostWithDependencies>>,
 ): string {
   if (result.kind === 'connected') return 'connected';
   if (result.kind === 'failed') return `failed:${result.reason}`;
