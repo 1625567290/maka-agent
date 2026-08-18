@@ -47,30 +47,46 @@ test('owned connection keeps a fresh Host alive for its full election window', a
   }
 });
 
-test('owned connect preserves a missed election when the candidate reports late', async () => {
+test('owned connect returns a missed election without waiting for a late candidate', async () => {
   const rootPath = await mkdtemp(join(tmpdir(), 'maka-owned-startup-timeout-'));
-  const result = await connectOwnedRuntimeHostWithDependencies(
-    {
-      rootPath,
-      surface: 'run',
-      protocol: {
-        min: RUNTIME_HOST_PROTOCOL_VERSION,
-        max: RUNTIME_HOST_PROTOCOL_VERSION,
+  let launched = 0;
+  let abandon: ((error: Error) => void) | undefined;
+  const started = performance.now();
+  try {
+    const result = await connectOwnedRuntimeHostWithDependencies(
+      {
+        rootPath,
+        surface: 'run',
+        protocol: {
+          min: RUNTIME_HOST_PROTOCOL_VERSION,
+          max: RUNTIME_HOST_PROTOCOL_VERSION,
+        },
+        compositionId: INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
+        electionDeadlineMs: 80,
       },
-      compositionId: INTERACTIVE_RUNTIME_HOST_COMPOSITION_ID,
-      electionDeadlineMs: 1,
-    },
-    {
-      launchCandidate: () => ({
-        spawned: new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('late candidate report')), 20);
-        }),
-      }),
-    },
-  );
+      {
+        launchCandidate: () => {
+          launched += 1;
+          return {
+            spawned: new Promise((_, reject) => {
+              abandon = reject;
+            }),
+          };
+        },
+      },
+    );
+    const elapsed = performance.now() - started;
 
-  assert.equal(result.kind, 'failed');
-  assert.equal(ownedConnectFailure(result), 'failed:startup_timeout');
+    assert.ok(launched >= 1, 'launchCandidate must run before the election ends');
+    assert.equal(result.kind, 'failed');
+    assert.equal(ownedConnectFailure(result), 'failed:startup_timeout');
+    assert.ok(
+      elapsed < 400,
+      `missed election waited ${Math.round(elapsed)}ms on a never-settling candidate`,
+    );
+  } finally {
+    abandon?.(new Error('abandoned after election'));
+  }
 });
 
 test('owned Host exits promptly after its first connection closes', async () => {
