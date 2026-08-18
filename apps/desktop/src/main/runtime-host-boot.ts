@@ -6,7 +6,7 @@ import { type ConnectionEvent } from '@maka/core/connections';
 import type { UsageRange } from '@maka/core/settings';
 import { type SessionChangedEvent, type SessionChangedReason } from '@maka/core/session';
 import { isBotDeliveryProvider } from '@maka/core/bot-chat-settings';
-import { resolveSystemUiLocale, resolveUiLocale } from '@maka/core/ui-locale';
+import { resolveSystemUiLocale } from '@maka/core/ui-locale';
 import {
   PROVIDER_DEFAULTS,
   providerAuthRequiresSecret,
@@ -42,6 +42,8 @@ import { resolveBuildInfo } from "./build-info.js";
 import { computerUseServiceHealth } from "./computer-use-host.js";
 import { registerDesktopDiagnosticsIpc } from "./desktop-diagnostics-ipc-main.js";
 import { assembleDesktopNativeCapabilities } from "./desktop-native-capability-assembly.js";
+import { clientSettingsConfirmation } from "./client-settings-confirmation-copy.js";
+import { createDesktopLocaleAuthority } from "./desktop-locale-authority.js";
 import { buildRiveWorkflowTool } from "./rive-workflow-tool.js";
 import { installDesktopShellPresentation } from "./desktop-shell-presentation.js";
 import {
@@ -76,6 +78,7 @@ import {
 import { resolveProjectContextRoot } from "./project-context-root.js";
 import { resolveDefaultPermissionMode } from "./permission-mode-default.js";
 import { createProjectManagementService } from "./project-management-service.js";
+import { projectPickerTitle } from "./project-picker-copy.js";
 import type { ProjectManagementService } from "./project-management-service.js";
 import {
   createProjectRootController,
@@ -104,7 +107,7 @@ import {
   startRuntimeHostDesktopManager,
   type RuntimeHostDesktopManager,
 } from "./runtime-host-desktop-manager.js";
-import { runtimeHostUpgradePrompts } from "./runtime-host-upgrade-dialog.js";
+import { createRuntimeHostUpgradePrompts } from "./runtime-host-upgrade-dialog.js";
 import { registerRuntimeHostMemoryIpc } from "./runtime-host-memory-ipc-main.js";
 import {
   createDesktopRuntimeHostProfileService,
@@ -197,6 +200,10 @@ if (!startupLocalStorageRoot) {
 }
 const localRuntimeHostId = startupLocalStorageRoot.rootId;
 const settingsStore = createSettingsStore(workspaceRoot);
+const desktopLocale = createDesktopLocaleAuthority({
+  readSettings: () => settingsStore.get(),
+  preferredSystemLanguages: () => app.getPreferredSystemLanguages(),
+});
 const mcpConfigStore = createMcpConfigStore(workspaceRoot);
 const mcpManager = new McpClientManager({
   clientName: "maka-desktop",
@@ -233,7 +240,7 @@ const runtimeHostSshTerminal = createDesktopRuntimeHostSshTerminal({
 });
 const native = assembleDesktopNativeCapabilities({
   isComputerUseRealModelE2e,
-  settings: settingsStore,
+  locale: desktopLocale,
   keepSystemAwake,
   mainWindow: mainWindowController,
 });
@@ -253,13 +260,7 @@ const releaseComputerUseSession = (sessionId: string): void => {
   native.computerUseTools.clearSession(sessionId);
 };
 const permissionOverlay = createPermissionOverlayMain({
-  resolveLocale: async () => {
-    const settings = await settingsStore.get();
-    return resolveUiLocale(
-      settings.personalization.uiLocale,
-      resolveSystemUiLocale(app.getPreferredSystemLanguages()),
-    );
-  },
+  resolveLocale: () => desktopLocale.resolve(),
 });
 onMainWindowClose = () => {
   native.computerUseOverlay.destroyAll();
@@ -371,6 +372,7 @@ const clientSettingsEffects = createClientSettingsEffects({
   applyBotSettings: useBotOnboardingFixture
     ? async () => undefined
     : (settings) => botRegistry.applySettings(settings),
+  observeLocale: (settings) => desktopLocale.observe(settings),
   emitExternalChanged: () => {
     mainWindowController.send("settings:clientChanged");
     sendActiveRuntimeHostEvent("settings:externalChanged", { ts: Date.now() });
@@ -384,11 +386,12 @@ const clientSettingsTools = buildClientSettingsTools({
     return settings;
   },
   confirm: async (changes) => {
+    const copy = clientSettingsConfirmation(changes, await desktopLocale.resolve());
     const result = await dialog.showMessageBox({
       type: "question",
-      message: "Allow Maka to update this client's settings?",
-      detail: changes.join("\n"),
-      buttons: ["Apply changes", "Cancel"],
+      message: copy.message,
+      detail: copy.detail,
+      buttons: copy.buttons,
       defaultId: 0,
       cancelId: 1,
       noLink: true,
@@ -442,6 +445,7 @@ const browserIpc = registerBrowserIpc({
 registerNotificationsIpc({
   ipcMain,
   settingsStore,
+  locale: desktopLocale,
   mainWindowController,
   e2e: isE2e,
 });
@@ -566,7 +570,7 @@ runtimeHostManager = await startRuntimeHostDesktopManager(
     openSshTunnel: runtimeHostSshTerminal.openSshTunnel,
   },
   {
-    upgradePrompts: runtimeHostUpgradePrompts,
+    upgradePrompts: createRuntimeHostUpgradePrompts(() => desktopLocale.resolve()),
     onTargetStateChanged: (state) => {
       const hostId = state.readiness === "ready"
         ? state.candidate.client.hostId
@@ -754,7 +758,7 @@ function registerHostClientIpc(
     directoryCatalog: targetProjectCatalog,
     chooseDirectory: async () => {
       const result = await mainWindowController.showOpenDialog({
-        title: "Add project",
+        title: projectPickerTitle(await desktopLocale.resolve()),
         properties: ["openDirectory"],
       });
       return result.canceled ? undefined : result.filePaths[0];
