@@ -3353,10 +3353,22 @@ export class SqliteSessionMetadataStore {
     });
   }
 
-  async removeVersioned(sessions: readonly VersionedSessionIdentity[]): Promise<string[]> {
+  async removeVersioned(
+    sessions: readonly VersionedSessionIdentity[],
+    archiveSessions: readonly VersionedSessionIdentity[] = [],
+  ): Promise<string[]> {
     this.assertOpen();
     const identities = uniqueVersionedSessionIdentities(sessions);
+    const archiveIdentities =
+      archiveSessions.length === 0 ? [] : uniqueVersionedSessionIdentities(archiveSessions);
     const retirementSessionIds = new Set(identities.map(({ sessionId }) => sessionId));
+    for (const { sessionId } of archiveIdentities) {
+      if (retirementSessionIds.has(sessionId)) {
+        throw new SessionMetadataConflictError(
+          `Session cannot be archived and removed in one retirement: ${sessionId}`,
+        );
+      }
+    }
     const retirementUnitId = identities[0]!.sessionId;
     return this.transaction(() => {
       const present: VersionedSessionIdentity[] = [];
@@ -3376,7 +3388,21 @@ export class SqliteSessionMetadataStore {
         this.assertSessionCanBeRemoved(identity.sessionId, retirementSessionIds);
         present.push(identity);
       }
+      for (const identity of archiveIdentities) {
+        const record = this.readRecordSync(identity.sessionId);
+        if (!record) throw new SessionNotFoundError(identity.sessionId);
+        if (record.metadataVersion !== identity.expectedVersion) {
+          throw new SessionMetadataVersionConflictError(
+            identity.sessionId,
+            identity.expectedVersion,
+            record.metadataVersion,
+          );
+        }
+      }
       const deletedAt = this.now();
+      for (const { sessionId, expectedVersion } of archiveIdentities) {
+        this.setArchivedSync(sessionId, expectedVersion, true);
+      }
       for (const { sessionId } of present) {
         const deleted = this.db
           .prepare('DELETE FROM session_metadata WHERE session_id = ?')
@@ -3401,7 +3427,7 @@ export class SqliteSessionMetadataStore {
           )
           .run(sessionId, deletedAt, retirementUnitId);
       }
-      this.deleteGoalAuthorities(identities);
+      this.deleteGoalAuthorities([...identities, ...archiveIdentities]);
       return identities.map((identity) => identity.sessionId);
     });
   }
