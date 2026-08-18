@@ -43,7 +43,7 @@ export interface DesktopHostSessionSummary extends SessionSummary {
 
 export interface RuntimeHostSessionCatalogIpcDeps {
   client: RuntimeHostSessionCatalogClient;
-  /** Live execution identity is observer-owned and must not be inferred from the durable header. */
+  /** Observer state supplements the Host catalog without falling back to the durable header. */
   runningTurnIds: (sessionId: string) => readonly string[];
   resolveCreateProject: (
     input: Pick<CreateSessionRequestInput, 'cwd' | 'projectId'>,
@@ -331,6 +331,9 @@ export function toDesktopHostSessionSummary(
       ? {}
       : { lastMessagePreview: session.lastMessagePreview }),
     status: session.status,
+    ...(session.liveRunState === undefined
+      ? {}
+      : { runningTurnIds: [...session.liveRunState.runningTurnIds] }),
     ...(session.blockedReason === undefined ? {} : { blockedReason: session.blockedReason }),
     ...(session.statusUpdatedAt === undefined ? {} : { statusUpdatedAt: session.statusUpdatedAt }),
     ...(session.parentSessionId === undefined ? {} : { parentSessionId: session.parentSessionId }),
@@ -365,5 +368,8 @@ function toDesktopHostSessionListSummary(
   const summary = toDesktopHostSessionSummary(session);
   return runningTurnIds.length === 0
     ? summary
-    : { ...summary, runningTurnIds: [...runningTurnIds] };
+    : {
+        ...summary,
+        runningTurnIds: [...new Set([...(summary.runningTurnIds ?? []), ...runningTurnIds])],
+      };
 }

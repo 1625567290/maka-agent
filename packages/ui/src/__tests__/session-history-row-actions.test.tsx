@@ -65,6 +65,70 @@ test('renders session navigation and row actions as sibling controls', () => {
   assert.doesNotMatch(markup, /<button\b(?:(?!<\/button>)[\s\S])*<button\b/);
 });
 
+test('renders Runtime Host live runs without requiring renderer-local streaming', () => {
+  const hostRunning = { ...session, runningTurnIds: ['turn-live'] };
+  const markup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <SessionHistoryList
+        sessions={[hostRunning]}
+        onSelectSession={() => undefined}
+        rowActions={rowActions}
+      />
+    </LocaleProvider>,
+  );
+
+  assert.match(markup, /aria-label="Responding"/);
+});
+
+for (const [status, attentionLabel] of [
+  ['waiting_for_user', 'Waiting for you'],
+  ['blocked', 'Needs attention'],
+] as const) {
+  test(`prioritizes ${status} attention over a parked live run`, () => {
+    const awaitingUser = { ...session, status, runningTurnIds: ['turn-live'] };
+    const markup = renderToStaticMarkup(
+      <LocaleProvider locale="en">
+        <SessionHistoryList
+          sessions={[awaitingUser]}
+          streamingSessionIds={new Set([awaitingUser.id])}
+          onSelectSession={() => undefined}
+          rowActions={rowActions}
+        />
+      </LocaleProvider>,
+    );
+
+    assert.doesNotMatch(markup, /aria-label="Responding"/);
+    assert.match(markup, new RegExp(`aria-label="${attentionLabel}"`));
+  });
+}
+
+test('keeps known-empty idle unless renderer-local streaming is newer', () => {
+  const knownEmpty = { ...session, status: 'running' as const, runningTurnIds: [] as string[] };
+  const idleMarkup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <SessionHistoryList
+        sessions={[knownEmpty]}
+        onSelectSession={() => undefined}
+        rowActions={rowActions}
+      />
+    </LocaleProvider>,
+  );
+  const locallyStreamingMarkup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <SessionHistoryList
+        sessions={[knownEmpty]}
+        streamingSessionIds={new Set([knownEmpty.id])}
+        onSelectSession={() => undefined}
+        rowActions={rowActions}
+      />
+    </LocaleProvider>,
+  );
+
+  assert.doesNotMatch(idleMarkup, /aria-label="Responding"/);
+  assert.doesNotMatch(idleMarkup, /aria-label="Running"/);
+  assert.match(locallyStreamingMarkup, /aria-label="Responding"/);
+});
+
 test('renders collapsible project navigation and row actions as sibling controls', () => {
   const markup = renderToStaticMarkup(
     <LocaleProvider locale="en">

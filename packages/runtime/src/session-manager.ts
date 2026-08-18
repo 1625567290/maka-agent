@@ -970,19 +970,22 @@ export class SessionManager {
     return this.runtimeKernel.runningTurnIds?.(sessionId) ?? [];
   }
 
-  async listSessions(filter?: SessionListFilter): Promise<SessionSummary[]> {
-    const sessions = await this.deps.store.list(filter);
+  #projectLiveRunState(sessions: SessionSummary[]): SessionSummary[] {
     const runningTurnIds = this.runtimeKernel.runningTurnIds?.bind(this.runtimeKernel);
     if (!runningTurnIds) return sessions;
-    return sessions.map((session) => {
-      const turnIds = runningTurnIds(session.id);
-      return turnIds.length === 0 ? session : { ...session, runningTurnIds: turnIds };
-    });
+    return sessions.map((session) => ({
+      ...session,
+      runningTurnIds: runningTurnIds(session.id),
+    }));
+  }
+
+  async listSessions(filter?: SessionListFilter): Promise<SessionSummary[]> {
+    return this.#projectLiveRunState(await this.deps.store.list(filter));
   }
 
   async listChildSessions(parentSessionId: string): Promise<SessionSummary[]> {
     const sessions = await this.deps.store.list({ subagentParentSessionId: parentSessionId });
-    return childSessionsForParent(sessions, parentSessionId);
+    return this.#projectLiveRunState(childSessionsForParent(sessions, parentSessionId));
   }
 
   private async provisionChildWorkspace(

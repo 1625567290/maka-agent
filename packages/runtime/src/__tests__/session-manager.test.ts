@@ -151,6 +151,62 @@ test('sendMessage rejects removed Automation as a live trigger', async () => {
  * before a turn starts and after it ends, and a crash between a turn's end and
  * its status write leaves `running` in storage forever.
  */
+test('listSessions preserves known-empty live run state', async () => {
+  const store = new MemorySessionStore();
+  let runningTurnIds: string[] = [];
+  const manager = new SessionManager({
+    store,
+    backends: new BackendRegistry(),
+    newId: nextId(),
+    now: nextNow(1),
+    runtimeKernel: {
+      runningTurnIds: () => [...runningTurnIds],
+    } as unknown as RuntimeKernelLike,
+  });
+  const session = await manager.createSession(makeInput());
+
+  assert.deepEqual((await manager.listSessions())[0]?.runningTurnIds, []);
+
+  runningTurnIds = ['turn-live'];
+  assert.deepEqual((await manager.listSessions())[0]?.runningTurnIds, ['turn-live']);
+  assert.equal((await store.readHeader(session.id)).status, 'active');
+});
+
+test('listChildSessions preserves known-empty live run state', async () => {
+  const store = new MemorySessionStore();
+  const runningTurnIdsBySession = new Map<string, string[]>();
+  const manager = new SessionManager({
+    store,
+    backends: new BackendRegistry(),
+    newId: nextId(),
+    now: nextNow(1),
+    runtimeKernel: {
+      runningTurnIds: (sessionId: string) => [...(runningTurnIdsBySession.get(sessionId) ?? [])],
+    } as unknown as RuntimeKernelLike,
+  });
+  const parent = await manager.createSession(makeInput({ name: 'Parent' }));
+  const child = await manager.createSession(
+    makeInput({
+      name: 'Child',
+      subagentParent: {
+        kind: 'subagent',
+        parentSessionId: parent.id,
+        spawnedBy: {
+          parentRunId: 'parent-run',
+          parentTurnId: 'parent-turn',
+          toolCallId: 'tool-call',
+        },
+        lifecycle: 'foreground',
+      },
+    }),
+  );
+
+  assert.deepEqual((await manager.listChildSessions(parent.id))[0]?.runningTurnIds, []);
+
+  runningTurnIdsBySession.set(child.id, ['turn-live']);
+  assert.deepEqual((await manager.listChildSessions(parent.id))[0]?.runningTurnIds, ['turn-live']);
+});
+
 describe('SessionManager Plan control boundaries', () => {
   test('an exact approval retry completes Session side effects after a partial failure', async () => {
     const store = new MemorySessionStore();

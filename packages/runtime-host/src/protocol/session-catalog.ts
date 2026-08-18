@@ -46,6 +46,8 @@ export const SESSION_CATALOG_LABEL_MAX_BYTES = 128;
 export const SESSION_CATALOG_PREVIEW_MAX_BYTES = 4 * 1024;
 export const SESSION_CATALOG_MODEL_MAX_BYTES = 512;
 export const SESSION_CATALOG_CONNECTION_SLUG_MAX_BYTES = 256;
+export const SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION = 1 as const;
+export const SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS = 64;
 
 const QUERY_ERRORS = [
   'host_not_ready',
@@ -102,6 +104,7 @@ const PROJECTION_FIELDS = [
   'revisionState',
   'thinkingLevel',
   'lastReadMessageId',
+  'liveRunState',
 ] as const;
 
 export type SessionCatalogRevision = `sha256:${string}`;
@@ -178,6 +181,11 @@ export interface SessionExecutionBoundaryQueryInput {
   readonly sessionId: string;
 }
 
+export interface SessionCatalogLiveRunState {
+  readonly schemaVersion: typeof SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION;
+  readonly runningTurnIds: readonly string[];
+}
+
 export interface SessionCatalogProjection {
   readonly id: string;
   readonly revision: number;
@@ -194,6 +202,7 @@ export interface SessionCatalogProjection {
   readonly lastMessageAt?: number;
   readonly lastMessagePreview?: string;
   readonly status: SessionStatus;
+  readonly liveRunState?: SessionCatalogLiveRunState;
   readonly blockedReason?: SessionBlockedReason;
   readonly statusUpdatedAt?: number;
   readonly parentSessionId?: string;
@@ -628,6 +637,7 @@ export function decodeSessionCatalogProjection(value: unknown): SessionCatalogPr
     ...optionalTimestamp(record, 'lastMessageAt'),
     ...optionalText(record, 'lastMessagePreview', SESSION_CATALOG_PREVIEW_MAX_BYTES),
     status: decodeSessionStatus(record.status),
+    ...optionalLiveRunState(record),
     ...optionalBlockedReason(record),
     ...optionalTimestamp(record, 'statusUpdatedAt'),
     ...optionalEntityId(record, 'parentSessionId'),
@@ -772,6 +782,38 @@ function optionalBlockedReason(
     throw invalidProtocolFrame('Invalid Session blocked reason');
   }
   return { blockedReason: record.blockedReason };
+}
+
+function optionalLiveRunState(
+  record: Record<string, unknown>,
+): Pick<SessionCatalogProjection, 'liveRunState'> | Record<string, never> {
+  if (record.liveRunState === undefined) return {};
+  const state = requireExactRecord(record.liveRunState, 'Session catalog live run state', [
+    'schemaVersion',
+    'runningTurnIds',
+  ]);
+  if (state.schemaVersion !== SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION) {
+    throw invalidProtocolFrame('Unsupported Session catalog live run state schema version');
+  }
+  if (
+    !Array.isArray(state.runningTurnIds) ||
+    state.runningTurnIds.length > SESSION_CATALOG_RUNNING_TURN_MAX_ITEMS
+  ) {
+    throw invalidProtocolFrame('Invalid Session catalog running turn ids');
+  }
+  const runningTurnIds: string[] = [];
+  for (let index = 0; index < state.runningTurnIds.length; index += 1) {
+    runningTurnIds.push(requireEntityId(state.runningTurnIds[index], 'Session running turn id'));
+  }
+  if (new Set(runningTurnIds).size !== runningTurnIds.length) {
+    throw invalidProtocolFrame('Duplicate Session catalog running turn id');
+  }
+  return {
+    liveRunState: {
+      schemaVersion: SESSION_CATALOG_LIVE_RUN_STATE_SCHEMA_VERSION,
+      runningTurnIds,
+    },
+  };
 }
 
 function optionalSubagent(

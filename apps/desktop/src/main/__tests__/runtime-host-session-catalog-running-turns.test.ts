@@ -37,6 +37,46 @@ test('projects observed running Turn identities into renderer Session lists', as
   );
 });
 
+test('merges catalog and observed running Turn identities in stable order', async () => {
+  const handlers = new Map<string, IpcHandler>();
+  registerRuntimeHostSessionCatalogIpc(
+    {
+      client: {
+        listSessions: async () => [
+          {
+            ...session('running'),
+            liveRunState: {
+              schemaVersion: 1,
+              runningTurnIds: ['turn-host', 'turn-shared'],
+            },
+          },
+        ],
+      } as never,
+      runningTurnIds: () => ['turn-shared', 'turn-observer'],
+      resolveCreateProject: async () => ({ kind: 'host_path', path: '/workspace' }),
+      emitSessionsChanged() {},
+      releaseSessionResources() {},
+      sessionCopyCleanup: {
+        recover: async () => ({ failed: [] }),
+      } as never,
+    },
+    {
+      handle: (channel, listener) => handlers.set(channel, listener),
+      handleReconnectableRead: (channel, listener) => handlers.set(channel, listener),
+    },
+  );
+
+  const list = handlers.get('sessions:list');
+  assert.ok(list);
+  const projected = await list({} as never) as Array<{ runningTurnIds?: string[] }>;
+
+  assert.deepEqual(projected[0]?.runningTurnIds, [
+    'turn-host',
+    'turn-shared',
+    'turn-observer',
+  ]);
+});
+
 function session(id: string): SessionCatalogProjection {
   return {
     id,

@@ -40,12 +40,13 @@ import {
 } from '../protocol/turn.js';
 
 describe('Runtime Host bootstrap protocol', () => {
-  test('publishes a new compatibility epoch for the narrowed connection update result', () => {
-    // The pair, not either number: an epoch-21 Host still answers a connection
-    // update this way when the selection strands its default target, so a wire
-    // set that no longer accepts it has to have left epoch 21 behind. Asserting
-    // `> 21` rather than a literal keeps a later increment from colliding here.
-    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 21);
+  test('publishes a new compatibility epoch for Session catalog live-run state', () => {
+    // Epoch 22 predates the live-run projection and rejects its added catalog
+    // field, so mixed-version peers must fail during the handshake instead.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 22);
+  });
+
+  test('rejects the legacy connection update result in the current compatibility epoch', () => {
     assert.throws(
       () =>
         decodeHostFrame({

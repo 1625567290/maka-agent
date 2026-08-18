@@ -3,7 +3,10 @@ import type { StoredMessage } from '@maka/core/session';
 import { type LiveTurnProjection, useUiLocale } from '@maka/ui';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 import { localizedShellErrorMessage } from './locales/shell-copy.js';
-import { normalizeSessionSummaryForDisplay } from './session-status-presentation';
+import {
+  mergeSessionSummaryListForDisplay,
+  normalizeSessionSummaryForDisplay,
+} from './session-status-presentation';
 import {
   applyLocalSessionRead,
   applySessionReadOverrides,
@@ -50,7 +53,7 @@ export function useAppShellSessionList(
     updater: (current: DesktopSessionSummary[]) => DesktopSessionSummary[],
   ): void {
     setSessionsState((current) => {
-      const next = updater(current);
+      const next = mergeSessionSummaryListForDisplay(current, updater(current));
       sessionsRef.current = next;
       return next;
     });
