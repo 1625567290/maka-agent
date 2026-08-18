@@ -47,7 +47,7 @@ test('owned connection keeps a fresh Host alive for its full election window', a
   }
 });
 
-test('owned connect names a missed election instead of a bare failed kind', async () => {
+test('owned connect preserves a missed election when the candidate reports late', async () => {
   const rootPath = await mkdtemp(join(tmpdir(), 'maka-owned-startup-timeout-'));
   const result = await connectOwnedRuntimeHostWithDependencies(
     {
@@ -63,7 +63,7 @@ test('owned connect names a missed election instead of a bare failed kind', asyn
     {
       launchCandidate: () => ({
         spawned: new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Runtime Host election deadline elapsed')), 20);
+          setTimeout(() => reject(new Error('late candidate report')), 20);
         }),
       }),
     },

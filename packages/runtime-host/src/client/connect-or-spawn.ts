@@ -127,11 +127,15 @@ export async function connectOwnedRuntimeHostWithDependencies(
         random: Math.random,
       },
     );
-    const host = await launch?.spawned;
+    const host = await launch?.spawned.catch(() => undefined);
     if (result.kind !== 'connected' || !host) {
       if (result.kind === 'connected') await result.connection.close();
       await host?.settle(1_000);
-      return result.kind === 'connected' ? { kind: 'failed', reason: 'existing_host' } : result;
+      if (result.kind !== 'connected') return result;
+      return {
+        kind: 'failed',
+        reason: launch ? 'host_unresponsive' : 'existing_host',
+      };
     }
     const ownedConnection = result.connection;
     connection = ownedConnection;
@@ -143,17 +147,11 @@ export async function connectOwnedRuntimeHostWithDependencies(
       return { kind: 'failed', reason: 'existing_host' };
     }
     return { kind: 'connected', connection: ownedConnection, host };
-  } catch (error) {
+  } catch {
     await connection?.close().catch(() => undefined);
     const host = await launch?.spawned.catch(() => undefined);
     await host?.settle(1_000);
-    const message = error instanceof Error ? error.message : '';
-    return {
-      kind: 'failed',
-      reason: message.includes('election deadline elapsed')
-        ? 'startup_timeout'
-        : 'host_unresponsive',
-    };
+    return { kind: 'failed', reason: 'host_unresponsive' };
   }
 }
 
