@@ -5,7 +5,7 @@ import { parseInteractiveRuntimeHostCandidateArguments } from '../candidate-cli.
 const ROOT_ID = 'a'.repeat(64);
 const STARTUP_ATTEMPT_ID = '00000000-0000-4000-8000-000000000001';
 
-test('parses the production candidate flags without a desktop E2E override', () => {
+test('parses the production candidate flags', () => {
   const parsed = parseInteractiveRuntimeHostCandidateArguments([
     '--root',
     '/tmp/workspace',
@@ -20,24 +20,11 @@ test('parses the production candidate flags without a desktop E2E override', () 
   assert.equal(parsed.expectedRootId, ROOT_ID);
   assert.equal(parsed.startupAttemptId, STARTUP_ATTEMPT_ID);
   assert.equal(parsed.idleGraceMs, 10_000);
-  assert.equal(parsed.desktopE2e, undefined);
 });
 
-test('parses the desktop E2E composition flag', () => {
-  const parsed = parseInteractiveRuntimeHostCandidateArguments([
-    '--root',
-    '/tmp/workspace',
-    '--expected-root-id',
-    ROOT_ID,
-    '--startup-attempt-id',
-    STARTUP_ATTEMPT_ID,
-    '--desktop-e2e',
-    '1',
-  ]);
-  assert.equal(parsed.desktopE2e, true);
-});
-
-test('rejects an unknown desktop E2E flag value', () => {
+// The Desktop E2E composition is selected by its own entry module, not by a
+// flag on the production CLI — so `--desktop-e2e` is simply unknown here.
+test('rejects the retired desktop E2E flag as an unknown argument', () => {
   assert.throws(
     () =>
       parseInteractiveRuntimeHostCandidateArguments([
@@ -48,8 +35,8 @@ test('rejects an unknown desktop E2E flag value', () => {
         '--startup-attempt-id',
         STARTUP_ATTEMPT_ID,
         '--desktop-e2e',
-        'true',
+        '1',
       ]),
-    /Invalid --desktop-e2e/,
+    /Invalid Runtime Host candidate argument: --desktop-e2e/,
   );
 });

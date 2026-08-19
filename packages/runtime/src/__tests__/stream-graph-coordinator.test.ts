@@ -23,7 +23,7 @@ import {
   OPERATIONAL_STATE_DATABASE_NAME,
 } from '@maka/storage';
 import { createSqliteAgentRunStore, createWorkspaceRuntimeStore } from '@maka/storage';
-import { FakeBackend } from '../fake-backend.js';
+import { FakeBackend } from '../test-only/fake-backend.js';
 import { BackendRegistry, SessionManager } from '../session-manager.js';
 import { SessionActivityRegistry } from '../goal-turn-lifecycle.js';
 import { AgentGraphSupervisorWakeCoordinator } from '../agent-graph-supervisor-wake.js';

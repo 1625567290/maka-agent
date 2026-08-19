@@ -4,7 +4,7 @@ import type { RuntimeEvent } from '@maka/core/runtime-event';
 import type { SessionHeader } from '@maka/core/session';
 import type { HistoryCompactCheckpoint } from '@maka/runtime/history-compact-checkpoint';
 import type { BackendFactoryContext } from '@maka/runtime/session-manager';
-import { DesktopE2eBackend } from '../desktop-e2e-execution.js';
+import { DesktopE2eBackend } from '../test-only/desktop-e2e-execution.js';
 
 function backendContext(overrides: Partial<BackendFactoryContext> = {}): BackendFactoryContext {
   return {

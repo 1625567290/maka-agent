@@ -1,4 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import {
+  describeChatConfigurationReason,
+  NO_REAL_CONNECTION_CODE,
+} from '@maka/core/connection-error-copy';
 import type { RuntimeExecutionConnection } from '@maka/core/llm-connections';
 import { generalizedErrorMessage } from '@maka/core/redaction';
 import { emptyPlanSessionState } from '@maka/core/plan';
@@ -24,7 +28,6 @@ import {
   createFilesystemWorkerLaunchSpecProvider,
   FilesystemWorkerClient,
 } from '@maka/runtime/filesystem-worker';
-import { FakeBackend } from '@maka/runtime/fake-backend';
 import { isOAuthEnrollmentProviderEnabled } from '@maka/runtime/oauth-provider-contracts';
 import {
   loadHistoryCompactCheckpointsFromRunLedger,
@@ -286,7 +289,18 @@ export async function createExecutionRuntimeHostComposition(
     });
     await stores.messageReceiptStore.beginHostEpoch(context.hostEpoch);
     const backends = new BackendRegistry();
-    backends.register('fake', (backendContext) => new FakeBackend(backendContext));
+    // `fake` is a retired backend kind: this build never writes it, but a
+    // session or Automation persisted by an older one still can, and activation
+    // dispatches straight off that durable value. Registering an explicit
+    // refusal — rather than the test backend, or a read-path rewrite of the
+    // durable header — is what turns "no factory for kind=fake" into the
+    // product's existing answer for these rows: this task came from the retired
+    // local simulation, configure a real model and start a new one.
+    backends.register('fake', () => {
+      throw new Error(
+        `${NO_REAL_CONNECTION_CODE}:fake_backend: ${describeChatConfigurationReason('fake_backend')}`,
+      );
+    });
     const runtimePolicyActivation = new RuntimePolicyActivationGate();
     const runtimePolicy = new HostRuntimePolicyCoordinator(
       runtimePolicyStores,

@@ -14,7 +14,6 @@ export interface DetachedCandidateInput {
   initialConnectionTimeoutMs?: number;
   idleGraceMs?: number;
   handshakeTimeoutMs?: number;
-  desktopE2e?: boolean;
   executable?: string;
   entrypoint: string | URL;
   env?: NodeJS.ProcessEnv;
@@ -95,7 +94,6 @@ function spawnCandidate(
   appendArgument(args, '--idle-grace-ms', input.idleGraceMs);
   appendArgument(args, '--handshake-timeout-ms', input.handshakeTimeoutMs);
   appendArgument(args, '--generation', input.generation);
-  if (input.desktopE2e) args.push('--desktop-e2e', '1');
 
   // spawn() commits the side effect synchronously; spawned only reports that commit's outcome.
   const child = spawn(executable, args, {
