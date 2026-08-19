@@ -65,8 +65,7 @@ import {
 } from '../server/candidate.js';
 import type { RuntimeHostCompositionSource } from '../server/host-composition.js';
 import { createUnavailableDomainOperationHandlers } from '../server/operation-dispatcher.js';
-import { HostConfigurationChangeService } from '../server/configuration-change-service.js';
-import { HostSessionCatalogChangeService } from '../server/session-catalog-change-service.js';
+import { HostChangeFeed } from '../server/host-change-feed.js';
 import { FramedTransport, RuntimeHostTransportError } from '../transport/framed-transport.js';
 import {
   prepareStorageRootControlDirectory,
@@ -1880,8 +1879,7 @@ describe('non-serving Runtime Host kernel', () => {
       const owner = await tryAcquireInteractiveRootOwner(capability);
       assert.ok(owner);
       if (!owner) return;
-      const configurationChanges = new HostConfigurationChangeService();
-      const sessionCatalogChanges = new HostSessionCatalogChangeService();
+      const hostChanges = new HostChangeFeed();
       let releaseFactory!: () => void;
       let markFactoryEntered!: () => void;
       const factoryEntered = new Promise<void>((resolve) => {
@@ -1898,8 +1896,7 @@ describe('non-serving Runtime Host kernel', () => {
           await factoryReleased;
           return {
             handlers: createUnavailableDomainOperationHandlers(),
-            configurationChanges,
-            sessionCatalogChanges,
+            hostChanges,
             beginDrain() {},
             async recover() {},
             async close() {},
@@ -1927,8 +1924,8 @@ describe('non-serving Runtime Host kernel', () => {
         });
         releaseFactory();
         host = await hostTask;
-        configurationChanges.publish();
-        sessionCatalogChanges.publish('session-1');
+        hostChanges.publishConfiguration();
+        hostChanges.publishSessionCatalog('session-1');
         assert.equal(
           await withTimeout(observed, 1_000, 'Client did not receive configuration change'),
           1,
