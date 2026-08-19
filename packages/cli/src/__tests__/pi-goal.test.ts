@@ -3,9 +3,12 @@ import { describe, test } from 'node:test';
 import { GOAL_STATUSES, type GoalStatus } from '@maka/core/goal';
 import type { GoalProjection } from '@maka/runtime-host/protocol';
 import { formatTokenCount } from '../pi-transcript-format.js';
+import { stripAnsi } from '../tui-ansi.js';
 import {
   formatGoalElapsed,
+  goalAttachedNoticeText,
   goalElapsedMs,
+  goalPausedNoticeText,
   goalStatusLabel,
   goalStatusLineText,
   goalSummaryLines,
@@ -34,6 +37,10 @@ function goal(overrides: Partial<GoalProjection> = {}): GoalProjection {
 }
 
 describe('pi-goal display helpers', () => {
+  test('strips generic ESC character-set sequences from displayed text', () => {
+    assert.equal(stripAnsi('\x1b(0goal'), 'goal');
+  });
+
   test('every declared goal status has a label and a live/terminal classification', () => {
     // Exhaustiveness guard: a new GoalStatus must make a deliberate choice in
     // both places instead of silently falling through.
@@ -97,6 +104,19 @@ describe('pi-goal display helpers', () => {
     assert.equal(messy[0], 'Goal: Ship the feature');
     assert.equal(messy.at(-1), 'Last evaluator note: line one line two');
 
+    const hostile = goalSummaryLines(
+      goal({
+        condition: 'Ship\x1b[2J the\x00 feature',
+        lastReason: 'safe\x1b]0;spoofed title\x07\nUnicode ✓',
+      }),
+      61_000,
+    );
+    assert.equal(hostile[0], 'Goal: Ship the feature');
+    assert.equal(hostile.at(-1), 'Last evaluator note: safe Unicode ✓');
+    for (const line of hostile) {
+      assert.doesNotMatch(line, /[\u0000-\u001f\u007f-\u009f]/u);
+    }
+
     // A cleared goal keeps its terminal record; the summary must not present
     // the condition as if it were still armed.
     const cleared = goalSummaryLines(goal({ status: 'cleared' }), 61_000);
@@ -125,5 +145,24 @@ describe('pi-goal display helpers', () => {
 
   test('token formatting is the shared status-line formatter', () => {
     assert.equal(formatTokenCount(45_200), '45k');
+  });
+
+  test('pause and attach notices name the loop and its controls', () => {
+    assert.equal(
+      goalPausedNoticeText(goal({ lastReason: 'Goal-associated turn was aborted.' })),
+      'Goal paused (3/50). Goal-associated turn was aborted. /goal resume continues it, /goal clear stops it.',
+    );
+    assert.equal(
+      goalPausedNoticeText(goal({ lastReason: null })),
+      'Goal paused (3/50). /goal resume continues it, /goal clear stops it.',
+    );
+    // Embedded newlines collapse so the notice stays one line.
+    assert.equal(
+      goalAttachedNoticeText(goal({ condition: 'Ship the\n  feature' })),
+      'Autonomous goal is running (3/50): Ship the feature — /goal shows details, /goal pause pauses it.',
+    );
+    // Long conditions are capped with an ellipsis.
+    const long = goalAttachedNoticeText(goal({ condition: 'x'.repeat(200) }));
+    assert.ok(long.includes('…') && long.length <= 210);
   });
 });
