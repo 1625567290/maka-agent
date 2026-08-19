@@ -158,6 +158,7 @@ import {
   type OperationInput,
   type OperationOutput,
 } from '@maka/runtime-host/protocol';
+import type { AgentGraphEpochDirectory } from '@maka/runtime-host/client';
 import {
   desktopSessionKey,
   parseDesktopSessionKey,
@@ -1202,9 +1203,15 @@ const makaBridge = {
     },
   },
   graphs: {
+    async listEpochs(rootSessionId: string): Promise<AgentGraphEpochDirectory> {
+      const session = await runtimeHostSessionRef(rootSessionId);
+      return ipcRenderer.invoke(
+        'graphs:listEpochs', session.scope, session.sessionId,
+      ) as Promise<AgentGraphEpochDirectory>;
+    },
     async getSnapshot(
       rootSessionId: string,
-      options?: AgentGraphClientSnapshotOptions,
+      options?: AgentGraphClientSnapshotOptions & { graphId?: string },
     ): Promise<AgentGraphClientSnapshot> {
       const session = await runtimeHostSessionRef(rootSessionId);
       const snapshot = await ipcRenderer.invoke(
@@ -1215,10 +1222,15 @@ const makaBridge = {
     async inspectOperator(
       rootSessionId: string,
       operatorId: string,
+      graphId?: string,
     ): Promise<AgentGraphOperatorInspection> {
       const session = await runtimeHostSessionRef(rootSessionId);
       const inspection = await ipcRenderer.invoke(
-        'graphs:inspectOperator', session.scope, session.sessionId, operatorId,
+        'graphs:inspectOperator',
+        session.scope,
+        session.sessionId,
+        operatorId,
+        graphId,
       ) as AgentGraphOperatorInspection;
       return projectProtocolSessionIds(session.scope.hostId, inspection);
     },
