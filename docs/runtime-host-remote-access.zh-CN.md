@@ -37,6 +37,23 @@ npm --workspace maka-agent exec -- maka runtime-host access issue \
 
 TUI 或 CLI 使用 `terminal-client`。命令只显示 credential 一次。
 
+在使用 systemd user manager 的 Linux 上，发布版 CLI 可以让 loopback Host 在 SSH 会话结束后
+继续运行：
+
+```sh
+maka runtime-host service install \
+  --root /srv/maka \
+  --project-root projects=/srv/projects
+maka runtime-host service status --json
+```
+
+安装命令会持久保存当前精确的 Node 与 Maka CLI 路径。重复执行会更新同一个 service；未指定
+WebSocket port 时会保留现有端口。卸载 npm 包前，应先执行
+`maka runtime-host service uninstall`。卸载 service 会保留 State Root 与 Project 数据。如果
+systemd user lingering 未启用，安装会给出可操作的错误，不会声称服务能够持久运行。Service
+必须从持久的全局 Maka 安装中安装，不能使用 `npx`。替换操作只会在新的 Runtime Host ready
+之后提交；失败时会恢复之前的 service。
+
 ## 选择连接方式
 
 ### Direct TLS
