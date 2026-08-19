@@ -32,6 +32,11 @@ import type {
 } from './bridge-contract.js';
 import type { ExternalSessionImportIpcResult } from './external-session-import-result.js';
 import {
+  projectDesktopExternalSessionCatalogItem,
+  type DesktopExternalSessionCatalogItem,
+  type DesktopHostExternalSessionCatalogItem,
+} from './external-session-catalog.js';
+import {
   DESKTOP_TRANSCRIPT_FRAGMENT_MAX_BYTES,
   assertDesktopTranscriptBatch,
   type DesktopTranscriptBatch,
@@ -81,7 +86,6 @@ import type { SearchErrorReason, SearchRequest, SearchResult } from '@maka/core/
 import type { SessionChangedEvent, SessionSummary, TurnRecord } from '@maka/core/session';
 import type { ThinkingLevel } from '@maka/core/model-thinking';
 import type { E2eFixtureState } from '@maka/core/e2e-fixture';
-import type { ExternalSessionSummary } from '@maka/core/external-session';
 import type {
   GitReviewReadResult,
   GitReviewSource,
@@ -1678,15 +1682,27 @@ const makaBridge = {
     listSources(host?: DesktopRuntimeHostRef): Promise<{ adapterIds: string[] }> {
       return invokeSelectedRuntimeHost(host, 'external-sessions:listSources');
     },
-    list(input: {
+    async list(input: {
       adapterId: string;
       includeArchived?: boolean;
       cursor?: string;
     }, host?: DesktopRuntimeHostRef): Promise<{
-      sessions: ExternalSessionSummary[];
+      sessions: DesktopExternalSessionCatalogItem[];
       nextCursor: string | null;
     }> {
-      return invokeSelectedRuntimeHost(host, 'external-sessions:list', input);
+      const scope = await selectedRuntimeHostScope(host);
+      const result = await ipcRenderer.invoke(
+        'external-sessions:list', scope, input,
+      ) as {
+        sessions: DesktopHostExternalSessionCatalogItem[];
+        nextCursor: string | null;
+      };
+      return {
+        ...result,
+        sessions: result.sessions.map((session) =>
+          projectDesktopExternalSessionCatalogItem(scope, session),
+        ),
+      };
     },
     async import(input: {
       adapterId: string;
