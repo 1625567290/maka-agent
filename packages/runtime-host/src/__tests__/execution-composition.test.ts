@@ -795,7 +795,10 @@ test('production composition validates graph stop before aborting a claimed chil
         acquireResidency: () => ({ release() {} }),
       };
       const invalidStop = await composition.handlers['agent.graph.stop'](
-        { rootSessionId: abortedClaim.targetSessionId },
+        {
+          rootSessionId: abortedClaim.targetSessionId,
+          expectedGraphId: abortedClaim.graphId,
+        },
         clientContext,
       );
       assert.equal(invalidStop.ok, false);
