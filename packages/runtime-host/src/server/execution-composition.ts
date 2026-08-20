@@ -1313,7 +1313,6 @@ export async function createExecutionRuntimeHostComposition(
       context: {
         hostEpoch: context.hostEpoch,
         connectionId: 'hosted-execution',
-        surface: 'run',
         principal: 'runtime_host',
         acquireResidency: () => context.acquireResidency('hosted-execution'),
       },

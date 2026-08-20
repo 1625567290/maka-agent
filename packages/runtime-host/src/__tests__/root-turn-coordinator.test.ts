@@ -4917,7 +4917,6 @@ function operationContext(
   return {
     hostEpoch,
     connectionId,
-    surface: 'tui' as const,
     principal: 'local_os_user' as const,
     acquireResidency,
   };
