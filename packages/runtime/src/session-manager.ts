@@ -39,7 +39,7 @@ import type {
   UserMessage,
   PermissionDecisionMessage,
   SystemNoteMessage,
-  BackendKind,
+  PersistedBackendKind,
 } from '@maka/core/session';
 import type {
   AgentSpec,
@@ -700,7 +700,7 @@ export interface StrictRecoveryStores {
 }
 
 // ============================================================================
-// BackendRegistry — factory dispatch by BackendKind
+// BackendRegistry — factory dispatch by the session header's durable backend
 // ============================================================================
 
 export interface BackendFactoryContext {
@@ -772,19 +772,19 @@ export interface BackendFactoryContext {
 export type BackendFactory = (ctx: BackendFactoryContext) => AgentBackend | Promise<AgentBackend>;
 
 export class BackendRegistry {
-  private readonly factories = new Map<BackendKind, BackendFactory>();
+  private readonly factories = new Map<PersistedBackendKind, BackendFactory>();
 
-  register(kind: BackendKind, factory: BackendFactory): void {
+  register(kind: PersistedBackendKind, factory: BackendFactory): void {
     this.factories.set(kind, factory);
   }
 
-  async build(kind: BackendKind, ctx: BackendFactoryContext): Promise<AgentBackend> {
+  async build(kind: PersistedBackendKind, ctx: BackendFactoryContext): Promise<AgentBackend> {
     const f = this.factories.get(kind);
     if (!f) throw new Error(`No backend factory registered for kind="${kind}"`);
     return await f(ctx);
   }
 
-  has(kind: BackendKind): boolean {
+  has(kind: PersistedBackendKind): boolean {
     return this.factories.has(kind);
   }
 }
@@ -2550,7 +2550,6 @@ export class SessionManager {
         cwd: workspace?.worktreePath ?? parentHeader.cwd,
         ...(parentHeader.projectId !== undefined ? { projectId: parentHeader.projectId } : {}),
         name: resolvedPreset?.name ?? definition.name,
-        backend: parentHeader.backend,
         llmConnectionSlug: resolvedPreset?.connectionSlug ?? parentHeader.llmConnectionSlug,
         model: resolvedPreset?.model ?? parentHeader.model,
         ...(resolvedPreset
@@ -3089,7 +3088,6 @@ export class SessionManager {
         cwd: workspace?.worktreePath ?? parentHeader.cwd,
         ...(parentHeader.projectId !== undefined ? { projectId: parentHeader.projectId } : {}),
         name: input.name ?? input.resolvedPreset?.name ?? definition.name,
-        backend: parentHeader.backend,
         llmConnectionSlug: input.resolvedPreset?.connectionSlug ?? parentHeader.llmConnectionSlug,
         model: input.resolvedPreset?.model ?? parentHeader.model,
         ...(input.resolvedPreset
@@ -4953,7 +4951,6 @@ export class SessionManager {
       {
         cwd: header.cwd,
         ...(header.projectId !== undefined ? { projectId: header.projectId } : {}),
-        backend: header.backend,
         llmConnectionSlug: header.llmConnectionSlug,
         model: header.model,
         thinkingLevel: header.thinkingLevel,
@@ -5016,7 +5013,6 @@ export class SessionManager {
       {
         cwd: header.cwd,
         ...(header.projectId !== undefined ? { projectId: header.projectId } : {}),
-        backend: header.backend,
         llmConnectionSlug: header.llmConnectionSlug,
         model: header.model,
         thinkingLevel: header.thinkingLevel,
