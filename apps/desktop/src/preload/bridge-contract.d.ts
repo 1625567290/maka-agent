@@ -84,7 +84,7 @@ import type {
   OperationInput,
   OperationOutput,
 } from '@maka/runtime-host/protocol';
-import type { AgentGraphEpochDirectory } from '@maka/runtime-host/client';
+import type { AgentGraphEpochDirectory, RuntimeHostSetupPhase } from '@maka/runtime-host/client';
 import type {
   RendererRuntimeHostCommandOperation,
   RendererRuntimeHostQueryOperation,
@@ -231,6 +231,8 @@ export interface DesktopRuntimeHostProfileEntry {
 export interface DesktopRuntimeHostProfileSnapshot {
   readonly entries: readonly DesktopRuntimeHostProfileEntry[];
   readonly defaultProfileId: string;
+  readonly pairingRecoveryBlocked?: true;
+  readonly pairingRecoveryPending?: true;
 }
 
 export interface DesktopRuntimeHostRef {
@@ -307,6 +309,7 @@ export type DesktopRuntimeHostSshTerminalEvent =
   | { readonly kind: 'opened'; readonly revision: number; readonly sessionId: string }
   | { readonly kind: 'data'; readonly revision: number; readonly sessionId: string; readonly data: string }
   | { readonly kind: 'connected'; readonly revision: number; readonly sessionId: string }
+  | { readonly kind: 'dismissed'; readonly revision: number; readonly sessionId: string }
   | {
       readonly kind: 'closed';
       readonly revision: number;
@@ -325,6 +328,35 @@ export type DesktopRuntimeHostSshTerminalSnapshot =
       readonly output: string;
       readonly code: number | null;
       readonly signal: string | null;
+    };
+
+export interface DesktopRuntimeHostOnboardingInput {
+  readonly name?: string;
+  readonly destination: string;
+  readonly sshPort?: number;
+}
+
+export type DesktopRuntimeHostOnboardingPhase =
+  | 'connecting_ssh'
+  | RuntimeHostSetupPhase
+  | 'connecting_host';
+
+export type DesktopRuntimeHostOnboardingSnapshot =
+  | { readonly kind: 'idle'; readonly revision: number }
+  | {
+      readonly kind: 'running';
+      readonly revision: number;
+      readonly phase: DesktopRuntimeHostOnboardingPhase;
+    }
+  | {
+      readonly kind: 'failed';
+      readonly revision: number;
+      readonly message: string;
+    }
+  | {
+      readonly kind: 'complete';
+      readonly revision: number;
+      readonly profileId: string;
     };
 
 export interface DesktopProjectCapabilities {
@@ -402,6 +434,7 @@ export interface MakaBridge {
     remove(profileId: string): Promise<DesktopRuntimeHostProfileSnapshot>;
     setEnabled(profileId: string, enabled: boolean): Promise<DesktopRuntimeHostProfileSnapshot>;
     setDefault(profileId: string): Promise<DesktopRuntimeHostProfileSnapshot>;
+    resolvePairingRecovery(): Promise<DesktopRuntimeHostProfileSnapshot>;
     subscribeChanges(
       handler: (event: DesktopRuntimeHostProfileChangedEvent) => void,
     ): () => void;
@@ -413,6 +446,14 @@ export interface MakaBridge {
     resize(sessionId: string, cols: number, rows: number): Promise<void>;
     cancel(sessionId: string): Promise<void>;
     subscribe(handler: (event: DesktopRuntimeHostSshTerminalEvent) => void): () => void;
+  };
+
+  runtimeHostOnboarding: {
+    getSnapshot(): Promise<DesktopRuntimeHostOnboardingSnapshot>;
+    start(input: DesktopRuntimeHostOnboardingInput): Promise<DesktopRuntimeHostOnboardingSnapshot>;
+    cancel(): Promise<boolean>;
+    reset(): Promise<void>;
+    subscribe(handler: (snapshot: DesktopRuntimeHostOnboardingSnapshot) => void): () => void;
   };
 
   newTasks: {
