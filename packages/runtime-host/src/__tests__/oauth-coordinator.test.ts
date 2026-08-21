@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { ConnectionCatalogEntry } from '@maka/core/runtime-policy';
 import { OAuthDeviceAuthorizationExpiredError } from '@maka/runtime/oauth-provider-contracts';
-import { OAuthTokenEndpointError } from '@maka/runtime/oauth-login';
 import {
   parseOAuthSubscriptionTokens,
   type OAuthSubscriptionTokens,
@@ -20,7 +19,6 @@ import {
   OAUTH_PRESENTATION_SERVICE_VERSION,
   type ClientCapabilityServiceCallFrame,
   type OAuthLoginProjection,
-  type OAuthPresentationRequest,
 } from '../protocol/index.js';
 import { HostClientCapabilityCoordinator } from '../server/client-capability-coordinator.js';
 import { HostOAuthCoordinator } from '../server/oauth-coordinator.js';
@@ -708,7 +706,7 @@ async function attachPresentation(
   coordinator: HostClientCapabilityCoordinator,
   connectionId: string,
   calls: string[],
-  options: { authorizationCode?: string; authorizationDelayMs?: number } = {},
+  options: { authorizationDelayMs?: number } = {},
   inputCalls?: Array<{ connectionId: string; input: Record<string, unknown> }>,
 ) {
   const serviceCalls = new Map<string, ClientCapabilityServiceCallFrame>();
@@ -731,15 +729,7 @@ async function attachPresentation(
       }
       const call = serviceCalls.get(frame.invocationId);
       assert.ok(call);
-      const structuredContent =
-        call.method === 'request_authorization_code'
-          ? {
-              kind: 'authorization_code',
-              authorizationCode:
-                options.authorizationCode ??
-                `authorization-code#${new URL(String(call.input.url)).searchParams.get('state')}`,
-            }
-          : { kind: 'presented' };
+      const structuredContent = { kind: 'presented' };
       connection.accept({
         kind: 'client.capability.result',
         invocationId: frame.invocationId,

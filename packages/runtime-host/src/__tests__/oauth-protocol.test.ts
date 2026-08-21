@@ -7,7 +7,7 @@ import {
   decodeOAuthLoginProjection,
   decodeOAuthPresentationRequest,
   decodeOAuthPresentationResult,
-  OAUTH_PRESENTATION_AUTHORIZATION_CODE_MAX_LENGTH,
+  type OAuthPresentationMethod,
 } from '../protocol/index.js';
 
 test('OAuth login protocol binds attempt identity and closes terminal projections', () => {
@@ -83,7 +83,7 @@ test('OAuth account usage is no longer an operation on the wire', () => {
   );
 });
 
-test('OAuth presentation methods share one closed request and result contract', () => {
+test('OAuth presentation keeps one closed request and result contract', () => {
   assert.deepEqual(
     decodeOAuthPresentationRequest('open_external', {
       url: 'https://auth.example/authorize',
@@ -95,25 +95,26 @@ test('OAuth presentation methods share one closed request and result contract', 
       stateHint: 'ABCD-1234',
     },
   );
-  assert.deepEqual(
-    decodeOAuthPresentationResult('request_authorization_code', {
-      kind: 'authorization_code',
-      authorizationCode: 'code#state',
-    }),
-    { kind: 'authorization_code', authorizationCode: 'code#state' },
-  );
+  assert.deepEqual(decodeOAuthPresentationResult('open_external', { kind: 'presented' }), {
+    kind: 'presented',
+  });
+  // A peer on an older epoch still offers the removed method. The cast models
+  // that value arriving off the wire; the type no longer admits it, and the
+  // decoder must refuse it rather than serve a method nothing implements.
+  const retiredMethod = 'request_authorization_code' as unknown as OAuthPresentationMethod;
   assert.throws(
     () =>
-      decodeOAuthPresentationRequest('request_authorization_code', {
+      decodeOAuthPresentationRequest(retiredMethod, {
         url: 'https://auth.example/authorize',
+        stateHint: 'ABCD-1234',
       }),
     (error: unknown) => error instanceof RuntimeHostProtocolError,
   );
   assert.throws(
     () =>
-      decodeOAuthPresentationResult('request_authorization_code', {
+      decodeOAuthPresentationResult(retiredMethod, {
         kind: 'authorization_code',
-        authorizationCode: 'x'.repeat(OAUTH_PRESENTATION_AUTHORIZATION_CODE_MAX_LENGTH + 1),
+        authorizationCode: 'code#state',
       }),
     (error: unknown) => error instanceof RuntimeHostProtocolError,
   );
