@@ -177,10 +177,12 @@
   min-width: 0;
 }
 
+/* Centre the remove control against the field, not the full cell. Keep
+   this min-height aligned with the input control height token. */
 .requestHeaderRemove {
   display: flex;
   align-items: center;
-  min-height: 2.5rem;
+  min-height: var(--h-control-lg);
 }
 
 @container settings-rows (max-width: 460px) {
