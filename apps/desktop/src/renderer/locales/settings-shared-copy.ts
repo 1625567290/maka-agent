@@ -16,6 +16,8 @@ export type SettingsSharedCopy = {
   failed: string;
   settingsLoadFailed: string;
   usageLoadFailed: string;
+  runtimeHost: string;
+  runtimeHostUnavailable: string;
   unknownError: string;
   unavailablePage: string;
   ready: string;
@@ -65,6 +67,8 @@ const SETTINGS_SHARED_COPY_BY_LOCALE = {
     failed: '失败',
     settingsLoadFailed: '载入设置失败',
     usageLoadFailed: '载入使用统计失败',
+    runtimeHost: 'Runtime Host',
+    runtimeHostUnavailable: '这个 Runtime Host 当前不可用。请选择其他 Host，或在“项目”中重试连接。',
     unknownError: '出现错误，请稍后重试。',
     unavailablePage: '该设置页已纳入 Maka 设置树，会随对应 runtime 能力一起工作。',
     showDetails: '展开详情',
@@ -72,7 +76,7 @@ const SETTINGS_SHARED_COPY_BY_LOCALE = {
     ready: '就绪',
     groups: {
       memorySources: '记忆',
-      memorySourcesHelp: 'Maka 会在对话中记住你确认过的信息，用于之后的回答。',
+      memorySourcesHelp: 'Maka 会在任务中记住你确认过的信息，用于之后的回答。',
       memoryDocument: '记忆文件与备份',
       memoryDocumentHelp: '记忆保存在本机 MEMORY.md 里；这里可以直接编辑原文或恢复备份。',
       memoryEntries: '已记住的内容',
@@ -82,7 +86,7 @@ const SETTINGS_SHARED_COPY_BY_LOCALE = {
       searchBehavior: '搜索行为',
       searchBehaviorHelp: '什么时候发起搜索，以及每次取回多少结果。',
       dataLocation: '数据位置',
-      dataLocationHelp: '会话、设置、使用统计与凭据都以文件形式存放在本机的这个位置。',
+      dataLocationHelp: '任务、设置、使用统计与凭据都以文件形式存放在本机的这个位置。',
       reviewSchedule: '回顾计划',
       reviewScheduleHelp: '每日回顾的生成时间与使用的模型。',
       buildInfo: '版本信息',
@@ -105,6 +109,8 @@ const SETTINGS_SHARED_COPY_BY_LOCALE = {
     failed: 'Failed',
     settingsLoadFailed: 'Could not load settings',
     usageLoadFailed: 'Could not load usage statistics',
+    runtimeHost: 'Runtime Host',
+    runtimeHostUnavailable: 'This Runtime Host is unavailable. Choose another Host or retry the connection under Projects.',
     unknownError: 'Something went wrong. Try again.',
     unavailablePage: 'This page is part of the Maka settings tree and will activate with its runtime capability.',
     showDetails: 'Show details',
@@ -122,7 +128,7 @@ const SETTINGS_SHARED_COPY_BY_LOCALE = {
       searchBehavior: 'Search behavior',
       searchBehaviorHelp: 'When a search runs, and how many results it returns.',
       dataLocation: 'Data location',
-      dataLocationHelp: 'Conversations, settings, usage statistics, and credentials are stored as files in this location on your machine.',
+      dataLocationHelp: 'Tasks, settings, usage statistics, and credentials are stored as files in this location on your machine.',
       reviewSchedule: 'Review schedule',
       reviewScheduleHelp: 'When the daily review runs, and which model writes it.',
       buildInfo: 'Build info',

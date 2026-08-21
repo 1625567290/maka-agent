@@ -66,7 +66,6 @@ export interface MakaRunOutcome {
 }
 
 export interface MakaRunContextInput {
-  surface: 'run' | 'activation';
   workspaceRoot: string;
   cwd: string;
   requestedConnectionSlug?: string;
@@ -266,7 +265,6 @@ export async function runMakaTextCliCore(
   let context: MakaRunContext;
   try {
     context = await deps.createContext({
-      surface: 'run',
       workspaceRoot,
       cwd: selection.cwd,
       ...(selection.kind === 'existing' || parsed.options.connection
@@ -314,7 +312,6 @@ export async function runMakaTextCliCore(
         : await context.runtime.createSession({
             cwd: selection.cwd,
             name: makaRunSessionName(prompt),
-            backend: 'ai-sdk',
             llmConnectionSlug: context.target.connection.slug,
             model: context.target.model,
             permissionMode: parsed.options.yolo ? 'bypass' : 'ask',
@@ -477,9 +474,9 @@ function makaRunHelpText(cliCommand: string): string {
     '  --thinking <level>        off|minimal|low|medium|high|xhigh|max|default',
     '  --timeout <seconds>       Invocation timeout',
     '  --max-steps <count>       Tool-step cap',
-    '  --yolo                    Give this session full access to your files and network',
-    '  --resume <session-id>     Continue an explicit compatible session',
-    '  --continue                Continue the latest compatible session for cwd',
+    '  --yolo                    Give this task full access to your files and network',
+    '  --resume <session-id>     Continue an explicit compatible task',
+    '  --continue                Continue the latest compatible task for cwd',
     '  --graph                   Run this turn in Graph Mode and wait for graph completion',
     '  -h, --help                Show help',
   ].join('\n');

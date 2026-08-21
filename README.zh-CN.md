@@ -1,6 +1,6 @@
 # Maka
 
-[![CI](https://github.com/Maka-Agent/maka-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Maka-Agent/maka-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/apache/maka/actions/workflows/ci.yml/badge.svg)](https://github.com/apache/maka/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 [![docs](https://img.shields.io/badge/docs-English-blue?logo=googletranslate&logoColor=white)](./README.md)
 
@@ -57,7 +57,7 @@ Maka 不只回答问题。它可以在受控权限下阅读项目、执行工具
 
 ### 下载 macOS 桌面版
 
-已签名并完成 Apple 公证的桌面应用可从 [GitHub Releases](https://github.com/Maka-Agent/maka-agent/releases/latest) 下载，目前仅支持 Apple Silicon Mac（`arm64`）。
+已签名并完成 Apple 公证的桌面应用可从 [GitHub Releases](https://github.com/apache/maka/releases/latest) 下载，目前仅支持 Apple Silicon Mac（`arm64`）。
 
 1. 下载 `Maka-<version>-mac-arm64.dmg`；
 2. 打开 DMG，将 Maka 拖入“应用程序”；
@@ -83,8 +83,8 @@ Windows 目前仍是未签名预览版，不属于正式支持的平台。当某
 ### 启动 Desktop
 
 ```sh
-git clone https://github.com/Maka-Agent/maka-agent.git
-cd maka-agent
+git clone https://github.com/apache/maka.git
+cd maka
 npm ci
 npm run dev
 ```
@@ -113,6 +113,9 @@ Maka 不内置共享模型账号。第一次打开时：
 应用会根据真实连接状态区分“已配置”“可发送”和“实验入口”，不会把没有接入 Runtime 的账号展示成可用模型。
 
 ## 使用终端入口
+
+公共 npm 包的安装和使用方式请查看 [CLI 中文指南](./packages/cli/README.zh-CN.md)。下面的命令
+用于从源码 checkout 运行开发版 CLI。
 
 先构建 workspace：
 
@@ -178,17 +181,18 @@ Maka 默认把 workspace 数据放在 Electron `userData` 下：
 ```text
 <Electron userData>/workspaces/default/
   runtime.sqlite
-  llm-connections.json
-  credentials.json
+  connection-catalog.json
+  credential-vault.json
   settings.json
   artifacts/
 ```
 
 需要明确的当前边界：
 
+- 当前连接配置文件为 `connection-catalog.json`；已有的 `llm-connections.json` 不会被导入；
 - 会话、消息、执行 ledger、workflow、usage、Automations 和 Daily Review 都保存在 `runtime.sqlite`；
-- API key、bot token、proxy password 等运行凭据当前保存在本地 plaintext `credentials.json`，依赖 OS 账号边界，并在 POSIX 上强制目录 `0700`、文件 `0600`；
-- 订阅 OAuth token（Claude、Codex、GitHub Copilot、xAI 以及 Antigravity preview）统一存放在同一份 `credentials.json`，它是 Runtime Host client 的唯一凭据权威；历史 Electron `safeStorage` 凭据/token 文件不会被导入，仅保留这些历史副本的用户需要重新登录；
+- Runtime Policy 凭据（包括 Connection API/OAuth 信息、请求头、Web Search key 和代理密码）保存在本地 plaintext `credential-vault.json`，依赖 OS 账号边界，并在 POSIX 上强制目录 `0700`、文件 `0600`；
+- Runtime Host client profile 的访问凭据单独保存在 `<Electron userData>/runtime-host-client/credentials.json`；历史 Electron `safeStorage` 凭据/token 文件不会被导入，仅保留这些历史副本的用户需要重新登录；
 - Renderer 不接收明文凭据；文件写入、Shell 和危险工具调用需要经过 permission engine；
 - Eval 不构造 Runtime，也不读取 Runtime storage；Maka subject 连接已有 Runtime Host。
 

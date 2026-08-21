@@ -11,6 +11,7 @@ import {
   resolveSelectedModelContextWindow,
 } from '@maka/runtime/context-budget-policy';
 import { buildLlmHistorySummarizer } from '@maka/runtime/history-compact-summarizer';
+import { buildOpenAiCodexHistoryCompactor } from '@maka/runtime/openai-codex-history-compactor';
 import { buildPricingLookup, recordToolInvocation } from '@maka/runtime/telemetry';
 import { buildProviderOptions, getAIModel } from '@maka/runtime/model-factory';
 import { createProviderRequestCaptureRecorder } from '@maka/runtime/provider-request-telemetry';
@@ -156,6 +157,28 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
       fetch: modelFetch,
       requestHeaders: target.requestHeaders,
     });
+  const resolveHistoryCompactModel = () =>
+    getAIModel({
+      connection: target.connection,
+      apiKey,
+      modelId: target.model,
+      fetch: modelFetch,
+      requestHeaders: target.requestHeaders,
+    });
+  const summarizeHistoryCompact =
+    target.connection.providerType === 'openai-codex'
+      ? buildOpenAiCodexHistoryCompactor({
+          resolveModel: resolveHistoryCompactModel,
+          connectionSlug: target.connection.slug,
+          modelId: target.model,
+          providerOptions,
+        })
+      : buildLlmHistorySummarizer({
+          resolveModel: resolveHistoryCompactModel,
+          providerOptions,
+        });
+  const historyCompactRoute =
+    target.connection.providerType === 'openai-codex' ? 'provider_native' : 'text_summary';
   let telemetryDrainRequested = false;
   const persistTelemetry = async (operation: () => Promise<void>): Promise<void> => {
     try {
@@ -360,19 +383,11 @@ export async function createHostAiSdkBackend(input: HostAiSdkBackendInput): Prom
             }
           : {}),
         loadHistoryCompactCheckpoint: input.context.loadHistoryCompactCheckpoint,
-        summarizeHistoryCompact: buildLlmHistorySummarizer({
-          resolveModel: () =>
-            modelFactory({
-              connection: target.connection,
-              apiKey,
-              modelId: target.model,
-            }),
-          providerOptions,
-        }),
+        summarizeHistoryCompact,
+        historyCompactRoute,
         recordHistoryCompactCheckpoint: input.context.recordHistoryCompactCheckpoint,
         loadTurnRuntimeEvents: input.context.loadTurnRuntimeEvents,
         allowMidTurnHistoryCompaction: input.context.allowMidTurnHistoryCompaction,
-        recordActiveFullCompactBlock: input.context.recordActiveFullCompactBlock,
         recordSemanticCompactBlock: input.context.recordSemanticCompactBlock,
         recordRunTrace: input.context.recordRunTrace,
         ...(commitRunComposition

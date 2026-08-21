@@ -1,6 +1,8 @@
 export {
   SessionNotFoundError,
   SessionReadMarkerMessageNotFoundError,
+  EXTERNAL_SESSION_IMPORT_LOOKUP_MAX_RECENT_SESSION_IDS,
+  EXTERNAL_SESSION_IMPORT_LOOKUP_MAX_SOURCE_IDS,
   assertSafeSessionId,
   createSessionStore,
   createUserMessage,
@@ -12,6 +14,7 @@ export {
 export type {
   CreateStableSessionRequest,
   CreateStableSessionResult,
+  ExternalSessionImportLookupResult,
   ProbeStableSessionCreateResult,
   SessionAuthorityStore,
   SessionCatalogPageCursor,
@@ -50,7 +53,6 @@ export type {
 export { createSqliteShellRunStore } from './shell-run-store.js';
 export type { ClosableShellRunStore } from './shell-run-store.js';
 export * from './workspace-root.js';
-export * from './connection-store.js';
 export { CREDENTIAL_SCHEMA_VERSION, createFileCredentialStore } from './credential-store.js';
 export type { CredentialCasResult, CredentialKind, CredentialStore } from './credential-store.js';
 export * from './settings-store.js';
@@ -104,6 +106,12 @@ export type {
   TaskLedgerStore,
 } from './task-ledger-store.js';
 export * from './foreign-session-store.js';
+export { createWorkBoardStore, WorkBoardStoreError } from './work-board-store.js';
+export type {
+  WorkBoardMutationOptions,
+  WorkBoardStore,
+  WorkBoardStoreErrorCode,
+} from './work-board-store.js';
 export { createSqliteDeepResearchStore } from './deep-research-store.js';
 export type {
   CreateDeepResearchStoreOptions,
@@ -134,6 +142,7 @@ export * from './operational-state-backup.js';
 export * from './mcp-config-store.js';
 export * from './workspace-identity.js';
 export * from './memory-bundle-store.js';
+export * from './storage-writer-composition.js';
 export * from './long-term-memory-store.js';
 export * from './project-catalog.js';
 export * from './project-catalog-authority.js';

@@ -3,9 +3,10 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import type { SessionEvent } from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
-import type {
-  SessionContinuitySnapshot,
-  SubscriptionFrame,
+import {
+  SESSION_CONTINUITY_SCHEMA_VERSION,
+  type SessionContinuitySnapshot,
+  type SubscriptionFrame,
 } from "@maka/runtime-host/protocol";
 import { RuntimeHostSubscriptionError } from "@maka/runtime-host/client";
 import type { DesktopRuntimeHostSession } from "../runtime-host-client.js";
@@ -1040,6 +1041,7 @@ test("ignores a stale seed failure after its replacement succeeds", async () => 
   assert.deepEqual(await attaching, ["session-1"]);
   await observing;
   assert.equal(ready, true);
+  assert.deepEqual(observations.observedSessionIds(), ["session-1"]);
   await observations.close();
 });
 
@@ -1779,6 +1781,7 @@ test("reconciles terminal, Goal, interaction, and sidecar state after subscripti
   const finishedTurns: Array<[string, "completed" | "abandoned"]> = [];
   const interactionSnapshots: Array<readonly { requestId: string }[]> = [];
   const recoveredSessions: string[] = [];
+  const seedTimeline: string[] = [];
   const sessionChanges: string[] = [];
   const firstInteraction = pendingQuestion("interaction-1", "turn-1", "run-1");
   const secondInteraction = pendingQuestion("interaction-2", "turn-2", "run-2");
@@ -1848,9 +1851,17 @@ test("reconciles terminal, Goal, interaction, and sidecar state after subscripti
     emitSubscriptionRecovered: (sessionId) => {
       recoveredSessions.push(sessionId);
     },
+    emitObservationSeed: (sessionId, phase) => {
+      seedTimeline.push(`${phase}:${sessionId}`);
+    },
     now: () => 50,
   });
   const target = eventTarget(15);
+  const originalSend = target.send.bind(target);
+  target.send = (channel, event) => {
+    seedTimeline.push(`event:${event.type}`);
+    originalSend(channel, event);
+  };
   await observer.observe("session-1", "observer-1", target);
   await observer.watchTurn("session-1", "turn-1");
 
@@ -1865,6 +1876,13 @@ test("reconciles terminal, Goal, interaction, and sidecar state after subscripti
 
   assert.deepEqual(finishedTurns, [["session-1", "completed"]]);
   assert.deepEqual(recoveredSessions, ["session-1"]);
+  const pendingAt = seedTimeline.indexOf("pending:session-1");
+  const readyAt = seedTimeline.indexOf("ready:session-1");
+  assert.ok(pendingAt >= 0);
+  assert.ok(readyAt > pendingAt);
+  assert.ok(
+    seedTimeline.slice(pendingAt + 1, readyAt).some((entry) => entry.startsWith("event:")),
+  );
   assert.ok(sessionChanges.includes("goal-change"));
   assert.deepEqual(
     interactionSnapshots.at(-1)?.map((interaction) => interaction.requestId),
@@ -2229,7 +2247,7 @@ function continuitySnapshot(
   overrides: Partial<SessionContinuitySnapshot> = {},
 ): SessionContinuitySnapshot {
   return {
-    schemaVersion: 3,
+    schemaVersion: SESSION_CONTINUITY_SCHEMA_VERSION,
     session: {
       sessionId: "session-1",
       metadataRevision: 1,

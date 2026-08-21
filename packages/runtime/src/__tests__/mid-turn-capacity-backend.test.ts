@@ -20,10 +20,14 @@ import {
 import type { InvocationContext } from '../invocation-context.js';
 import { applyRuntimeEventContextBudget } from '../context-budget.js';
 import { evaluateHistoryCompactCheckpointReplay } from '../history-compact.js';
-import type { HistoryCompactCheckpoint } from '../history-compact-checkpoint.js';
+import type {
+  HistoryCompactCheckpoint,
+  HistoryCompactProviderState,
+} from '../history-compact-checkpoint.js';
 import type { ContextBudgetDiagnostic } from '@maka/core/usage-stats/types';
 import { HistoryCompactSummarizerError } from '../history-compact-error.js';
 import { buildLlmHistorySummarizer } from '../history-compact-summarizer.js';
+import type { HistoryCompactSummaryInput } from '../ai-sdk-compaction-contract.js';
 import { decodeModelCallAttempt, type ModelCallAttempt } from '@maka/core/model-call-attempt';
 import type { MemoryExtractionSourceSnapshot } from '../memory-extraction.js';
 import {
@@ -90,7 +94,15 @@ interface MidTurnFixtureOptions {
   historyCompactOff?: boolean;
   historyBudgetTokens?: number;
   reserveTokens?: number;
-  summarize?: () => Promise<string | undefined> | string | undefined;
+  summarize?: (
+    input: HistoryCompactSummaryInput,
+  ) =>
+    | Promise<string | HistoryCompactProviderState | undefined>
+    | string
+    | HistoryCompactProviderState
+    | undefined;
+  /** Return and replay a Codex subscription V2 provider checkpoint. */
+  providerNative?: boolean;
   branch?: string;
   /** Omit the prior turns so the compaction pool has no safe completed span. */
   withoutPriorTurns?: boolean;
@@ -306,7 +318,14 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
   const commits: ModelCallCommit<ModelCallAttempt>[] = [];
   const summarizerModel = new MockLanguageModelV4({
     doGenerate: {
-      content: [{ type: 'text', text: 'MID_TURN_SUMMARY_SENTINEL' }],
+      content: [
+        {
+          type: 'text',
+          // Structured so it passes the summarizer's checkpoint validation
+          // (#3029) while keeping the sentinel greppable in prompts.
+          text: '## Goal\nMID_TURN_SUMMARY_SENTINEL\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)',
+        },
+      ],
       finishReason: { unified: 'stop', raw: 'stop' },
       usage: {
         inputTokens: { total: 31, noCache: 31, cacheRead: 0, cacheWrite: 0 },
@@ -328,6 +347,9 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
     },
     connection: {
       ...connection(),
+      ...(options.providerNative
+        ? { slug: 'codex-subscription', providerType: 'openai-codex' as const }
+        : {}),
       models: [{ id: 'mock-model-id', ...(options.withoutContextWindow ? {} : { contextWindow }) }],
     },
     apiKey: 'sk-test',
@@ -430,7 +452,23 @@ function buildFixture(options: MidTurnFixtureOptions = {}): MidTurnFixture {
       // The real summarizer is what carries the accounting the backend hands
       // it, so the metered case must go through it rather than a stub.
       if (options.meteredSummarizer) return await meteredSummarize(input);
-      const summary = options.summarize ? await options.summarize() : 'MID_TURN_SUMMARY_SENTINEL';
+      const summary = options.providerNative
+        ? ({
+            kind: 'openai_codex_remote_v2',
+            connectionSlug: 'codex-subscription',
+            modelId: 'mock-model-id',
+            itemId: 'cmp_mid_turn',
+            encryptedContent: 'MID_TURN_ENCRYPTED_STATE',
+          } satisfies HistoryCompactProviderState)
+        : options.summarize
+          ? await options.summarize(input)
+          : `## Goal\nMID_TURN_SUMMARY_SENTINEL\n\n## Progress\n${
+              // Padded proportionally so the write gate's size floor passes
+              // for large folds while small folds keep a compact replacement.
+              JSON.stringify(input.source.foldedRuntimeEvents).length > 30_000
+                ? `- ${'covered '.repeat(150)}`
+                : '- done'
+            }\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`;
       return summary;
     },
     ...(options.meteredSummarizer
@@ -607,6 +645,21 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
       100_000,
     );
     assert.equal(fit.fits, true);
+  });
+
+  test('replays a Codex V2 mid-turn checkpoint as native provider state', async () => {
+    const fixture = buildFixture({ providerNative: true });
+    await runFixtureTurn(fixture, consumer);
+
+    assert.equal(fixture.recorded.length, 1);
+    assert.equal(fixture.recorded[0]?.version, 3);
+    const thirdPrompt = promptJson(fixture, 2);
+    assert.match(thirdPrompt, /MID_TURN_ENCRYPTED_STATE/);
+    assert.match(thirdPrompt, /cmp_mid_turn/);
+    assert.doesNotMatch(thirdPrompt, /Provider-native OpenAI Codex compaction checkpoint/);
+    assert.doesNotMatch(thirdPrompt, /RAW_SPAN_ONE_|PRIOR_FACT/);
+    assert.match(thirdPrompt, /RAW_SPAN_TWO_/);
+    assert.match(thirdPrompt, new RegExp(ANCHOR_TEXT));
   });
 
   test('a mid-turn compaction settles a canonical record for the run it interrupts', async () => {
@@ -817,6 +870,35 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
       | undefined;
     assert.equal(usageEvent?.contextBudget?.historyCompactWritesAttempted, 1);
     assert.equal(usageEvent?.contextBudget?.historyCompactWriteFailures, 1);
+  });
+
+  test('a malformed summarizer completion fails open end-to-end with its granular reason', async () => {
+    // #3029 acceptance criterion, end-to-end through the REAL summarizer:
+    // reject → checkpoint not written → history preserved → the granular
+    // reason lands in the durable compaction diagnostics.
+    const malformedSummarize = buildLlmHistorySummarizer({
+      resolveModel: () => 'fake-model',
+      generateText: async () => ({
+        // The incident's shape: free-form prose, no mandated sections.
+        text: '确认服务端语义后，先只在文本路径上加入预算判断。',
+        finishReason: 'stop',
+      }),
+    });
+    const fixture = buildFixture({ summarize: (input) => malformedSummarize(input) });
+    await runFixtureTurn(fixture, consumer);
+
+    // The turn still completes on the raw projection; nothing durable claims
+    // a checkpoint, and the raw span the fold would have replaced is still in
+    // the next prompt.
+    const complete = fixture.events.find((event) => event.type === 'complete');
+    assert.equal(complete?.type === 'complete' ? complete.stopReason : undefined, 'end_turn');
+    assert.equal(fixture.recorded.length, 0);
+    assert.equal(promptJson(fixture, 2).includes('RAW_SPAN_ONE_'), true);
+
+    const failedOpen = compactionDecisions(fixture).find(
+      (decision) => decision.phase === 'mid_turn' && decision.decision === 'failedOpen',
+    );
+    assert.equal(failedOpen?.failOpenReason, 'malformed_summary_missing_section');
   });
 
   test('exhausts with write_failed in the durable diagnostics when the write fails over the window', async () => {
@@ -1051,7 +1133,10 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
     // projection; the hook measures the materialized payload and keeps the raw
     // messages instead. Validation runs before the recorder, so the rejected
     // checkpoint is never persisted (asserted below).
-    const fixture = buildFixture({ summarize: () => 'GIANT_SUMMARY_'.repeat(600) });
+    const fixture = buildFixture({
+      summarize: () =>
+        `## Goal\n${'GIANT_SUMMARY_'.repeat(600)}\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`,
+    });
     await runFixtureTurn(fixture, consumer);
 
     assert.equal(fixture.model.doStreamCalls.length, 3);
@@ -1149,7 +1234,8 @@ function defineMidTurnSuite(consumer: ConsumerMode): void {
     const fixture = buildFixture({
       contextWindow: 150,
       reserveTokens: 100,
-      summarize: () => 'GIANT_SUMMARY_'.repeat(600),
+      summarize: () =>
+        `## Goal\n${'GIANT_SUMMARY_'.repeat(600)}\n\n## Progress\n- done\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`,
     });
     await runFixtureTurn(fixture, consumer);
 

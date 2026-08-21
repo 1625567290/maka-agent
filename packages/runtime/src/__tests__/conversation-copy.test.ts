@@ -975,7 +975,21 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
       sessionId: 'session-source',
       coveredRuntimeEvents: sourceEvents.filter(isHistoryCompactContentEvent),
       summary: 'The source turn called one opaque tool.',
+      summaryFormat: 'legacy_freeform',
       highWaterSeq: 3,
+    });
+    const providerCheckpoint = buildHistoryCompactCheckpoint({
+      sessionId: 'session-source',
+      coveredRuntimeEvents: sourceEvents.filter(isHistoryCompactContentEvent),
+      providerState: {
+        kind: 'openai_codex_remote_v2',
+        connectionSlug: 'codex-source',
+        modelId: 'gpt-5-codex',
+        itemId: 'cmp-source',
+        encryptedContent: 'OPAQUE_SOURCE_COMPACTION_STATE',
+      },
+      highWaterSeq: 4,
+      previousCheckpointId: checkpoint.checkpointId,
     });
     await runStore.appendEvent('session-source', 'run-source', {
       type: 'provider_request_captured',
@@ -1025,6 +1039,8 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
         latencyMs: 0.5,
       },
     });
+    // A legacy event from the retired active-full writer is treated like any
+    // other event this build cannot emit and is therefore not copied.
     await runStore.appendEvent('session-source', 'run-source', {
       type: 'active_full_compact_block_recorded',
       id: 'active-compact-source',
@@ -1033,7 +1049,7 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
       turnId: 'turn-1',
       ts: 2.6,
       data: { blockId: 'active-source', block: { sourceOwnedHash: true } },
-    });
+    } as unknown as EmittedAgentRunEvent);
     await runStore.appendEvent('session-source', 'run-source', {
       type: 'semantic_compact_block_recorded',
       id: 'semantic-compact-source',
@@ -1056,6 +1072,21 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
         highWaterSeq: checkpoint.highWaterSeq,
         boundaryKind: 'historyCompact',
         checkpoint,
+      },
+    });
+    await runStore.appendEvent('session-source', 'run-source', {
+      type: 'history_compact_checkpoint_recorded',
+      id: 'provider-checkpoint-source',
+      runId: 'run-source',
+      sessionId: 'session-source',
+      turnId: 'turn-1',
+      ts: 2.8,
+      data: {
+        checkpointId: providerCheckpoint.checkpointId,
+        highWaterName: providerCheckpoint.highWaterName,
+        highWaterSeq: providerCheckpoint.highWaterSeq,
+        boundaryKind: 'historyCompact',
+        checkpoint: providerCheckpoint,
       },
     });
     await runStore.appendEvent('session-source', 'run-source', {
@@ -1222,6 +1253,7 @@ test('conversation copy clones one terminal Runtime ledger with new owned identi
     assert.equal(targetAttempt.data?.traceId, targetCapture.data?.traceId);
     assert.equal(targetEvents[1]?.refs?.providerRequestTraceId, targetCapture.data?.traceId);
     assert.equal(targetEvents[1]?.refs?.traceEventId, targetCapture.id);
+    assert.doesNotMatch(JSON.stringify(targetOperationalEvents), /OPAQUE_SOURCE_COMPACTION_STATE/);
     const projectedCheckpoint = await runStore.readEventProjection?.(
       'session-target',
       'history_compact_checkpoint_recorded',
@@ -1348,6 +1380,7 @@ test('conversation copy rebuilds an inline checkpoint without legacy child event
       sessionId: 'session-source',
       coveredRuntimeEvents: sourceEvents.filter(isHistoryCompactContentEvent),
       summary: 'Both retained turns are complete.',
+      summaryFormat: 'legacy_freeform',
       highWaterSeq: 5,
     });
     await runStore.appendEvent('session-source', 'run-2', {
@@ -1526,6 +1559,7 @@ test('conversation copy rebuilds a resumed child checkpoint over its child run c
       sessionId: 'session-source',
       coveredRuntimeEvents: childSourceEvents,
       summary: 'The resumed child retained both child turns.',
+      summaryFormat: 'legacy_freeform',
       highWaterSeq: 8,
     });
     await runStore.appendEvent('session-source', 'run-child-2', {

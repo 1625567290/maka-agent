@@ -20,11 +20,21 @@ import type { InvocationContext } from '../invocation-context.js';
 import {
   buildHistoryCompactCheckpoint,
   type HistoryCompactCheckpoint,
+  type HistoryCompactProviderState,
 } from '../history-compact-checkpoint.js';
 import {
   createTestAiSdkBackend,
   testToolResultArchive,
 } from './execution-boundary-test-helpers.js';
+
+// The checkpoint write gate validates summary structure and floors the size
+// for large folds (#3029), so the stub summary is shaped like a real
+// checkpoint and padded proportionally to the span it replaces.
+function reactiveStructuredSummary(foldedRuntimeEvents: RuntimeEvent[]): string {
+  const progress =
+    JSON.stringify(foldedRuntimeEvents).length > 30_000 ? `- ${'covered '.repeat(150)}` : '- done';
+  return `## Goal\nREACTIVE_SUMMARY_SENTINEL\n\n## Progress\n${progress}\n\n## Next Steps\n1. continue\n\n## Critical Context\n- (none)`;
+}
 
 const RAW_SPAN_ONE = 'RAW_SPAN_ONE_'.repeat(24);
 const ANCHOR_TEXT = 'reactive overflow recovery keep my exact words';
@@ -97,7 +107,13 @@ interface ReactiveFixtureOptions {
   midTurnEnabled?: boolean;
   withoutPriorTurns?: boolean;
   bigPriors?: boolean;
-  summarize?: () => Promise<string | undefined> | string | undefined;
+  summarize?: () =>
+    | Promise<string | HistoryCompactProviderState | undefined>
+    | string
+    | HistoryCompactProviderState
+    | undefined;
+  /** Return and replay a Codex subscription V2 provider checkpoint. */
+  providerNative?: boolean;
   /** Explicit send-level step budget forwarded to the backend. */
   maxSteps?: number;
   /** The FIRST tool step reports an unusable usage object (no token counts). */
@@ -410,7 +426,17 @@ function buildReactiveFixture(options: ReactiveFixtureOptions): ReactiveFixture 
         }) => {
           counters.summarizerCalls += 1;
           summarizedSources.push(JSON.stringify(input.source.foldedRuntimeEvents));
-          return options.summarize ? await options.summarize() : 'REACTIVE_SUMMARY_SENTINEL';
+          return options.providerNative
+            ? ({
+                kind: 'openai_codex_remote_v2',
+                connectionSlug: 'codex-subscription',
+                modelId: 'mock-model-id',
+                itemId: 'cmp_reactive',
+                encryptedContent: 'REACTIVE_ENCRYPTED_STATE',
+              } satisfies HistoryCompactProviderState)
+            : options.summarize
+              ? await options.summarize()
+              : reactiveStructuredSummary(input.source.foldedRuntimeEvents);
         },
         recordHistoryCompactCheckpoint: (checkpoint: HistoryCompactCheckpoint) => {
           recorded.push(checkpoint);
@@ -426,7 +452,13 @@ function buildReactiveFixture(options: ReactiveFixtureOptions): ReactiveFixture 
       if (!options.slowAppendMessage) return;
       for (let i = 0; i < 5; i += 1) await flushMacrotask();
     },
-    connection: { ...connection(), models: [{ id: 'mock-model-id', contextWindow }] },
+    connection: {
+      ...connection(),
+      ...(options.providerNative
+        ? { slug: 'codex-subscription', providerType: 'openai-codex' as const }
+        : {}),
+      models: [{ id: 'mock-model-id', contextWindow }],
+    },
     apiKey: 'sk-test',
     modelId: 'mock-model-id',
     modelFactory: () => model,
@@ -973,6 +1005,7 @@ describe('reactive overflow recovery in the streaming backend', () => {
       sessionId: 'session-1',
       coveredRuntimeEvents: fixture.priorEvents,
       summary: 'EARLIER_TURN_SUMMARY',
+      summaryFormat: 'legacy_freeform',
     });
     carried = checkpoint;
     await runTurn(fixture);
@@ -1002,6 +1035,7 @@ describe('reactive overflow recovery in the streaming backend', () => {
         runtimeTextEvent('never-happened', 'turn-x', 'user', 'AN EVENT THIS LEDGER NEVER HELD'),
       ],
       summary: 'SUMMARY_OF_ANOTHER_HISTORY',
+      summaryFormat: 'legacy_freeform',
     });
     const fixture = buildReactiveFixture({
       script: ['done'],
@@ -1048,6 +1082,26 @@ describe('reactive overflow recovery in the streaming backend', () => {
       [preTurn, preTurn],
       'the retry and its successor were both built under the recovery fold',
     );
+  });
+
+  test('keeps native Codex state projected across a step-0 overflow retry', async () => {
+    const fixture = buildReactiveFixture({
+      script: ['overflow', 'tool', 'done'],
+      bigPriors: true,
+      providerNative: true,
+    });
+    await runTurn(fixture);
+
+    assert.equal(complete(fixture)?.stopReason, 'end_turn');
+    assert.equal(fixture.recorded[0]?.version, 3);
+    for (const call of [1, 2]) {
+      const prompt = JSON.stringify(fixture.model.doStreamCalls[call]?.prompt);
+      assert.match(prompt, /REACTIVE_ENCRYPTED_STATE/);
+      assert.match(prompt, /cmp_reactive/);
+      assert.doesNotMatch(prompt, /Provider-native OpenAI Codex compaction checkpoint/);
+      assert.doesNotMatch(prompt, /PRIOR_FACT/);
+      assert.match(prompt, new RegExp(ANCHOR_TEXT));
+    }
   });
 
   test('does not retry an overflow after an after-step stop is requested', async () => {

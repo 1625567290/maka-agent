@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react';
 import type { ChatDefaultPermissionMode, SettingsSection, ThemePalette, ThemePreference } from '@maka/core/settings';
-import type { LlmConnection, ProviderType } from '@maka/core/llm-connections';
-import type { SessionSummary } from '@maka/core/session';
+import type { ProviderType } from '@maka/core/llm-connections';
+import type { DesktopSessionSummary } from '../preload/bridge-contract.js';
 import type { UiLocalePreference } from '@maka/core/ui-locale';
 import { Spinner } from '@astryxdesign/core/Spinner';
 import { SearchModal, useUiLocale } from '@maka/ui';
@@ -11,7 +11,6 @@ import { useAppShellCommands, type AppShellCommandListOptions } from './app-shel
 import type { ArchivedTasksBridge } from './settings/tasks-settings-page';
 import type { UiLocaleUpdateGate } from './settings/ui-locale-update-gate';
 import { getShellRemainingCopy } from './locales/shell-remaining-copy.js';
-import { ExternalSessionImportDialog } from './external-session-import-dialog.js';
 
 const SettingsModal = lazy(() => import('./settings/settings-modal').then((m) => ({ default: m.SettingsModal })));
 
@@ -36,9 +35,6 @@ function SettingsModalFallback() {
 
 export function AppShellOverlays(props: {
   settingsOpen: boolean;
-  connections: LlmConnection[];
-  defaultConnection: string | null;
-  refreshConnections(): Promise<void>;
   closeSettings(): void;
   themePref: ThemePreference;
   setThemePref(themePref: ThemePreference): void;
@@ -65,9 +61,8 @@ export function AppShellOverlays(props: {
   paletteOpen: boolean;
   closePalette(): void;
   commandOptions: AppShellCommandListOptions;
-  externalImportOpen: boolean;
-  onExternalImportOpenChange(open: boolean): void;
-  onExternalSessionImported(session: SessionSummary): void;
+  onExternalSessionImported(session: DesktopSessionSummary): void;
+  onRemoteHostAdded(profileId: string): void;
 }) {
   const {
     closeHelp,
@@ -75,11 +70,8 @@ export function AppShellOverlays(props: {
     closeSearchModal,
     closeSettings,
     commandOptions,
-    connections,
-    defaultConnection,
     helpOpen,
     paletteOpen,
-    refreshConnections,
     searchModalDeps,
     searchModalOnNavigate,
     searchModalOpen,
@@ -96,8 +88,6 @@ export function AppShellOverlays(props: {
     setDefaultPermissionMode,
     themePalette,
     themePref,
-    externalImportOpen,
-    onExternalImportOpenChange,
     onExternalSessionImported,
   } = props;
 
@@ -109,9 +99,6 @@ export function AppShellOverlays(props: {
       {settingsOpen && (
         <Suspense fallback={<SettingsModalFallback />}>
           <SettingsModal
-            connections={connections}
-            defaultSlug={defaultConnection}
-            onRefresh={refreshConnections}
             onClose={closeSettings}
             themePref={themePref}
             onThemeChange={setThemePref}
@@ -129,6 +116,8 @@ export function AppShellOverlays(props: {
             onOpenKeyboardHelp={props.onOpenKeyboardHelp}
             onOpenSession={props.onOpenSettingsSession}
             archivedTasks={props.archivedTasks}
+            onTaskImported={onExternalSessionImported}
+            onRemoteHostAdded={props.onRemoteHostAdded}
           />
         </Suspense>
       )}
@@ -152,11 +141,6 @@ export function AppShellOverlays(props: {
           if (!open) closePalette();
         }}
         commands={commands}
-      />
-      <ExternalSessionImportDialog
-        isOpen={externalImportOpen}
-        onOpenChange={onExternalImportOpenChange}
-        onImported={onExternalSessionImported}
       />
     </>
   );

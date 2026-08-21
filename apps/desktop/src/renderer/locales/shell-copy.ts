@@ -47,7 +47,7 @@ type CommandCopy = {
 };
 
 const STATIC_COMMAND_KEYWORDS: Record<StaticCommandId, readonly string[]> = {
-  'action:new-chat': ['new', 'chat', 'start', '新', '建', '对话'],
+  'action:new-chat': ['new', 'chat', 'start', '新', '建', '任务'],
   'action:side-chat': [
     'side',
     'chat',
@@ -56,7 +56,7 @@ const STATIC_COMMAND_KEYWORDS: Record<StaticCommandId, readonly string[]> = {
     'explore',
     '侧边',
     '侧聊',
-    '对话',
+    '任务',
     '追问',
   ],
   'action:new-deep-research': ['deep', 'research', 'explore', 'readonly', '研究', '深度', '探索', '只读'],
@@ -66,7 +66,7 @@ const STATIC_COMMAND_KEYWORDS: Record<StaticCommandId, readonly string[]> = {
   'theme:light': ['light', 'theme', '浅色', '主题'],
   'theme:dark': ['dark', 'theme', '深色', 'night', '主题'],
   'theme:auto': ['auto', 'system', 'theme', '跟随', '系统', '主题'],
-  'nav:sessions': ['sessions', 'chats', '会话', '对话', 'left'],
+  'nav:sessions': ['sessions', 'chats', '任务', '会话', '对话', 'left'],
   'nav:automations': ['automations', 'plan', 'task', 'schedule', 'cron', '定时任务', '计划', '提醒'],
   'nav:skills': ['skills', '技能'],
   'nav:mcp': ['mcp', 'server', 'tools', '扩展', '工具'],
@@ -74,7 +74,7 @@ const STATIC_COMMAND_KEYWORDS: Record<StaticCommandId, readonly string[]> = {
   'diag:open-workspace': ['workspace', 'folder', 'open', 'finder', '工作区', '文件夹', '目录'],
   'diag:open-project-folder': ['project', 'folder', 'open', 'finder', '项目', '目录', '文件夹'],
   'diag:open-skills': ['skills', 'folder', 'open', 'finder', '技能', '文件夹'],
-  'diag:export-conversation': ['export', 'markdown', 'copy', 'conversation', '导出', '对话', '剪贴板', 'md'],
+  'diag:export-conversation': ['export', 'markdown', 'copy', 'conversation', '导出', '任务', '剪贴板', 'md'],
   'diag:save-conversation-file': [
     'save',
     'file',
@@ -83,7 +83,7 @@ const STATIC_COMMAND_KEYWORDS: Record<StaticCommandId, readonly string[]> = {
     'export',
     '保存',
     '文件',
-    '对话',
+    '任务',
     '导出',
     'md',
   ],
@@ -166,6 +166,19 @@ type ShellCopy = {
     directorySwitchedTitle: string;
     projectUpdateFailedTitle: string;
     projectUpdateFailedFallback: string;
+    catalogUnavailable: string;
+    retryCatalog: string;
+    remoteDirectoryTitle(host: string): string;
+    remoteDirectoryBreadcrumbs: string;
+    remoteDirectoryHome: string;
+    remoteDirectoryEmpty: string;
+    remoteDirectorySelect: string;
+    remoteDirectoryCancel: string;
+    remoteDirectoryRetry: string;
+    remoteDirectoryLoading: string;
+    remoteDirectoryShowHidden: string;
+    remoteDirectoryHideHidden: string;
+    runtimeHostReadiness: Record<'connecting' | 'reconnecting' | 'unavailable', string>;
     openFailedTitle(path: string): string;
     openPathLabels: Record<'workspace' | 'skills' | 'memory' | 'project', string>;
     openPathFailures: Record<
@@ -229,6 +242,8 @@ type ShellCopy = {
     deleteLabel: string;
     cancelLabel: string;
     deletedTitle(name: string): string;
+    /** The task was restored elsewhere, so the delete was called off. */
+    deleteRestoredTitle(name: string): string;
   };
   skillActions: {
     refreshSkillsFailedTitle: string;
@@ -303,6 +318,27 @@ type ShellCopy = {
     thinkingLabels: Record<ThinkingLevel, string>;
     thinkingFailedTitle: string;
     thinkingFallback: string;
+  };
+  /**
+   * The Goal dialog. A Goal spends tokens without further prompting, so the
+   * wording states what it does and names the two budgets that stop it —
+   * silence here reads as "nothing happens until I press something else".
+   */
+  goalDialog: {
+    title: string;
+    description: string;
+    conditionLabel: string;
+    conditionDescription: string;
+    conditionPlaceholder: string;
+    maxIterationsLabel: string;
+    maxIterationsDescription: string;
+    maxIterationsInvalid(max: number): string;
+    tokenBudgetLabel: string;
+    tokenBudgetDescription: string;
+    tokenBudgetInvalid(min: number): string;
+    cancel: string;
+    submit: string;
+    failedFallback: string;
   };
   errorBoundary: {
     copyPending: string;
@@ -387,12 +423,17 @@ type ShellCopy = {
     resumeFailedFallback: string;
     goalClearFailedTitle: string;
     goalClearFailedFallback: string;
+    goalPauseFailedTitle: string;
+    goalPauseFailedFallback: string;
+    goalResumeFailedTitle: string;
+    goalResumeFailedFallback: string;
     appearanceLoadErrorTitle: string;
     appearanceLoadErrorFallback: string;
     memoryRefreshErrorTitle: string;
     memoryLoadErrorTitle: string;
     memoryErrorFallback: string;
     openModelSettings: string;
+    configureModelsOnHost(hostName: string): string;
     sidebarCollapsed: string;
     resizeConversationList: string;
     skipErrorTitle: string;
@@ -416,42 +457,43 @@ type ShellCopy = {
     permissionModeStreaming: string;
     permissionModeRunning: string;
     permissionModeWaiting: string;
-    planModeChanging: string;
-    planModeStreaming: string;
-    planModeRunning: string;
-    planModeWaiting: string;
+    /** The one mode control locks for the same four reasons, worded once. */
+    /** The Session summary has not arrived, so its mode is not known yet. */
+    modeChangeLoading: string;
+    modeChanging: string;
+    modeChangeStreaming: string;
+    modeChangeRunning: string;
+    modeChangeWaiting: string;
+    /**
+     * Why the ＋ menu's Goal entry is unavailable right now. A Goal takes hold
+     * on the next Turn, so arming one mid-Turn would look like it did nothing;
+     * saying so is better than letting the user find that out afterwards.
+     */
+    goalTurnActive: string;
     planModeFailedTitle: string;
     planModeFallback: string;
+    orchestrationModeFailedTitle: string;
+    orchestrationModeFallback: string;
     planModeExitPendingTitle: string;
     planModeExitPendingDescription(title: string): string;
     planModeExitConfirm: string;
     planModeExitCancel: string;
     planModeExecutionActiveTitle: string;
     planModeExecutionActiveDescription: string;
-    swarmModeChanging: string;
-    swarmModeStreaming: string;
-    swarmModeRunning: string;
-    swarmModeWaiting: string;
-    swarmModeFailedTitle: string;
-    swarmModeFallback: string;
     swarmModeEnabledTitle: string;
     swarmModeDisabledTitle: string;
     swarmModeStatusDescription: string;
-    graphModeChanging: string;
-    graphModeStreaming: string;
-    graphModeRunning: string;
-    graphModeWaiting: string;
-    graphModeFailedTitle: string;
-    graphModeFallback: string;
     graphModeEnabledTitle: string;
     graphModeDisabledTitle: string;
     graphModeStatusDescription: string;
+    graphHistoryTitle: string;
+    graphHistoryDescription: string;
     resizeWorkbar: string;
   };
 };
 
 const ZH_STATIC_COMMANDS: Record<StaticCommandId, CommandCopy> = {
-  'action:new-chat': { label: '新建对话', hint: '开始新的会话', group: '操作' },
+  'action:new-chat': { label: '新建任务', hint: '开始新的任务', group: '操作' },
   'action:side-chat': {
     label: '打开侧边对话',
     hint: '⌥⌘S',
@@ -472,7 +514,7 @@ const ZH_STATIC_COMMANDS: Record<StaticCommandId, CommandCopy> = {
   'theme:light': { label: '主题 · 浅色', group: '主题' },
   'theme:dark': { label: '主题 · 深色', group: '主题' },
   'theme:auto': { label: '主题 · 跟随系统', group: '主题' },
-  'nav:sessions': { label: '侧栏 · 会话', group: '导航' },
+  'nav:sessions': { label: '侧栏 · 任务', group: '导航' },
   'nav:automations': { label: '侧栏 · 定时任务', group: '导航' },
   'nav:skills': { label: '打开 · 技能', group: '导航' },
   'nav:mcp': { label: '打开 · MCP', group: '导航' },
@@ -493,12 +535,12 @@ const ZH_STATIC_COMMANDS: Record<StaticCommandId, CommandCopy> = {
     group: '诊断',
   },
   'diag:export-conversation': {
-    label: '导出当前对话为 Markdown',
+    label: '导出当前任务为 Markdown',
     hint: '复制到剪贴板',
     group: '诊断',
   },
   'diag:save-conversation-file': {
-    label: '保存当前对话为 .md 文件',
+    label: '保存当前任务为 .md 文件',
     hint: '用系统保存对话框',
     group: '诊断',
   },
@@ -536,8 +578,8 @@ const ZH_STATIC_COMMANDS: Record<StaticCommandId, CommandCopy> = {
 
 const EN_STATIC_COMMANDS: Record<StaticCommandId, CommandCopy> = {
   'action:new-chat': {
-    label: 'New conversation',
-    hint: 'Start a new conversation',
+    label: 'New task',
+    hint: 'Start a new task',
     group: 'Actions',
   },
   'action:side-chat': {
@@ -568,7 +610,7 @@ const EN_STATIC_COMMANDS: Record<StaticCommandId, CommandCopy> = {
   'theme:light': { label: 'Theme · Light', group: 'Theme' },
   'theme:dark': { label: 'Theme · Dark', group: 'Theme' },
   'theme:auto': { label: 'Theme · Follow system', group: 'Theme' },
-  'nav:sessions': { label: 'Sidebar · Conversations', group: 'Navigation' },
+  'nav:sessions': { label: 'Sidebar · Tasks', group: 'Navigation' },
   'nav:automations': { label: 'Sidebar · Automations', group: 'Navigation' },
   'nav:skills': { label: 'Open · Skills', group: 'Navigation' },
   'nav:mcp': { label: 'Open · MCP', group: 'Navigation' },
@@ -589,12 +631,12 @@ const EN_STATIC_COMMANDS: Record<StaticCommandId, CommandCopy> = {
     group: 'Diagnostics',
   },
   'diag:export-conversation': {
-    label: 'Copy conversation as Markdown',
+    label: 'Copy task as Markdown',
     hint: 'Copy to clipboard',
     group: 'Diagnostics',
   },
   'diag:save-conversation-file': {
-    label: 'Save conversation as an .md file',
+    label: 'Save task as an .md file',
     hint: 'Use the system save dialog',
     group: 'Diagnostics',
   },
@@ -638,6 +680,7 @@ const ZH_SETTINGS_SECTIONS: Record<SettingsSection, string> = {
   subagents: '子 Agent',
   usage: '使用统计',
   'archived-tasks': '已归档任务',
+  'import-tasks': '导入任务',
   memory: '记忆',
   'daily-review': '每日回顾',
   'bot-chat': '远程接入',
@@ -656,6 +699,7 @@ const EN_SETTINGS_SECTIONS: Record<SettingsSection, string> = {
   subagents: 'Subagents',
   usage: 'Usage',
   'archived-tasks': 'Archived tasks',
+  'import-tasks': 'Import tasks',
   memory: 'Memory',
   'daily-review': 'Daily Review',
   'bot-chat': 'Remote Access',
@@ -676,14 +720,14 @@ const SHELL_COPY_BY_LOCALE = {
       skills: 'Skills 文件夹',
     },
     errors: {
-      messageRead: '对话内容暂时无法读取，请稍后重试。',
-      messageRefresh: '对话内容暂时无法刷新，请稍后重试。',
+      messageRead: '任务内容暂时无法读取，请稍后重试。',
+      messageRefresh: '任务内容暂时无法刷新，请稍后重试。',
       openPath: (path: string) => `无法打开${path}，请稍后重试。`,
       workspaceUnavailableTitle: '工作目录不可用',
       workspaceUnavailableDescription: '工作目录不存在或无法访问。请选择有效目录创建新任务。',
     },
     chatActions: {
-      newConversation: '新建对话',
+      newConversation: '新建任务',
       sendFailedTitle: '发送失败',
       sendFailedFallback: '消息暂时无法发送，请稍后重试。',
       skillInvocationBlockedTitle: 'Skill 调用失败，消息未发送',
@@ -699,10 +743,10 @@ const SHELL_COPY_BY_LOCALE = {
         too_many_requests: 'Skill 调用请求超过 50 个上限',
       },
       responseFailedTitle: '响应失败',
-      responseFailedFallback: '会话操作失败，请稍后重试。',
-      refreshFailedTitle: '刷新对话失败',
-      sessionStartFailedTitle: '开始对话失败',
-      sessionStartFailedFallback: '对话暂时无法开始，请稍后重试。',
+      responseFailedFallback: '任务操作失败，请稍后重试。',
+      refreshFailedTitle: '刷新任务失败',
+      sessionStartFailedTitle: '开始任务失败',
+      sessionStartFailedFallback: '任务暂时无法开始，请稍后重试。',
     },
     projectActions: {
       currentProject: '当前项目',
@@ -713,6 +757,23 @@ const SHELL_COPY_BY_LOCALE = {
       directorySwitchedTitle: '已切换工作目录',
       projectUpdateFailedTitle: '项目操作失败',
       projectUpdateFailedFallback: '暂时无法更新项目，请稍后重试。',
+      catalogUnavailable: 'Runtime Host 暂时不可用',
+      retryCatalog: '重试加载',
+      remoteDirectoryTitle: (host: string) => `在 ${host} 上添加项目`,
+      remoteDirectoryBreadcrumbs: '当前文件夹',
+      remoteDirectoryHome: '主目录',
+      remoteDirectoryEmpty: '此文件夹中没有子文件夹',
+      remoteDirectorySelect: '添加此文件夹',
+      remoteDirectoryCancel: '取消',
+      remoteDirectoryRetry: '重试',
+      remoteDirectoryLoading: '正在读取文件夹…',
+      remoteDirectoryShowHidden: '显示隐藏目录',
+      remoteDirectoryHideHidden: '不显示隐藏目录',
+      runtimeHostReadiness: {
+        connecting: '连接中',
+        reconnecting: '正在重连',
+        unavailable: '不可用',
+      },
       openFailedTitle: (path: string) => `无法打开${path}`,
       openPathLabels: {
         workspace: '工作区目录',
@@ -747,23 +808,23 @@ const SHELL_COPY_BY_LOCALE = {
       setDefaultSuccess: (name: string) => `已设为默认 · ${name}`,
       setDefaultFailedTitle: '切换默认失败',
       setDefaultFallback: '默认模型暂时无法切换，请稍后重试。',
-      newConversation: '新建对话',
-      conversationCopiedTitle: '已复制对话为 Markdown',
+      newConversation: '新建任务',
+      conversationCopiedTitle: '已复制任务为 Markdown',
       lineCount: (lines: number) => `${lines} 行 · 可粘贴到 Notion / Obsidian / GitHub`,
       copyFailedTitle: '复制失败',
       clipboardUnavailable: '剪贴板不可用',
-      conversationSavedTitle: '已保存当前对话',
+      conversationSavedTitle: '已保存当前任务',
       saveSummary: (lines: number, fileName: string) => `${lines} 行 · 保存为 ${fileName}`,
       saveFailedTitle: '保存失败',
       invalidExport: '导出内容无效',
       writeFailed: '无法写入选择的位置',
-      exportFallback: '导出当前对话失败，请稍后重试。',
+      exportFallback: '导出当前任务失败，请稍后重试。',
       memoryOpenFailedTitle: '无法打开 MEMORY.md',
       openFailedTitle: '打开失败',
       memoryOpenFallback: '无法打开 MEMORY.md，请稍后重试。',
       today: '今天',
       reviewCopiedTitle: '已复制今日回顾为 Markdown',
-      reviewSummary: (sessions: number, requests: number) => `${sessions} 个对话 · ${requests} 个请求`,
+      reviewSummary: (sessions: number, requests: number) => `${sessions} 个任务 · ${requests} 个请求`,
       reviewCopyFallback: '今日回顾暂时不可用，或剪贴板被系统拒绝。',
       reviewPastedTitle: '已追加今日回顾到输入框',
       reviewCopied: (label: string) => `已复制${label}回顾`,
@@ -780,19 +841,20 @@ const SHELL_COPY_BY_LOCALE = {
       networkTestFallback: '网络代理测试暂时不可用，请稍后重试。',
     },
     sessionRowActions: {
-      actionFallback: '会话操作失败，请稍后重试。',
-      flagFailedTitle: '标记会话失败',
+      actionFallback: '任务操作失败，请稍后重试。',
+      flagFailedTitle: '标记任务失败',
       unflagFailedTitle: '取消标记失败',
-      archiveFailedTitle: '归档会话失败',
-      unarchiveFailedTitle: '恢复会话失败',
-      renameFailedTitle: '重命名会话失败',
-      deleteFailedTitle: '删除会话失败',
-      currentConversation: '当前会话',
+      archiveFailedTitle: '归档任务失败',
+      unarchiveFailedTitle: '恢复任务失败',
+      renameFailedTitle: '重命名任务失败',
+      deleteFailedTitle: '删除任务失败',
+      currentConversation: '当前任务',
       deleteTitle: (name: string) => `删除 "${name}"`,
-      deleteDescription: '会话和全部消息会从磁盘上永久移除。该操作不可撤销。',
+      deleteDescription: '任务和全部消息会从磁盘上永久移除。该操作不可撤销。',
       deleteLabel: '删除',
       cancelLabel: '取消',
       deletedTitle: (name: string) => `已删除 ${name}`,
+      deleteRestoredTitle: (name: string) => `${name} 已被恢复，未删除`,
     },
     skillActions: {
       refreshSkillsFailedTitle: '刷新技能失败',
@@ -899,7 +961,7 @@ const SHELL_COPY_BY_LOCALE = {
       permissionSwitched: (label: string) => `已切到 ${label}`,
       permissionFailedTitle: '切换权限模式失败',
       permissionFallback: '权限模式暂时无法切换，请稍后重试。',
-      modelSwitchedTitle: '已切换当前会话模型',
+      modelSwitchedTitle: '已切换当前任务模型',
       modelSwitchedDescription: (from, to) => `${from} → ${to}`,
       modelFailedTitle: '切换模型失败',
       modelFallback: '模型暂时无法切换，请稍后重试。',
@@ -916,6 +978,22 @@ const SHELL_COPY_BY_LOCALE = {
       },
       thinkingFailedTitle: '切换思考级别失败',
       thinkingFallback: '思考级别暂时无法切换，请稍后重试。',
+    },
+    goalDialog: {
+      title: '设定 Goal',
+      description: 'Goal 会在每轮结束后自动续行，直到达成、判定不可行，或触及下面的预算。随时可在输入框上方停止。',
+      conditionLabel: '达成条件',
+      conditionDescription: '用一句话说明什么算做完；Maka 每轮都据此判断。',
+      conditionPlaceholder: '例如：所有测试通过，且 lint 无告警',
+      maxIterationsLabel: '最多轮数',
+      maxIterationsDescription: '留空使用默认值。',
+      maxIterationsInvalid: (max) => `请填 1 到 ${max} 之间的整数，或留空。`,
+      tokenBudgetLabel: 'Token 预算',
+      tokenBudgetDescription: '留空表示不设 token 上限。',
+      tokenBudgetInvalid: (min) => `请填不小于 ${min} 的整数，或留空。`,
+      cancel: '取消',
+      submit: '开始',
+      failedFallback: '无法设定 Goal，请稍后重试。',
     },
     errorBoundary: {
       copyPending: '复制中…',
@@ -935,7 +1013,7 @@ const SHELL_COPY_BY_LOCALE = {
     commandPalette: {
       label: '命令面板',
       searchLabel: '命令面板搜索',
-      placeholder: '搜索命令、设置项或会话…',
+      placeholder: '搜索命令、设置项或任务…',
       closeLabel: '关闭命令面板',
       resultsLabel: '命令面板结果',
       emptyTitle: '没有匹配的命令',
@@ -948,7 +1026,7 @@ const SHELL_COPY_BY_LOCALE = {
         settings: '设置',
         permissions: '权限',
         connections: '连接',
-        conversations: '会话',
+        conversations: '任务',
       },
       staticKeywords: STATIC_COMMAND_KEYWORDS,
       commands: ZH_STATIC_COMMANDS,
@@ -989,7 +1067,7 @@ const SHELL_COPY_BY_LOCALE = {
           rows: [
             {
               keys: ['⌘', 'K'],
-              description: '打开命令面板（跳会话 / 设置 / 主题等）',
+              description: '打开命令面板（跳任务 / 设置 / 主题等）',
             },
             { keys: ['?'], description: '打开 / 关闭此快捷键面板' },
             { keys: ['⌘', 'N'], description: '新建任务' },
@@ -1006,18 +1084,14 @@ const SHELL_COPY_BY_LOCALE = {
           ],
         },
         {
-          heading: '会话列表',
+          heading: '任务列表',
           rows: [
-            { keys: ['Tab'], description: '在会话与导航之间移动焦点' },
-            { keys: ['↑', '↓'], description: '上下移动聚焦的会话' },
+            { keys: ['Tab'], description: '在任务与导航之间移动焦点' },
+            { keys: ['↑', '↓'], description: '上下移动聚焦的任务' },
             { keys: ['Home', 'End'], description: '跳到列表顶部 / 底部' },
-            {
-              keys: ['←', '→'],
-              description: '在会话 / 已标记 / 已归档之间循环切换',
-            },
-            { keys: ['Enter'], description: '打开聚焦的会话' },
+            { keys: ['Enter'], description: '打开聚焦的任务' },
             { keys: ['Delete'], description: '弹出删除确认（永远不静默删除）' },
-            { keys: ['F'], description: '聚焦会话列表搜索框（按 Esc 清空）' },
+            { keys: ['F'], description: '聚焦任务列表搜索框（按 Esc 清空）' },
           ],
         },
         {
@@ -1031,7 +1105,7 @@ const SHELL_COPY_BY_LOCALE = {
           heading: '面板调整',
           rows: [
             { keys: ['Tab'], description: '聚焦左右分割条' },
-            { keys: ['←', '→'], description: '微调会话列表宽度（±10 px）' },
+            { keys: ['←', '→'], description: '微调任务列表宽度（±10 px）' },
             { keys: ['Shift', '←', '→'], description: '快速调整（±50 px）' },
             { keys: ['Home', 'End'], description: '直接拉到最小 / 最大宽度' },
           ],
@@ -1040,21 +1114,21 @@ const SHELL_COPY_BY_LOCALE = {
     },
     chrome: {
       windowActions: '窗口快捷操作',
-      searchConversations: '搜索对话',
+      searchConversations: '搜索任务',
       expandSidebar: '展开侧边栏',
       collapseSidebar: '收起侧边栏',
       newTask: '新任务',
-      expandWorkbar: '展开会话工作栏',
-      collapseWorkbar: '收起会话工作栏',
+      expandWorkbar: '展开任务工作栏',
+      collapseWorkbar: '收起任务工作栏',
       workspaceActions: '工作区辅助操作',
     },
     app: {
-      loadingWorkbarLabel: '正在加载会话工作栏',
-      loadingWorkbar: '正在加载会话工作栏…',
+      loadingWorkbarLabel: '正在加载任务工作栏',
+      loadingWorkbar: '正在加载任务工作栏…',
       useSkillPrompt: (skillName: string) => `使用 ${skillName} 技能：`,
-      newConversation: '新建对话',
+      newConversation: '新建任务',
       compactErrorTitle: '压缩失败',
-      compactErrorFallback: '对话暂时无法压缩，请稍后重试。',
+      compactErrorFallback: '任务暂时无法压缩，请稍后重试。',
       slashCommands: {
         compact: { name: '压缩上下文', description: '压缩旧历史并保留当前任务' },
         graph: { name: '使用 Graph', description: '查看、切换或单次运行 Graph' },
@@ -1062,24 +1136,30 @@ const SHELL_COPY_BY_LOCALE = {
         swarm: { name: '使用 Swarm', description: '查看、切换或单次运行 Swarm' },
       },
       sideChatUnavailableTitle: '暂时无法打开侧边对话',
-      sideChatUnavailableDescription: '请先在主会话中发送一条消息，再使用 /side。',
+      sideChatUnavailableDescription: '请先在主任务中发送一条消息，再使用 /side。',
       sideChatContextPendingTitle: '先处理待发送的上下文',
       sideChatContextPendingDescription:
         '当前 Composer 还有附件、引用或文件 mention。请先发送或移除它们，再使用 /side。',
       resumeStartedTitle: '已开始安全恢复',
       resumeStartedDescription: '正在从最后一个完整执行边界继续',
       resumeFailedTitle: '恢复失败',
-      resumeFailedFallback: '无法启动安全恢复，请检查会话状态后重试。',
+      resumeFailedFallback: '无法启动安全恢复，请检查任务状态后重试。',
       goalClearFailedTitle: '停止目标失败',
       goalClearFailedFallback: '目标仍可能继续运行，请立即重试。',
+      goalPauseFailedTitle: '暂停目标失败',
+      goalPauseFailedFallback: '目标可能仍在自动续行，请立即重试。',
+      goalResumeFailedTitle: '恢复目标失败',
+      goalResumeFailedFallback: '目标仍处于暂停状态，请重试。',
       appearanceLoadErrorTitle: '载入外观设置失败',
       appearanceLoadErrorFallback: '外观设置暂时无法载入，请稍后重试。',
       memoryRefreshErrorTitle: '刷新本地记忆状态失败',
       memoryLoadErrorTitle: '载入本地记忆状态失败',
       memoryErrorFallback: '本地记忆状态暂时无法刷新，请稍后重试。',
       openModelSettings: '打开设置 · 模型',
+      configureModelsOnHost: (hostName: string) =>
+        `请先在 ${hostName} 上配置模型连接。`,
       sidebarCollapsed: '侧边栏已收起',
-      resizeConversationList: '调整对话列表宽度',
+      resizeConversationList: '调整任务列表宽度',
       skipErrorTitle: '跳过失败',
       tryAgainLater: '请稍后重试。',
       updateInstallFailedTitle: '无法安装更新',
@@ -1093,20 +1173,24 @@ const SHELL_COPY_BY_LOCALE = {
       updateRetryFailedFallback: '请稍后重试，或手动下载最新版本。',
       loading: '加载中',
       goToModels: '去模型',
-      boundaryUnreadableTitle: '暂时读不到这个对话的权限',
-      boundaryUnreadableDetail: '在读到之前，这里暂时不能输入。可以重试，或先切换到别的对话。',
+      boundaryUnreadableTitle: '暂时读不到这个任务的权限',
+      boundaryUnreadableDetail: '在读到之前，这里暂时不能输入。可以重试，或先切换到别的任务。',
       boundaryUnreadableRetry: '重试',
       boundaryUnreadableRetrying: '重试中…',
       permissionModeChanging: '权限模式正在切换，完成后再继续操作。',
-      permissionModeStreaming: '当前对话正在流式输出，等结束后再切换权限模式。',
-      permissionModeRunning: '当前对话正在运行，等结束后再切换权限模式。',
+      permissionModeStreaming: '当前任务正在流式输出，等结束后再切换权限模式。',
+      permissionModeRunning: '当前任务正在运行，等结束后再切换权限模式。',
       permissionModeWaiting: '当前有工具调用正在等待确认，处理后再切换权限模式。',
-      planModeChanging: 'Plan Mode 正在切换，完成后再继续操作。',
-      planModeStreaming: '当前对话正在流式输出，等结束后再切换 Plan Mode。',
-      planModeRunning: '当前对话正在运行，等结束后再切换 Plan Mode。',
-      planModeWaiting: '当前有工具调用正在等待确认，处理后再切换 Plan Mode。',
-      planModeFailedTitle: '切换 Plan Mode 失败',
-      planModeFallback: 'Plan Mode 暂时无法切换，请稍后重试。',
+      modeChangeLoading: '会话还在载入，稍候即可切换模式。',
+      modeChanging: '模式正在切换，完成后再继续操作。',
+      modeChangeStreaming: '当前任务正在流式输出，等结束后再切换模式。',
+      modeChangeRunning: '当前任务正在运行，等结束后再切换模式。',
+      modeChangeWaiting: '当前有工具调用正在等待确认，处理后再切换模式。',
+      goalTurnActive: 'Goal 从下一轮开始生效。等当前这一轮结束后再设定。',
+      planModeFailedTitle: '切换 Plan 模式失败',
+      planModeFallback: 'Plan 模式暂时无法切换，请稍后重试。',
+      orchestrationModeFailedTitle: '切换编排模式失败',
+      orchestrationModeFallback: '编排模式暂时无法切换，请稍后重试。',
       planModeExitPendingTitle: '放弃当前方案？',
       planModeExitPendingDescription: (title: string) =>
         `「${title}」尚未审批。退出 Plan Mode 后，该方案会标记为已放弃，但历史记录仍会保留。`,
@@ -1114,25 +1198,15 @@ const SHELL_COPY_BY_LOCALE = {
       planModeExitCancel: '继续规划',
       planModeExecutionActiveTitle: '计划仍在执行',
       planModeExecutionActiveDescription: '请先中断当前执行，再进入 Plan Mode 调整方案。',
-      swarmModeChanging: 'Swarm Mode 正在切换，完成后再继续操作。',
-      swarmModeStreaming: '当前对话正在流式输出，等结束后再切换 Swarm Mode。',
-      swarmModeRunning: '当前对话正在运行，等结束后再切换 Swarm Mode。',
-      swarmModeWaiting: '当前有工具调用正在等待确认，处理后再切换 Swarm Mode。',
-      swarmModeFailedTitle: '切换 Swarm Mode 失败',
-      swarmModeFallback: 'Swarm Mode 暂时无法切换，请稍后重试。',
       swarmModeEnabledTitle: 'Swarm Mode 已开启',
       swarmModeDisabledTitle: 'Swarm Mode 未开启',
       swarmModeStatusDescription: '使用 /swarm on、/swarm off，或 /swarm <任务> 单次运行。',
-      graphModeChanging: 'Graph Mode 正在切换，完成后再继续操作。',
-      graphModeStreaming: '当前对话正在流式输出，等结束后再切换 Graph Mode。',
-      graphModeRunning: '当前对话正在运行，等结束后再切换 Graph Mode。',
-      graphModeWaiting: '当前有工具调用正在等待确认，处理后再切换 Graph Mode。',
-      graphModeFailedTitle: '切换 Graph Mode 失败',
-      graphModeFallback: 'Graph Mode 暂时无法切换，请稍后重试。',
       graphModeEnabledTitle: 'Graph Mode 已开启',
       graphModeDisabledTitle: 'Graph Mode 未开启',
       graphModeStatusDescription: '使用 /graph on、/graph off，或 /graph <任务> 单次运行。',
-      resizeWorkbar: '调整会话工作栏宽度',
+      graphHistoryTitle: 'Graph 历史',
+      graphHistoryDescription: '请在 Agent Graph 面板的运行轮次菜单中查看历史记录。',
+      resizeWorkbar: '调整任务工作栏宽度',
     },
   },
   en: {
@@ -1144,15 +1218,15 @@ const SHELL_COPY_BY_LOCALE = {
       skills: 'Skills folder',
     },
     errors: {
-      messageRead: 'Conversation content is temporarily unavailable. Try again later.',
-      messageRefresh: 'Conversation content could not be refreshed. Try again later.',
+      messageRead: 'Task content is temporarily unavailable. Try again later.',
+      messageRefresh: 'Task content could not be refreshed. Try again later.',
       openPath: (path: string) => `Could not open the ${path}. Try again later.`,
       workspaceUnavailableTitle: 'Working directory unavailable',
       workspaceUnavailableDescription:
         'The working directory does not exist or cannot be accessed. Select a valid folder for a new task.',
     },
     chatActions: {
-      newConversation: 'New conversation',
+      newConversation: 'New task',
       sendFailedTitle: 'Message not sent',
       sendFailedFallback: 'The message could not be sent. Try again later.',
       skillInvocationBlockedTitle: 'Skill invocation failed; message not sent',
@@ -1169,10 +1243,10 @@ const SHELL_COPY_BY_LOCALE = {
         too_many_requests: 'more than 50 distinct Skill invocation requests',
       },
       responseFailedTitle: 'Response failed',
-      responseFailedFallback: 'The conversation action failed. Try again later.',
-      refreshFailedTitle: 'Could not refresh conversation',
-      sessionStartFailedTitle: 'Could not start conversation',
-      sessionStartFailedFallback: 'The conversation could not be started. Try again later.',
+      responseFailedFallback: 'The task action failed. Try again later.',
+      refreshFailedTitle: 'Could not refresh task',
+      sessionStartFailedTitle: 'Could not start task',
+      sessionStartFailedFallback: 'The task could not be started. Try again later.',
     },
     projectActions: {
       currentProject: 'Current project',
@@ -1183,6 +1257,23 @@ const SHELL_COPY_BY_LOCALE = {
       directorySwitchedTitle: 'Working directory changed',
       projectUpdateFailedTitle: 'Could not update project',
       projectUpdateFailedFallback: 'The project could not be updated. Try again later.',
+      catalogUnavailable: 'Runtime Hosts unavailable',
+      retryCatalog: 'Retry loading',
+      remoteDirectoryTitle: (host: string) => `Add a project on ${host}`,
+      remoteDirectoryBreadcrumbs: 'Current folder',
+      remoteDirectoryHome: 'Home',
+      remoteDirectoryEmpty: 'No folders here',
+      remoteDirectorySelect: 'Add this folder',
+      remoteDirectoryCancel: 'Cancel',
+      remoteDirectoryRetry: 'Retry',
+      remoteDirectoryLoading: 'Loading folders…',
+      remoteDirectoryShowHidden: 'Show hidden folders',
+      remoteDirectoryHideHidden: 'Hide hidden folders',
+      runtimeHostReadiness: {
+        connecting: 'Connecting',
+        reconnecting: 'Reconnecting',
+        unavailable: 'Unavailable',
+      },
       openFailedTitle: (path: string) => `Could not open ${path}`,
       openPathLabels: {
         workspace: 'workspace folder',
@@ -1217,23 +1308,23 @@ const SHELL_COPY_BY_LOCALE = {
       setDefaultSuccess: (name: string) => `Set as default · ${name}`,
       setDefaultFailedTitle: 'Could not change default',
       setDefaultFallback: 'The default model could not be changed. Try again later.',
-      newConversation: 'New conversation',
-      conversationCopiedTitle: 'Conversation copied as Markdown',
+      newConversation: 'New task',
+      conversationCopiedTitle: 'Task copied as Markdown',
       lineCount: (lines: number) => `${lines} lines · Ready for Notion / Obsidian / GitHub`,
       copyFailedTitle: 'Copy failed',
       clipboardUnavailable: 'Clipboard unavailable',
-      conversationSavedTitle: 'Conversation saved',
+      conversationSavedTitle: 'Task saved',
       saveSummary: (lines: number, fileName: string) => `${lines} lines · Saved as ${fileName}`,
       saveFailedTitle: 'Save failed',
       invalidExport: 'The export content is invalid',
       writeFailed: 'The selected location could not be written',
-      exportFallback: 'The conversation could not be exported. Try again later.',
+      exportFallback: 'The task could not be exported. Try again later.',
       memoryOpenFailedTitle: 'Could not open MEMORY.md',
       openFailedTitle: 'Open failed',
       memoryOpenFallback: 'MEMORY.md could not be opened. Try again later.',
       today: 'Today',
       reviewCopiedTitle: "Today's review copied as Markdown",
-      reviewSummary: (sessions: number, requests: number) => `${sessions} conversations · ${requests} requests`,
+      reviewSummary: (sessions: number, requests: number) => `${sessions} tasks · ${requests} requests`,
       reviewCopyFallback: "Today's review is unavailable, or the clipboard was denied.",
       reviewPastedTitle: "Today's review added to the composer",
       reviewCopied: (label: string) => `${label} review copied`,
@@ -1250,20 +1341,21 @@ const SHELL_COPY_BY_LOCALE = {
       networkTestFallback: 'Network proxy testing is temporarily unavailable. Try again later.',
     },
     sessionRowActions: {
-      actionFallback: 'The conversation action failed. Try again later.',
-      flagFailedTitle: 'Could not flag conversation',
+      actionFallback: 'The task action failed. Try again later.',
+      flagFailedTitle: 'Could not flag task',
       unflagFailedTitle: 'Could not remove flag',
-      archiveFailedTitle: 'Could not archive conversation',
-      unarchiveFailedTitle: 'Could not restore conversation',
-      renameFailedTitle: 'Could not rename conversation',
-      deleteFailedTitle: 'Could not delete conversation',
-      currentConversation: 'Current conversation',
+      archiveFailedTitle: 'Could not archive task',
+      unarchiveFailedTitle: 'Could not restore task',
+      renameFailedTitle: 'Could not rename task',
+      deleteFailedTitle: 'Could not delete task',
+      currentConversation: 'Current task',
       deleteTitle: (name: string) => `Delete "${name}"`,
       deleteDescription:
-        'The conversation and all of its messages will be permanently removed from disk. This cannot be undone.',
+        'The task and all of its messages will be permanently removed from disk. This cannot be undone.',
       deleteLabel: 'Delete',
       cancelLabel: 'Cancel',
       deletedTitle: (name: string) => `Deleted ${name}`,
+      deleteRestoredTitle: (name: string) => `${name} was restored, so it was kept`,
     },
     skillActions: {
       refreshSkillsFailedTitle: 'Could not refresh Skills',
@@ -1371,7 +1463,7 @@ const SHELL_COPY_BY_LOCALE = {
       permissionSwitched: (label: string) => `Switched to ${label}`,
       permissionFailedTitle: 'Could not change permission mode',
       permissionFallback: 'The permission mode could not be changed. Try again later.',
-      modelSwitchedTitle: 'Conversation model changed',
+      modelSwitchedTitle: 'Task model changed',
       modelSwitchedDescription: (from, to) => `${from} → ${to}`,
       modelFailedTitle: 'Could not change model',
       modelFallback: 'The model could not be changed. Try again later.',
@@ -1388,6 +1480,22 @@ const SHELL_COPY_BY_LOCALE = {
       },
       thinkingFailedTitle: 'Could not change thinking level',
       thinkingFallback: 'The thinking level could not be changed. Try again later.',
+    },
+    goalDialog: {
+      title: 'Set a goal',
+      description: 'Maka continues on its own after each turn until the goal is met, judged impossible, or a budget below is reached. You can stop it any time from above the composer.',
+      conditionLabel: 'Completion condition',
+      conditionDescription: 'One sentence for what counts as done; Maka checks it after every turn.',
+      conditionPlaceholder: 'e.g. all tests pass and lint reports no warnings',
+      maxIterationsLabel: 'Maximum turns',
+      maxIterationsDescription: 'Leave empty to use the default.',
+      maxIterationsInvalid: (max) => `Enter a whole number from 1 to ${max}, or leave it empty.`,
+      tokenBudgetLabel: 'Token budget',
+      tokenBudgetDescription: 'Leave empty for no token ceiling.',
+      tokenBudgetInvalid: (min) => `Enter a whole number of at least ${min}, or leave it empty.`,
+      cancel: 'Cancel',
+      submit: 'Start',
+      failedFallback: 'The goal could not be set. Try again.',
     },
     errorBoundary: {
       copyPending: 'Copying…',
@@ -1407,7 +1515,7 @@ const SHELL_COPY_BY_LOCALE = {
     commandPalette: {
       label: 'Command palette',
       searchLabel: 'Search the command palette',
-      placeholder: 'Search commands, settings, or conversations…',
+      placeholder: 'Search commands, settings, or tasks…',
       closeLabel: 'Close command palette',
       resultsLabel: 'Command palette results',
       emptyTitle: 'No matching commands',
@@ -1420,7 +1528,7 @@ const SHELL_COPY_BY_LOCALE = {
         settings: 'Settings',
         permissions: 'Permissions',
         connections: 'Connections',
-        conversations: 'Conversations',
+        conversations: 'Tasks',
       },
       staticKeywords: STATIC_COMMAND_KEYWORDS,
       commands: EN_STATIC_COMMANDS,
@@ -1467,7 +1575,7 @@ const SHELL_COPY_BY_LOCALE = {
           rows: [
             {
               keys: ['⌘', 'K'],
-              description: 'Open the command palette (conversations, Settings, themes, and more)',
+              description: 'Open the command palette (tasks, Settings, themes, and more)',
             },
             { keys: ['?'], description: 'Open or close this shortcuts panel' },
             { keys: ['⌘', 'N'], description: 'Create a new task' },
@@ -1487,32 +1595,28 @@ const SHELL_COPY_BY_LOCALE = {
           ],
         },
         {
-          heading: 'Conversation list',
+          heading: 'Task list',
           rows: [
             {
               keys: ['Tab'],
-              description: 'Move focus between conversations and navigation',
+              description: 'Move focus between tasks and navigation',
             },
             {
               keys: ['↑', '↓'],
-              description: 'Move through focused conversations',
+              description: 'Move through focused tasks',
             },
             {
               keys: ['Home', 'End'],
               description: 'Jump to the top or bottom of the list',
             },
-            {
-              keys: ['←', '→'],
-              description: 'Cycle through Conversations, Flagged, and Archived',
-            },
-            { keys: ['Enter'], description: 'Open the focused conversation' },
+            { keys: ['Enter'], description: 'Open the focused task' },
             {
               keys: ['Delete'],
               description: 'Open the delete confirmation (never delete silently)',
             },
             {
               keys: ['F'],
-              description: 'Focus conversation search (press Esc to clear)',
+              description: 'Focus task search (press Esc to clear)',
             },
           ],
         },
@@ -1535,7 +1639,7 @@ const SHELL_COPY_BY_LOCALE = {
             { keys: ['Tab'], description: 'Focus the left or right splitter' },
             {
               keys: ['←', '→'],
-              description: 'Adjust conversation-list width (±10 px)',
+              description: 'Adjust task-list width (±10 px)',
             },
             {
               keys: ['Shift', '←', '→'],
@@ -1551,21 +1655,21 @@ const SHELL_COPY_BY_LOCALE = {
     },
     chrome: {
       windowActions: 'Window shortcuts',
-      searchConversations: 'Search conversations',
+      searchConversations: 'Search tasks',
       expandSidebar: 'Expand sidebar',
       collapseSidebar: 'Collapse sidebar',
       newTask: 'New task',
-      expandWorkbar: 'Expand conversation workbar',
-      collapseWorkbar: 'Collapse conversation workbar',
+      expandWorkbar: 'Expand task workbar',
+      collapseWorkbar: 'Collapse task workbar',
       workspaceActions: 'Workspace actions',
     },
     app: {
-      loadingWorkbarLabel: 'Loading conversation workbar',
-      loadingWorkbar: 'Loading conversation workbar…',
+      loadingWorkbarLabel: 'Loading task workbar',
+      loadingWorkbar: 'Loading task workbar…',
       useSkillPrompt: (skillName: string) => `Use the ${skillName} skill: `,
-      newConversation: 'New conversation',
+      newConversation: 'New task',
       compactErrorTitle: 'Compaction failed',
-      compactErrorFallback: 'The conversation could not be compacted. Try again later.',
+      compactErrorFallback: 'The task could not be compacted. Try again later.',
       slashCommands: {
         compact: { name: 'Compact context', description: 'Compact older history while preserving the current task' },
         graph: { name: 'Use Graph', description: 'Inspect, switch, or run Graph once' },
@@ -1574,24 +1678,30 @@ const SHELL_COPY_BY_LOCALE = {
       },
       sideChatUnavailableTitle: 'Side chat is not available yet',
       sideChatUnavailableDescription:
-        'Send a message in the main conversation before using /side.',
+        'Send a message in the main task before using /side.',
       sideChatContextPendingTitle: 'Resolve pending context first',
       sideChatContextPendingDescription:
         'The Composer still has attachments, quotes, or file mentions. Send or remove them before using /side.',
       resumeStartedTitle: 'Safe recovery started',
       resumeStartedDescription: 'Continuing from the last complete execution boundary',
       resumeFailedTitle: 'Recovery failed',
-      resumeFailedFallback: 'Safe recovery could not start. Check the conversation state and try again.',
+      resumeFailedFallback: 'Safe recovery could not start. Check the task state and try again.',
       goalClearFailedTitle: 'Could not stop the goal',
       goalClearFailedFallback: 'The goal may still be running. Try again now.',
+      goalPauseFailedTitle: 'Could not pause the goal',
+      goalPauseFailedFallback: 'The goal may still be continuing. Try again now.',
+      goalResumeFailedTitle: 'Could not resume the goal',
+      goalResumeFailedFallback: 'The goal is still paused. Try again.',
       appearanceLoadErrorTitle: 'Could not load appearance settings',
       appearanceLoadErrorFallback: 'Appearance settings are temporarily unavailable. Try again later.',
       memoryRefreshErrorTitle: 'Could not refresh local memory status',
       memoryLoadErrorTitle: 'Could not load local memory status',
       memoryErrorFallback: 'Local memory status could not be refreshed. Try again later.',
       openModelSettings: 'Open Settings · Models',
+      configureModelsOnHost: (hostName: string) =>
+        `Configure a model connection on ${hostName} before starting a task.`,
       sidebarCollapsed: 'Sidebar is collapsed',
-      resizeConversationList: 'Resize conversation list',
+      resizeConversationList: 'Resize task list',
       skipErrorTitle: 'Could not skip onboarding',
       tryAgainLater: 'Try again later.',
       updateInstallFailedTitle: 'Could not install update',
@@ -1605,22 +1715,27 @@ const SHELL_COPY_BY_LOCALE = {
       updateRetryFailedFallback: 'Try again later, or download the latest version manually.',
       loading: 'Loading',
       goToModels: 'Go to Models',
-      boundaryUnreadableTitle: 'Could not read this conversation’s permissions',
+      boundaryUnreadableTitle: 'Could not read this task’s permissions',
       boundaryUnreadableDetail:
-        'Until they can be read, you cannot type here. Try again, or switch to another conversation.',
+        'Until they can be read, you cannot type here. Try again, or switch to another task.',
       boundaryUnreadableRetry: 'Try again',
       boundaryUnreadableRetrying: 'Trying again…',
       permissionModeChanging: 'The permission mode is changing. Wait for it to finish before continuing.',
       permissionModeStreaming:
-        'This conversation is streaming. Wait for it to finish before changing the permission mode.',
-      permissionModeRunning: 'This conversation is running. Wait for it to finish before changing the permission mode.',
+        'This task is streaming. Wait for it to finish before changing the permission mode.',
+      permissionModeRunning: 'This task is running. Wait for it to finish before changing the permission mode.',
       permissionModeWaiting: 'A tool call is waiting for confirmation. Respond before changing the permission mode.',
-      planModeChanging: 'Plan Mode is changing. Wait for it to finish before continuing.',
-      planModeStreaming: 'This conversation is streaming. Wait for it to finish before changing Plan Mode.',
-      planModeRunning: 'This conversation is running. Wait for it to finish before changing Plan Mode.',
-      planModeWaiting: 'A tool call is waiting for confirmation. Respond before changing Plan Mode.',
-      planModeFailedTitle: 'Could not change Plan Mode',
-      planModeFallback: 'Plan Mode could not be changed. Try again later.',
+      modeChangeLoading: 'This session is still loading. Its mode can be changed in a moment.',
+      modeChanging: 'The mode is changing. Wait for it to finish before continuing.',
+      modeChangeStreaming: 'This task is streaming. Wait for it to finish before changing the mode.',
+      modeChangeRunning: 'This task is running. Wait for it to finish before changing the mode.',
+      modeChangeWaiting: 'A tool call is waiting for confirmation. Respond before changing the mode.',
+      goalTurnActive:
+        'A goal takes hold on the next turn. Wait for this one to finish before setting one.',
+      planModeFailedTitle: 'Could not change Plan mode',
+      planModeFallback: 'Plan mode could not be changed. Try again later.',
+      orchestrationModeFailedTitle: 'Could not change the orchestration mode',
+      orchestrationModeFallback: 'The orchestration mode could not be changed. Try again later.',
       planModeExitPendingTitle: 'Abandon the current plan?',
       planModeExitPendingDescription: (title: string) =>
         `“${title}” has not been approved. Leaving Plan Mode will mark it as abandoned while preserving its history.`,
@@ -1628,25 +1743,15 @@ const SHELL_COPY_BY_LOCALE = {
       planModeExitCancel: 'Keep planning',
       planModeExecutionActiveTitle: 'The plan is still running',
       planModeExecutionActiveDescription: 'Interrupt the active execution before entering Plan Mode to revise it.',
-      swarmModeChanging: 'Swarm Mode is changing. Wait for it to finish before continuing.',
-      swarmModeStreaming: 'This conversation is streaming. Wait for it to finish before changing Swarm Mode.',
-      swarmModeRunning: 'This conversation is running. Wait for it to finish before changing Swarm Mode.',
-      swarmModeWaiting: 'A tool call is waiting for confirmation. Respond before changing Swarm Mode.',
-      swarmModeFailedTitle: 'Could not change Swarm Mode',
-      swarmModeFallback: 'Swarm Mode could not be changed. Try again later.',
       swarmModeEnabledTitle: 'Swarm Mode is on',
       swarmModeDisabledTitle: 'Swarm Mode is off',
       swarmModeStatusDescription: 'Use /swarm on, /swarm off, or /swarm <task> for one turn.',
-      graphModeChanging: 'Graph Mode is changing. Wait for it to finish before continuing.',
-      graphModeStreaming: 'This conversation is streaming. Wait for it to finish before changing Graph Mode.',
-      graphModeRunning: 'This conversation is running. Wait for it to finish before changing Graph Mode.',
-      graphModeWaiting: 'A tool call is waiting for confirmation. Respond before changing Graph Mode.',
-      graphModeFailedTitle: 'Could not change Graph Mode',
-      graphModeFallback: 'Graph Mode could not be changed. Try again later.',
       graphModeEnabledTitle: 'Graph Mode is on',
       graphModeDisabledTitle: 'Graph Mode is off',
       graphModeStatusDescription: 'Use /graph on, /graph off, or /graph <task> for one turn.',
-      resizeWorkbar: 'Resize conversation workbar',
+      graphHistoryTitle: 'Graph history',
+      graphHistoryDescription: 'Use the run menu in the Agent Graph panel to inspect history.',
+      resizeWorkbar: 'Resize task workbar',
     },
   },
 } satisfies UiCatalog<ShellCopy>;

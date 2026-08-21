@@ -82,13 +82,13 @@ import {
   PROVIDER_IMAGE_BUDGET_EXCEEDED_MESSAGE,
 } from '@maka/core/attachments';
 import { stripUndefinedDeep } from '@maka/core/tool-args-identity';
+import { pricingModelKey } from '@maka/core/usage-stats/pricing';
 import type {
   LlmCallRecord,
   PricingConfig,
   ToolInvocationRecord,
 } from '@maka/core/usage-stats/types';
 import type { ContextBudgetDiagnostic, PromptSegmentEstimate } from '@maka/core/usage-stats/types';
-import { DEFAULT_CODE_MODE_LIMITS, executeCodeCell } from '@maka/code-mode';
 import type {
   JSONValue,
   ModelFinishReason,
@@ -110,6 +110,12 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import { z } from 'zod';
 
 import { AsyncEventQueue } from './async-queue.js';
+import { AdmissionLimiter } from './admission-limiter.js';
+import {
+  type CodeModeExecutionResult,
+  DEFAULT_CODE_MODE_EXECUTION_POLICY,
+  executeCodeCell,
+} from './code-mode.js';
 import {
   StreamWatchdog,
   formatStreamWatchdogError,
@@ -138,6 +144,7 @@ import {
   type ModelStreamResult,
   type RepairableAiSdkToolCall,
 } from './model-adapter.js';
+import { buildProviderOptions } from './model-factory.js';
 import { persistedOpenAiResponsesStepMessages } from './openai-responses-continuation.js';
 import type { OpenAiResponsesTransportState } from './openai-responses-websocket.js';
 import {
@@ -148,7 +155,7 @@ import {
 } from './request-projection.js';
 import type { ActiveToolResultPruneDiagnosticPatch } from './active-tool-result-prune.js';
 import { toolResultOutput } from './tool-result-output.js';
-import { buildActiveCompactionHeadAnchor } from './active-full-compact.js';
+import { buildActiveCompactionHeadAnchor } from './active-compaction-kernel.js';
 import { compactionDecisionDiagnosticPatch } from './compaction-boundary.js';
 import type {
   AutomaticMemoryCompactionDecision,
@@ -161,7 +168,6 @@ import {
 } from './context-diagnostics.js';
 import {
   AiSdkCompaction,
-  composeActiveCompactionProjection,
   hasActiveToolResultPruneDiagnosticPatch,
   hasBlockingReplayDiagnostics,
 } from './ai-sdk-compaction.js';
@@ -221,7 +227,6 @@ import {
 import { modelUsesNativeOpenAiResponses, resolveModelRuntime } from './model-runtime.js';
 import {
   applyPatchReplayFactText,
-  freeformApplyPatchResultText,
   normalizeApplyPatchReplayInput,
   routeApplyPatchTools,
   type ApplyPatchProfile,
@@ -254,7 +259,11 @@ import {
 } from './history-compact.js';
 import { selectSynthesisCacheForReplay } from './synthesis-cache.js';
 import {
+  canContinueHistoryCompactCheckpointForModel,
+  historyCompactCheckpointToModelMessage,
   historyCompactCheckpointToRuntimeEvent,
+  isProviderHistoryCompactCheckpoint,
+  isTextHistoryCompactCheckpoint,
   matchHistoryCompactCheckpointPrefix,
   projectHistoryCompactCheckpointReplay,
   type HistoryCompactCheckpoint,
@@ -667,7 +676,6 @@ function joinPromptFragments(fragments: readonly (string | undefined)[]): string
 export type AppendMessageFn = (m: StoredMessage) => Promise<void>;
 export type ToolTelemetryRecorder = (record: ToolInvocationRecord) => void;
 export type {
-  ActiveFullCompactBlockRecorder,
   HistoryCompactCheckpointLoader,
   HistoryCompactCheckpointRecorder,
   HistoryCompactLoader,
@@ -898,15 +906,14 @@ function nativeApplyPatchFailureOutput(output: ToolResultOutput): ToolResultOutp
   };
 }
 
-function freeformApplyPatchOutput(output: ToolResultOutput): ToolResultOutput {
-  if (output.type === 'text' || output.type === 'error-text') return output;
-  const value = output.type === 'json' || output.type === 'error-json' ? output.value : undefined;
-  const record = value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
-  const text = record ? freeformApplyPatchResultText(record) : freeformApplyPatchResultText(value);
-  return output.type === 'error-json'
-    ? { type: 'error-text', value: text }
-    : { type: 'text', value: text };
-}
+/**
+ * One Code Mode cell runs at a time on a backend, with one allowed to wait.
+ * Widening either needs evidence that concurrent cells are wanted; none exists
+ * today, and this is the bound the Code Mode adapter enforced before execution
+ * admission moved to the side that owns it.
+ */
+const MAX_ACTIVE_CODE_MODE_CELLS = 1;
+const MAX_WAITING_CODE_MODE_CELLS = 1;
 
 const MAX_PROVIDER_ATTEMPTS_PER_STEP = 10;
 const MAX_IDLE_WATCHDOG_RETRIES_PER_STEP = 1;
@@ -1046,8 +1053,12 @@ export class AiSdkBackend implements AgentBackend {
   private readonly maxSteps: number | undefined;
   private readonly providerRetrySleep: (delayMs: number, signal: AbortSignal) => Promise<void>;
   private readonly modelAdapter: ModelAdapter;
+  private readonly resolvedProviderOptions: Record<string, unknown>;
   private readonly toolAvailabilityRuntime: ToolAvailabilityRuntime;
   private readonly applyPatchProfile: ApplyPatchProfile | null;
+
+  /** Bounds outstanding Code Mode cells on this backend. */
+  private readonly codeCellAdmission = new AdmissionLimiter(MAX_ACTIVE_CODE_MODE_CELLS);
 
   /**
    * Every `send()` currently in flight on this backend.
@@ -1081,13 +1092,23 @@ export class AiSdkBackend implements AgentBackend {
     this.now = input.now ?? (() => Date.now());
     this.maxSteps = input.maxSteps;
     this.providerRetrySleep = input.providerRetrySleep ?? sleepForProviderRetry;
+    // One resolved options value for every reader: the main call, the
+    // auxiliary memory-extraction call, and the request-shape diagnostics all
+    // describe the same request, so they must not disagree on what was sent.
+    this.resolvedProviderOptions =
+      input.providerOptions ??
+      buildProviderOptions(input.connection, input.modelId, input.header.thinkingLevel);
     this.modelAdapter = new ModelAdapter({
       sessionId: input.sessionId,
       connection: input.connection,
       apiKey: input.apiKey,
       modelId: input.modelId,
       modelFactory: input.modelFactory,
-      providerOptions: input.providerOptions,
+      // `input.providerOptions` is an override escape hatch: when set it owns
+      // the whole provider-options namespace (including reasoning effort), and
+      // the computed defaults are dropped entirely. Keep providerOptions the
+      // single seam — do not re-add a parallel reasoning channel here.
+      providerOptions: this.resolvedProviderOptions,
       newId: this.newId,
       now: this.now,
       ...(input.openAiResponsesTransportState
@@ -1101,8 +1122,8 @@ export class AiSdkBackend implements AgentBackend {
       modelAdapter: this.modelAdapter,
       createProviderRequestTracker: (trackerInput) =>
         this.createProviderRequestTracker(trackerInput),
-      materializeRuntimeReplayPlan: (plan, imageBudget) =>
-        this.materializeRuntimeReplayPlan(plan, imageBudget),
+      materializeRuntimeReplayPlan: (plan, imageBudget, checkpoint) =>
+        this.materializeRuntimeReplayPlan(plan, imageBudget, undefined, checkpoint),
       canReplayProviderNative: (plan) => this.canReplayProviderNative(plan),
       appendTurnTailPrompt: (content, turnTailPrompt) =>
         this.appendTurnTailPrompt(content, turnTailPrompt),
@@ -1200,9 +1221,7 @@ export class AiSdkBackend implements AgentBackend {
         : {}),
       sourceTools: { ...scope.memorySourceTools },
       sourceActiveTools: [...scope.memorySourceActiveTools],
-      ...(this.input.providerOptions
-        ? { sourceProviderOptions: structuredClone(this.input.providerOptions) }
-        : {}),
+      sourceProviderOptions: structuredClone(this.resolvedProviderOptions),
       ...(this.modelAdapter.maxOutputTokens() !== undefined
         ? { sourceMaxOutputTokens: this.modelAdapter.maxOutputTokens() }
         : {}),
@@ -1770,7 +1789,16 @@ export class AiSdkBackend implements AgentBackend {
     if (midTurnState) {
       // Roll-forward seed: the latest durable checkpoint (loaded or written at
       // turn start) so a mid-turn summary only re-reads the newly folded span.
-      midTurnState.previousCheckpoint = priorReplay.latestHistoryCompactCheckpoint;
+      const checkpoint = priorReplay.latestHistoryCompactCheckpoint;
+      midTurnState.previousCheckpoint =
+        checkpoint &&
+        canContinueHistoryCompactCheckpointForModel(
+          checkpoint,
+          this.input.connection,
+          this.input.modelId,
+        )
+          ? checkpoint
+          : undefined;
     }
     /**
      * The fold THIS request's prompt was built under (#2323).
@@ -1929,6 +1957,7 @@ export class AiSdkBackend implements AgentBackend {
             { ...replayPlan, items: replayItems },
             scope.imageBudget,
             settledModelOutputs,
+            projectionCheckpoint,
           );
           return projectionCheckpoint
             ? currentTurnMessages
@@ -1973,7 +2002,7 @@ export class AiSdkBackend implements AgentBackend {
                 connection: this.input.connection,
                 modelId: this.input.modelId,
                 systemPrompt,
-                providerOptions: this.input.providerOptions,
+                providerOptions: this.resolvedProviderOptions,
                 providerTools,
                 activeTools: active,
                 priorMessages: priorReplay.messages,
@@ -2037,46 +2066,31 @@ export class AiSdkBackend implements AgentBackend {
               connection: this.input.connection,
               modelId: this.input.modelId,
               systemPrompt,
-              providerOptions: this.input.providerOptions,
+              providerOptions: this.resolvedProviderOptions,
               providerTools,
               activeTools: activeToolsForStep ?? plan.activeTools,
               priorMessages: stepMessages,
             },
             priorShapeBaseline,
           ).requestShapeHash;
-        const activeCompactHook = composeActiveCompactionProjection(
-          this.compaction.buildSemanticCompactProjection(
-            turnId,
-            model,
-            input.runtimeContext,
-            activeCompactionHeadAnchor,
-            (messagesForStep, activeToolsForStep) =>
-              stepRequestShapeHash(messagesForStep, activeToolsForStep),
-            (patch) => {
-              activeCompactDiagnosticPatch = mergeContextBudgetDiagnosticPatches(
-                activeCompactDiagnosticPatch,
-                patch,
-              );
-            },
-            scope,
-            turnAbortController.signal,
-          ),
-          this.compaction.buildActiveFullCompactProjection(
-            turnId,
-            input.runtimeContext,
-            activeCompactionHeadAnchor,
-            (messagesForStep, activeToolsForStep) =>
-              stepRequestShapeHash(messagesForStep, activeToolsForStep),
-            (patch) => {
-              activeCompactDiagnosticPatch = mergeContextBudgetDiagnosticPatches(
-                activeCompactDiagnosticPatch,
-                patch,
-              );
-            },
-          ),
+        const activeCompactHook = this.compaction.buildSemanticCompactProjection(
+          turnId,
+          model,
+          input.runtimeContext,
+          activeCompactionHeadAnchor,
+          (messagesForStep, activeToolsForStep) =>
+            stepRequestShapeHash(messagesForStep, activeToolsForStep),
+          (patch) => {
+            activeCompactDiagnosticPatch = mergeContextBudgetDiagnosticPatches(
+              activeCompactDiagnosticPatch,
+              patch,
+            );
+          },
+          scope,
+          turnAbortController.signal,
         );
         // Deterministic priority on a capacity-replaced step: the hard window
-        // invariant owns the projection, so semantic/active-full compaction
+        // invariant owns the projection, so semantic compaction
         // yields for that step (recorded as a decision) instead of running a
         // second summarizer over the same request.
         const activeCompactAfterMidTurn =
@@ -3082,7 +3096,7 @@ export class AiSdkBackend implements AgentBackend {
           const nextBytes = new TextEncoder().encode(event.chunk).byteLength;
           if (
             nestedOutputLimitExceeded ||
-            nestedOutputBytes + nextBytes > DEFAULT_CODE_MODE_LIMITS.maxToolOutputBytes
+            nestedOutputBytes + nextBytes > DEFAULT_CODE_MODE_EXECUTION_POLICY.maxToolOutputBytes
           ) {
             nestedOutputLimitExceeded = true;
             return;
@@ -3093,38 +3107,64 @@ export class AiSdkBackend implements AgentBackend {
       },
       pushAndWaitUntilConsumed: (event) => eventSink.pushAndWaitUntilConsumed(event),
     };
-    return executeCodeCell({
-      code,
-      signal: context.abortSignal,
-      tools: [...snapshot.values()].map((tool) => ({
-        name: tool.name,
-      })),
-      isFatalToolError: isRuntimeCommitBoundaryError,
-      callTool: async (name, input, signal) => {
-        const tool = snapshot.get(name);
-        if (!tool) throw new Error(`Tool "${name}" is not active or nestable in this cell`);
-        const parsedInput = await validateCodeModeToolInput(tool, input);
-        const settlement = await scope.toolRuntime.settleToolCallRaw({
-          tool,
-          turnId: context.turnId,
-          toolCallId: `${context.toolCallId}:nested:${this.newId()}`,
-          input: parsedInput,
-          abortSignal: signal,
-          eventSink: nestedEventSink,
-          origin: 'code_mode',
-          parentToolCallId: context.toolCallId,
-          ...(context.operationId ? { parentOperationId: context.operationId } : {}),
-          maxResultBytes: DEFAULT_CODE_MODE_LIMITS.maxToolOutputBytes,
-        });
-        if (settlement.providerError !== undefined) {
-          throw new Error(settlement.providerError);
-        }
-        if (nestedOutputLimitExceeded) {
-          throw new Error('Code Mode nested output byte limit exceeded');
-        }
-        return settlement.result;
-      },
-    });
+    // A permit is held across the cell's complete lifecycle, not just its
+    // sandbox run: `executeCodeCell` settles only once the cell's host
+    // operations have drained, so releasing on settlement covers the drain.
+    // The sandbox worker cap cannot serve this purpose — on cancellation
+    // `runCodeMode` releases its worker and rejects at once, by design, while
+    // host operations started by the cell may still be running with durable
+    // side effects. Only the Runtime waits for those, so only the Runtime can
+    // bound them; releasing when the worker is released would let repeated
+    // cancellation accumulate host work without bound.
+    //
+    // One cell may wait; the next is turned away rather than queued, which is
+    // what the Code Mode adapter did before this moved to the side that owns
+    // execution. Nothing awaits between reading `waitingCount` and the enqueue
+    // inside `acquire`, so the pair is atomic.
+    if (this.codeCellAdmission.waitingCount >= MAX_WAITING_CODE_MODE_CELLS) {
+      return {
+        ok: false,
+        error: { kind: 'limit_exceeded', message: 'Code Mode execution queue is full' },
+        toolCalls: [],
+      } satisfies CodeModeExecutionResult;
+    }
+    const permit = await this.codeCellAdmission.acquire(context.abortSignal);
+    try {
+      return await executeCodeCell({
+        code,
+        signal: context.abortSignal,
+        tools: [...snapshot.values()].map((tool) => ({
+          name: tool.name,
+        })),
+        isFatalToolError: isRuntimeCommitBoundaryError,
+        callTool: async (name, input, signal) => {
+          const tool = snapshot.get(name);
+          if (!tool) throw new Error(`Tool "${name}" is not active or nestable in this cell`);
+          const parsedInput = await validateCodeModeToolInput(tool, input);
+          const settlement = await scope.toolRuntime.settleToolCallRaw({
+            tool,
+            turnId: context.turnId,
+            toolCallId: `${context.toolCallId}:nested:${this.newId()}`,
+            input: parsedInput,
+            abortSignal: signal,
+            eventSink: nestedEventSink,
+            origin: 'code_mode',
+            parentToolCallId: context.toolCallId,
+            ...(context.operationId ? { parentOperationId: context.operationId } : {}),
+            maxResultBytes: DEFAULT_CODE_MODE_EXECUTION_POLICY.maxToolOutputBytes,
+          });
+          if (settlement.providerError !== undefined) {
+            throw new Error(settlement.providerError);
+          }
+          if (nestedOutputLimitExceeded) {
+            throw new Error('Code Mode nested output byte limit exceeded');
+          }
+          return settlement.result;
+        },
+      });
+    } finally {
+      permit.release();
+    }
   }
 
   private handlePlanToolResult(
@@ -3267,7 +3307,7 @@ export class AiSdkBackend implements AgentBackend {
   private computeTokenUsageCostUsd(usage: NormalizedAiSdkUsage): number | undefined {
     try {
       const pricing = (this.input.lookupPricing ?? getBuiltinPricing)(
-        `${this.input.connection.providerType}:${this.input.modelId}`,
+        pricingModelKey(this.input.connection.providerType, this.input.modelId),
       );
       if (pricing === null) return undefined;
       return computeCost(
@@ -3301,6 +3341,7 @@ export class AiSdkBackend implements AgentBackend {
     turnId: string;
     callKind: ModelCallKind;
     modelId: string;
+    historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
     /**
      * Stated by every caller, never defaulted: an unattributed provider request
      * is silently dropped by usage accounting, so the compiler has to be the
@@ -3312,6 +3353,7 @@ export class AiSdkBackend implements AgentBackend {
     const accounting = this.modelCallAccounting(input.callKind, {
       modelId: input.modelId,
       ...(input.runId ? { runId: input.runId } : {}),
+      ...(input.historyCompactRoute ? { historyCompactRoute: input.historyCompactRoute } : {}),
     });
     const runId = input.runId;
     const beforeRunProviderDispatch = this.input.beforeRunProviderDispatch;
@@ -3355,6 +3397,7 @@ export class AiSdkBackend implements AgentBackend {
       runId?: string;
       /** The model this call actually runs against; priced as that model. */
       modelId?: string;
+      historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
     },
   ): ModelCallAccountingInput | undefined {
     const record = this.input.recordModelCallAttempt;
@@ -3366,6 +3409,9 @@ export class AiSdkBackend implements AgentBackend {
       connectionSlug: this.input.connection.slug,
       providerId: this.input.connection.providerType,
       callKind,
+      ...(identity?.historyCompactRoute
+        ? { historyCompactRoute: identity.historyCompactRoute }
+        : {}),
       record,
       resolveCost: (usage: ProviderRequestUsage) => this.resolveModelCallCost(usage, modelId),
       ...(this.input.assertModelCallAccountingReady
@@ -3396,7 +3442,7 @@ export class AiSdkBackend implements AgentBackend {
   ): ResolvedModelCallCost | undefined {
     try {
       const pricing = (this.input.lookupPricing ?? getBuiltinPricing)(
-        `${this.input.connection.providerType}:${modelId}`,
+        pricingModelKey(this.input.connection.providerType, modelId),
       );
       if (pricing === null) return undefined;
       const costUsd = computeCost(
@@ -3484,7 +3530,7 @@ export class AiSdkBackend implements AgentBackend {
     // policy happens to carry: a loaded checkpoint that missed its prefix or
     // failed the replay fit left the raw prefix in these events, and a caller
     // asking what the prompt was built from must not be told otherwise (#2323).
-    let latestHistoryCompactCheckpoint = budgeted?.historyCompactCheckpoint;
+    let projectedHistoryCompactCheckpoint = budgeted?.historyCompactCheckpoint;
     if (preparedContextBudget.diagnosticPatch) {
       contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
         contextBudgetDiagnostic ??
@@ -3533,7 +3579,7 @@ export class AiSdkBackend implements AgentBackend {
               : {}),
           });
           if (writePatch.replacementCheckpoint) {
-            latestHistoryCompactCheckpoint = writePatch.replacementCheckpoint;
+            projectedHistoryCompactCheckpoint = writePatch.replacementCheckpoint;
             if (automaticMemoryDecision?.dispatch && automaticMemory) {
               this.dispatchAutomaticMemoryCompaction(scope, {
                 checkpoint: writePatch.replacementCheckpoint,
@@ -3541,7 +3587,9 @@ export class AiSdkBackend implements AgentBackend {
               });
             }
             runtimeContext = [
-              historyCompactCheckpointToRuntimeEvent(writePatch.replacementCheckpoint),
+              ...(isTextHistoryCompactCheckpoint(writePatch.replacementCheckpoint)
+                ? [historyCompactCheckpointToRuntimeEvent(writePatch.replacementCheckpoint)]
+                : []),
               ...runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
             ];
           } else {
@@ -3551,15 +3599,21 @@ export class AiSdkBackend implements AgentBackend {
             // Fail-open rebuilds the context around the older checkpoint, so
             // that one — not the fold this send failed to write — is the
             // boundary the prompt now stands on.
-            latestHistoryCompactCheckpoint = writePatch.fallbackCheckpoint;
-            runtimeContext = writePatch.fallbackCheckpoint
-              ? buildHistoryCompactCheckpointFailOpenContext(
-                  writePatch.fallbackCheckpoint,
-                  priorRuntimeContext,
-                  contextBudget,
-                  runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
-                )
-              : runtimeContext.filter((event) => !event.id.startsWith('history-compact:'));
+            if (writePatch.fallbackCheckpoint) {
+              const fallback = buildHistoryCompactCheckpointFailOpenContext(
+                writePatch.fallbackCheckpoint,
+                priorRuntimeContext,
+                contextBudget,
+                runtimeContext.filter((event) => !event.id.startsWith('history-compact:')),
+              );
+              runtimeContext = fallback.events;
+              projectedHistoryCompactCheckpoint = fallback.checkpoint;
+            } else {
+              runtimeContext = runtimeContext.filter(
+                (event) => !event.id.startsWith('history-compact:'),
+              );
+              projectedHistoryCompactCheckpoint = undefined;
+            }
           }
           contextBudgetDiagnostic = mergeContextBudgetDiagnostic(
             contextBudgetDiagnostic ??
@@ -3584,7 +3638,7 @@ export class AiSdkBackend implements AgentBackend {
             // Back to the raw prior ledger: whatever boundary the projection
             // stood on a moment ago is not in this context any more.
             runtimeContext = priorRuntimeContext;
-            latestHistoryCompactCheckpoint = undefined;
+            projectedHistoryCompactCheckpoint = undefined;
             contextBudgetDiagnostic = buildContextBudgetDiagnosticShell(
               priorRuntimeContext,
               runtimeContext,
@@ -3749,7 +3803,9 @@ export class AiSdkBackend implements AgentBackend {
     // checkpoint shaped, so it reports none rather than one the request never
     // stood on (#2323).
     const replayBoundary = (fromRuntimeReplay: boolean) =>
-      fromRuntimeReplay && latestHistoryCompactCheckpoint ? { latestHistoryCompactCheckpoint } : {};
+      fromRuntimeReplay && projectedHistoryCompactCheckpoint
+        ? { latestHistoryCompactCheckpoint: projectedHistoryCompactCheckpoint }
+        : {};
 
     const plan = buildRuntimeEventModelReplayPlan(
       runtimeContext,
@@ -3758,40 +3814,57 @@ export class AiSdkBackend implements AgentBackend {
       // prior ledger so a sliced-in tool-turn thinking still gets skipped.
       { toolActivityTurnIds: collectToolActivityTurnIds(priorRuntimeContext) },
     );
-    if (plan.items.length === 0) {
+    const hasProviderHistoryCompactCheckpoint =
+      projectedHistoryCompactCheckpoint !== undefined &&
+      isProviderHistoryCompactCheckpoint(projectedHistoryCompactCheckpoint);
+    const fallbackUsesRuntimeReplay =
+      Boolean(input.continuation) || hasProviderHistoryCompactCheckpoint;
+    // StoredMessage projection cannot represent an opaque provider checkpoint.
+    // Once one is selected, every degraded replay path must remain in the
+    // RuntimeEvent materializer so the checkpoint boundary is not bypassed.
+    const materializeReplayFallback = (): Promise<ModelMessage[]> =>
+      fallbackUsesRuntimeReplay
+        ? this.materializeRuntimeReplayTextOnly(
+            scope.imageBudget,
+            plan,
+            projectedHistoryCompactCheckpoint,
+          )
+        : Promise.resolve(projectedMessages);
+    if (plan.items.length === 0 && !hasProviderHistoryCompactCheckpoint) {
       return {
         status: 'ready',
-        messages: input.continuation
-          ? await this.materializeRuntimeReplayTextOnly(scope.imageBudget, plan)
-          : projectedMessages,
+        messages: await materializeReplayFallback(),
         gate: input.continuation ? 'runtime_replay_text_only' : 'stored_message_projection',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
         ...(contextBudgetDiagnostic ? { contextBudget: contextBudgetDiagnostic } : {}),
-        ...replayBoundary(Boolean(input.continuation)),
+        ...replayBoundary(fallbackUsesRuntimeReplay),
       };
     }
 
     if (hasBlockingReplayDiagnostics(plan)) {
       return {
         status: 'ready',
-        messages: input.continuation
-          ? await this.materializeRuntimeReplayTextOnly(scope.imageBudget, plan)
-          : projectedMessages,
+        messages: await materializeReplayFallback(),
         gate: input.continuation
           ? 'runtime_replay_text_only'
           : 'runtime_replay_unsupported_semantics',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
         ...(contextBudgetDiagnostic ? { contextBudget: contextBudgetDiagnostic } : {}),
-        ...replayBoundary(Boolean(input.continuation)),
+        ...replayBoundary(fallbackUsesRuntimeReplay),
       };
     }
 
     if (!plan.hasProviderNativeSemantics) {
       return {
         status: 'ready',
-        messages: await this.materializeRuntimeReplayPlan(plan, scope.imageBudget),
+        messages: await this.materializeRuntimeReplayPlan(
+          plan,
+          scope.imageBudget,
+          undefined,
+          projectedHistoryCompactCheckpoint,
+        ),
         gate: 'runtime_replay_text_only',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
@@ -3801,24 +3874,40 @@ export class AiSdkBackend implements AgentBackend {
     }
 
     if (!this.canReplayProviderNative(plan)) {
+      // Degrade per item, not per plan: an unsupported provider-executed pair
+      // must not cost unrelated client tool history (#2972). Thinking items
+      // stay in the plan; materializeRuntimeReplayPlan degrades unsupported
+      // reasoning per item via reasoningReplay.
+      const degradedPlan = this.dropUnsupportedReplayItems(plan);
       return {
         status: 'ready',
-        messages: input.continuation
-          ? await this.materializeRuntimeReplayTextOnly(scope.imageBudget, plan)
-          : projectedMessages,
+        messages:
+          degradedPlan.items.length > 0 || hasProviderHistoryCompactCheckpoint
+            ? await this.materializeRuntimeReplayPlan(
+                degradedPlan,
+                scope.imageBudget,
+                undefined,
+                projectedHistoryCompactCheckpoint,
+              )
+            : await materializeReplayFallback(),
         gate: input.continuation
           ? 'runtime_replay_text_only'
           : 'runtime_replay_unsupported_semantics',
         diagnostics: plan.diagnostics,
         runtimeEventCount: runtimeContext.length,
         ...(contextBudgetDiagnostic ? { contextBudget: contextBudgetDiagnostic } : {}),
-        ...replayBoundary(Boolean(input.continuation)),
+        ...replayBoundary(fallbackUsesRuntimeReplay),
       };
     }
 
     return {
       status: 'ready',
-      messages: await this.materializeRuntimeReplayPlan(plan, scope.imageBudget),
+      messages: await this.materializeRuntimeReplayPlan(
+        plan,
+        scope.imageBudget,
+        undefined,
+        projectedHistoryCompactCheckpoint,
+      ),
       gate: 'runtime_replay_provider_native',
       diagnostics: plan.diagnostics,
       runtimeEventCount: runtimeContext.length,
@@ -3832,9 +3921,39 @@ export class AiSdkBackend implements AgentBackend {
     for (const item of plan.items) {
       if (item.kind === 'tool_call' && !support.toolCalls) return false;
       if (item.kind === 'tool_result' && !support.toolResults) return false;
+      if (
+        (item.kind === 'tool_call' || item.kind === 'tool_result') &&
+        item.providerExecuted === true &&
+        !support.providerExecutedTools
+      ) {
+        return false;
+      }
       if (item.kind === 'thinking' && item.signature && !support.signedThinking) return false;
     }
     return true;
+  }
+
+  /**
+   * Per-item counterpart to {@link canReplayProviderNative}: drop only the
+   * items the adapter cannot represent so one unsupported provider-executed
+   * pair does not cost unrelated client tool history (#2972). Call and result
+   * items fall together — a call without its result is a dangling wire item,
+   * and provider-executed pairs are flagged on both items by the plan.
+   */
+  private dropUnsupportedReplayItems(
+    plan: RuntimeEventModelReplayPlan,
+  ): RuntimeEventModelReplayPlan {
+    const support = this.modelAdapter.runtimeEventReplaySupport();
+    return {
+      ...plan,
+      items: plan.items.filter((item) => {
+        if (item.kind === 'tool_call' || item.kind === 'tool_result') {
+          if (!support.toolCalls || !support.toolResults) return false;
+          if (item.providerExecuted === true && !support.providerExecutedTools) return false;
+        }
+        return true;
+      }),
+    };
   }
 
   /**
@@ -3859,6 +3978,7 @@ export class AiSdkBackend implements AgentBackend {
     plan: RuntimeEventModelReplayPlan,
     budget: ProviderImageBudget,
     settledModelOutputs?: ReadonlyMap<string, ToolResultOutput>,
+    historyCompactCheckpoint?: HistoryCompactCheckpoint,
   ): Promise<ModelMessage[]> {
     type ToolCallItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_call' }>;
     type ToolResultItem = Extract<RuntimeEventModelReplayItem, { kind: 'tool_result' }>;
@@ -3896,7 +4016,16 @@ export class AiSdkBackend implements AgentBackend {
             }
           : undefined;
       }
-      if (replaySupport.openAiResponsesEncryptedThinking) {
+      if (replaySupport.responsesReasoning === 'plaintext-content') {
+        if (item.text.length === 0) return undefined;
+        return {
+          part: {
+            type: 'reasoning' as const,
+            text: item.text,
+          },
+        };
+      }
+      if (replaySupport.responsesReasoning === 'encrypted-content') {
         const openai = item.providerOptions?.openai;
         if (openai && typeof openai === 'object' && !Array.isArray(openai)) {
           const { itemId, reasoningEncryptedContent } = openai as {
@@ -3954,9 +4083,6 @@ export class AiSdkBackend implements AgentBackend {
           `runtime-event:${result.eventId}:tool-result`,
         ));
       if (toolName !== 'apply_patch') return output;
-      if (this.applyPatchProfile?.kind === 'codex-v4a-freeform') {
-        return freeformApplyPatchOutput(output);
-      }
       return result.isError ? nativeApplyPatchFailureOutput(output) : output;
     };
     const pushClientToolResults = async (calls: readonly ToolCallItem[]) => {
@@ -4245,12 +4371,13 @@ export class AiSdkBackend implements AgentBackend {
       }
     }
     await flushPendingSteps();
-    return out;
+    return this.prependProviderHistoryCompactMessage(out, historyCompactCheckpoint);
   }
 
   private async materializeRuntimeReplayTextOnly(
     budget: ProviderImageBudget,
     plan: RuntimeEventModelReplayPlan,
+    historyCompactCheckpoint?: HistoryCompactCheckpoint,
   ): Promise<ModelMessage[]> {
     const messages: ModelMessage[] = [];
     for (const item of plan.items) {
@@ -4261,7 +4388,19 @@ export class AiSdkBackend implements AgentBackend {
           [item.eventId],
         );
     }
-    return messages;
+    return this.prependProviderHistoryCompactMessage(messages, historyCompactCheckpoint);
+  }
+
+  private prependProviderHistoryCompactMessage(
+    messages: ModelMessage[],
+    checkpoint: HistoryCompactCheckpoint | undefined,
+  ): ModelMessage[] {
+    if (!checkpoint || !isProviderHistoryCompactCheckpoint(checkpoint)) return messages;
+    const providerMessage = historyCompactCheckpointToModelMessage(checkpoint);
+    this.memoryReplayMessageEvents.set(providerMessage, [
+      `history-compact:${checkpoint.checkpointId}`,
+    ]);
+    return [providerMessage, ...messages];
   }
 
   private pushMemoryIndexedMessage(
@@ -4901,10 +5040,10 @@ function sumOptionalCounts<K extends keyof ActiveToolResultPruneDiagnosticPatch>
 function contextBudgetWithActiveProjectionDiagnostics(
   base: ContextBudgetDiagnostic | undefined,
   patch: ActiveToolResultPruneDiagnosticPatch,
-  activeFullCompactPatch: Partial<ContextBudgetDiagnostic> | undefined,
+  activeCompactionPatch: Partial<ContextBudgetDiagnostic> | undefined,
 ): ContextBudgetDiagnostic | undefined {
   const prunePatch = hasActiveToolResultPruneDiagnosticPatch(patch) ? patch : undefined;
-  const mergedPatch = mergeContextBudgetDiagnosticPatches(prunePatch, activeFullCompactPatch);
+  const mergedPatch = mergeContextBudgetDiagnosticPatches(prunePatch, activeCompactionPatch);
   if (!mergedPatch) return base;
   return mergeContextBudgetDiagnostic(base ?? minimalContextBudgetDiagnostic(), mergedPatch);
 }
@@ -4914,13 +5053,13 @@ function buildHistoryCompactCheckpointFailOpenContext(
   priorRuntimeContext: readonly RuntimeEvent[],
   policy: ContextBudgetPolicy,
   retainedCandidates: readonly RuntimeEvent[],
-): RuntimeEvent[] {
+): { events: RuntimeEvent[]; checkpoint?: HistoryCompactCheckpoint } {
   const charsPerToken = policy.charsPerToken ?? 4;
   const compactableEvents = priorRuntimeContext.filter(
     (event) => estimateRuntimeEventsTokens([event], charsPerToken) > 0,
   );
   const match = matchHistoryCompactCheckpointPrefix(checkpoint, compactableEvents);
-  if (match.reason) return [...retainedCandidates];
+  if (match.reason) return { events: [...retainedCandidates] };
   const coveredIds = new Set(match.coveredRuntimeEvents.map((event) => event.id));
   const candidates = retainedCandidates.filter((event) => !coveredIds.has(event.id));
   const turnOrder: string[] = [];
@@ -4939,7 +5078,10 @@ function buildHistoryCompactCheckpointFailOpenContext(
     match.coveredRuntimeEvents,
     [],
   );
-  let selectedTokens = estimateRuntimeEventsTokens(replayPrefix, charsPerToken);
+  let selectedTokens =
+    checkpoint.version === 3
+      ? checkpoint.estimatedTokens
+      : estimateRuntimeEventsTokens(replayPrefix, charsPerToken);
   const selectedGroups: RuntimeEvent[][] = [];
   for (let index = turnOrder.length - 1; index >= 0; index -= 1) {
     const group = byTurn.get(turnOrder[index]!) ?? [];
@@ -4954,17 +5096,18 @@ function buildHistoryCompactCheckpointFailOpenContext(
     match.coveredRuntimeEvents,
     replayTail,
   );
+  const replayTailForFit = checkpoint.version === 3 ? replayEvents : replayEvents.slice(1);
   return evaluateHistoryCompactCheckpointReplay(
     checkpoint,
-    replayEvents.slice(1),
+    replayTailForFit,
     policy?.charsPerToken,
     policy?.maxHistoryEstimatedTokens,
     {
       sourceReplayEvents: [...match.coveredRuntimeEvents, ...replayTail],
     },
   ).fits
-    ? replayEvents
-    : [...retainedCandidates];
+    ? { events: replayEvents, checkpoint }
+    : { events: [...retainedCandidates] };
 }
 
 function projectMemoryConversationPrefix(

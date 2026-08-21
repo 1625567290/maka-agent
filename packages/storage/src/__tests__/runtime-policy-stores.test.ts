@@ -35,6 +35,29 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe('runtime policy stores', () => {
+  test('upgrades schema v2 with the automatic Host shell default', async () => {
+    await withInteractiveOwner(async ({ root, stores }) => {
+      const { shell: _shell, ...policyV2 } = createDefaultRuntimePolicy();
+      await writeFile(
+        join(root, 'runtime-policy.json'),
+        `${JSON.stringify({ schemaVersion: 2, revision: 4, policy: policyV2 })}\n`,
+      );
+
+      const snapshot = await stores.runtimePolicy.getSnapshot();
+      assert.equal(snapshot.revision, 4);
+      assert.deepEqual(snapshot.policy.shell, { preference: 'auto', executable: '' });
+      const committed = await stores.runtimePolicy.mutate({
+        expectedRevision: 4,
+        operation: { kind: 'set_shell', value: snapshot.policy.shell },
+      });
+      assert.equal(committed.kind, 'committed');
+      const persisted = JSON.parse(await readFile(join(root, 'runtime-policy.json'), 'utf8')) as {
+        schemaVersion: number;
+      };
+      assert.equal(persisted.schemaVersion, 3);
+    });
+  });
+
   test('persists extra request bodies and resolves custom headers as secret execution material', async () => {
     await withInteractiveOwner(async ({ stores }) => {
       const connection = await createConnection(stores, 0, {
@@ -613,6 +636,110 @@ describe('runtime policy stores', () => {
     });
   });
 
+  test('migrates a persisted Gemini CLI default to the remaining supported catalog', async () => {
+    await withInteractiveOwner(async ({ root, stores }) => {
+      const retiredConnectionId = '11111111-1111-4111-8111-111111111111';
+      const googleConnectionId = '22222222-2222-4222-8222-222222222222';
+      await writeFile(
+        join(root, 'connection-catalog.json'),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          revision: 2,
+          defaultTarget: {
+            connectionId: retiredConnectionId,
+            modelId: 'gemini-2.5-pro',
+          },
+          connections: [
+            {
+              connectionId: retiredConnectionId,
+              revision: 1,
+              slug: 'gemini-account',
+              name: 'Gemini account',
+              providerType: 'gemini-cli',
+              enabled: true,
+              enabledModelIds: ['gemini-2.5-pro'],
+              models: [],
+            },
+            {
+              connectionId: googleConnectionId,
+              revision: 1,
+              slug: 'google-api',
+              name: 'Google API',
+              providerType: 'google',
+              enabled: true,
+              enabledModelIds: ['gemini-2.5-pro'],
+              models: [],
+            },
+          ],
+        })}\n`,
+        'utf8',
+      );
+
+      const snapshot = await stores.connectionCatalog.getSnapshot();
+
+      assert.equal(snapshot.revision, 2);
+      assert.equal(snapshot.defaultTarget, null);
+      assert.deepEqual(
+        snapshot.connections.map(({ connectionId, providerType }) => ({
+          connectionId,
+          providerType,
+        })),
+        [{ connectionId: googleConnectionId, providerType: 'google' }],
+      );
+      const persisted = JSON.parse(
+        await readFile(join(root, 'connection-catalog.json'), 'utf8'),
+      ) as {
+        connections: Array<{ providerType: string }>;
+      };
+      assert.deepEqual(
+        persisted.connections.map(({ providerType }) => providerType),
+        ['gemini-cli', 'google'],
+      );
+    });
+  });
+
+  test('rejects a retired Gemini CLI record that collides with a maintained connection identity', async () => {
+    await withInteractiveOwner(async ({ root, stores }) => {
+      const duplicateConnectionId = '11111111-1111-4111-8111-111111111111';
+      await writeFile(
+        join(root, 'connection-catalog.json'),
+        `${JSON.stringify({
+          schemaVersion: 1,
+          revision: 2,
+          defaultTarget: null,
+          connections: [
+            {
+              connectionId: duplicateConnectionId,
+              revision: 1,
+              slug: 'gemini-account',
+              name: 'Gemini account',
+              providerType: 'gemini-cli',
+              enabled: true,
+              enabledModelIds: ['gemini-2.5-pro'],
+              models: [],
+            },
+            {
+              connectionId: duplicateConnectionId,
+              revision: 1,
+              slug: 'google-api',
+              name: 'Google API',
+              providerType: 'google',
+              enabled: true,
+              enabledModelIds: ['gemini-2.5-pro'],
+              models: [],
+            },
+          ],
+        })}\n`,
+        'utf8',
+      );
+
+      await assert.rejects(
+        () => stores.connectionCatalog.getSnapshot(),
+        isStoreError('invalid_document'),
+      );
+    });
+  });
+
   test('validates credential locators and redacts credential status', async () => {
     await withInteractiveOwner(async ({ stores }) => {
       const required = await createConnection(
@@ -944,6 +1071,106 @@ describe('runtime policy stores', () => {
       const expected = { connectionId: connection.connectionId, modelId: 'llama3.3' };
       assert.deepEqual(completed.snapshot.defaultTarget, expected);
       assert.deepEqual((await stores.connectionCatalog.getSnapshot()).defaultTarget, expected);
+    });
+  });
+
+  test('releases the canonical default target when a selection change removes its model', async () => {
+    await withInteractiveOwner(async ({ stores }) => {
+      const connection = await createConnection(
+        stores,
+        0,
+        connectionDraft('selection-default', 'ollama', 'Selection default'),
+      );
+      const widened = await stores.connectionCatalog.update({
+        expected: connectionBasis(connection),
+        changes: {
+          name: connection.name,
+          enabled: true,
+          enabledModelIds: ['gpt-5', 'llama3.3'],
+          relayModelProfiles: null,
+        },
+      });
+      assert.equal(widened.kind, 'committed');
+      if (widened.kind !== 'committed') return;
+      const widenedEntry = widened.snapshot.connections[0];
+      assert.ok(widenedEntry);
+      assert.equal(
+        (
+          await stores.connectionCatalog.setDefaultTarget({
+            expectedCatalogRevision: widened.snapshot.revision,
+            target: { connectionId: connection.connectionId, modelId: 'gpt-5' },
+          })
+        ).kind,
+        'committed',
+      );
+
+      const narrowed = await stores.connectionCatalog.update({
+        expected: connectionBasis(widenedEntry),
+        changes: {
+          name: connection.name,
+          enabled: true,
+          enabledModelIds: ['llama3.3'],
+          relayModelProfiles: null,
+        },
+      });
+      assert.equal(narrowed.kind, 'committed');
+      if (narrowed.kind !== 'committed') return;
+      // Not `llama3.3`: a surviving member of the set is not the user's answer.
+      assert.equal(narrowed.snapshot.defaultTarget, null);
+      assert.equal((await stores.connectionCatalog.getSnapshot()).defaultTarget, null);
+    });
+  });
+
+  test('releases the canonical default target when its connection is disabled', async () => {
+    await withInteractiveOwner(async ({ stores }) => {
+      const connection = await createConnection(
+        stores,
+        0,
+        connectionDraft('default-disabled', 'ollama', 'Default disabled'),
+      );
+      const catalog = await stores.connectionCatalog.getSnapshot();
+      assert.equal(
+        (
+          await stores.connectionCatalog.setDefaultTarget({
+            expectedCatalogRevision: catalog.revision,
+            target: { connectionId: connection.connectionId, modelId: 'gpt-5' },
+          })
+        ).kind,
+        'committed',
+      );
+
+      const disabled = await stores.connectionCatalog.update({
+        expected: connectionBasis(connection),
+        changes: {
+          name: connection.name,
+          enabled: false,
+          enabledModelIds: connection.enabledModelIds,
+          relayModelProfiles: null,
+        },
+      });
+      assert.equal(disabled.kind, 'committed');
+      if (disabled.kind !== 'committed') return;
+      assert.equal(disabled.snapshot.defaultTarget, null);
+      assert.equal((await stores.connectionCatalog.getSnapshot()).defaultTarget, null);
+    });
+  });
+
+  test('rejects a stated default target that names an unselected model', async () => {
+    await withInteractiveOwner(async ({ stores }) => {
+      const connection = await createConnection(
+        stores,
+        0,
+        connectionDraft('stated-default', 'ollama', 'Stated default'),
+      );
+      const catalog = await stores.connectionCatalog.getSnapshot();
+      const rejected = await stores.connectionCatalog.setDefaultTarget({
+        expectedCatalogRevision: catalog.revision,
+        target: { connectionId: connection.connectionId, modelId: 'llama3.3' },
+      });
+      assert.equal(rejected.kind, 'invalid_default_target');
+      const unchanged = await stores.connectionCatalog.getSnapshot();
+      assert.equal(unchanged.defaultTarget, null);
+      assert.equal(unchanged.revision, catalog.revision);
     });
   });
 
@@ -2038,18 +2265,13 @@ describe('runtime policy stores', () => {
         2,
         connectionDraft('public-copilot', 'github-copilot', 'Public Copilot'),
       );
-      const preview = await createConnection(
-        stores,
-        3,
-        connectionDraft('public-preview', 'gemini-cli', 'Public preview'),
-      );
       const apiKey = await createConnection(
         stores,
-        4,
+        3,
         connectionDraft('public-api-key', 'openai', 'Public API key'),
       );
 
-      for (const connection of [claude, codex, preview]) {
+      for (const connection of [claude, codex]) {
         await assert.rejects(
           () =>
             stores.credentialVault.set({

@@ -3,9 +3,8 @@ import { buildConnectionModelCatalogEntries } from './model-catalog.js';
 import { thinkingVariantsForConnection, type ThinkingLevel } from './model-thinking.js';
 import {
   CODEX_SUBSCRIPTION_UNSUPPORTED_CHATGPT_MODELS,
-  PROVIDER_DEFAULTS,
   connectionEnabledModelIds,
-  isWiredOAuthProvider,
+  providerDefaultsOf,
   type LlmConnection,
   type ProviderType,
 } from './llm-connections.js';
@@ -21,7 +20,6 @@ const MODEL_MENU_PROVIDER_LABELS: Partial<Record<ProviderType, string>> = {
   'zai-coding-plan': 'Z.AI',
   MiniMax: 'MiniMax',
   'openai-codex': 'OpenAI OAuth',
-  'gemini-cli': 'Gemini CLI',
 };
 
 export interface ChatModelChoice {
@@ -41,13 +39,8 @@ export function buildChatModelChoices(connections: readonly LlmConnection[]): Ch
   const choices: ChatModelChoice[] = [];
   for (const rawConnection of connections) {
     const connection = normalizeOpenAiCodexConnection(rawConnection);
-    const provider = PROVIDER_DEFAULTS[connection.providerType];
-    if (
-      !connection.enabled ||
-      !provider ||
-      provider.backendKind !== 'ai-sdk' ||
-      (provider.authKind === 'oauth_token' && !isWiredOAuthProvider(connection.providerType))
-    ) {
+    const provider = providerDefaultsOf(connection.providerType);
+    if (!connection.enabled || !provider) {
       continue;
     }
     const enabledModelIds = new Set(connectionEnabledModelIds(connection));

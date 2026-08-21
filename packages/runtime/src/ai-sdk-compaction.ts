@@ -41,8 +41,11 @@ import {
   isHistoryCompactContentEvent,
 } from './history-compact.js';
 import { HistoryCompactSummarizerError } from './history-compact-error.js';
+import { findCheckpointSummaryDefect } from './history-compact-summary-validation.js';
 import {
   buildHistoryCompactCheckpoint,
+  canContinueHistoryCompactCheckpointForModel,
+  canReplayHistoryCompactCheckpointForModel,
   matchHistoryCompactCheckpointPrefix,
   type HistoryCompactCheckpoint,
   type HistoryCompactMemoryExtractionBoundary,
@@ -62,11 +65,7 @@ import {
   type ActiveToolResultArchiveCandidate,
   type ActiveToolResultPruneDiagnosticPatch,
 } from './active-tool-result-prune.js';
-import {
-  rewriteActiveFullCompactInMessages,
-  type ActiveCompactionHeadAnchor,
-  type ActiveFullCompactBlock,
-} from './active-full-compact.js';
+import type { ActiveCompactionHeadAnchor } from './active-compaction-kernel.js';
 import {
   rewriteSemanticCompactInMessages,
   type SemanticCompactBlock,
@@ -83,7 +82,7 @@ import {
   type RuntimeEventModelReplayPlan,
 } from './model-history.js';
 import { toolSchemaCharsForDiagnostics } from './request-shape.js';
-import type { ModelCallKind } from '@maka/core/model-call-attempt';
+import type { ModelCallAttempt, ModelCallKind } from '@maka/core/model-call-attempt';
 import type { ProviderRequestTracker } from './provider-request-telemetry.js';
 import {
   estimateNextRequestTokens,
@@ -149,6 +148,7 @@ export interface AiSdkCompactionDeps {
     callKind: ModelCallKind;
     modelId: string;
     runId: string | undefined;
+    historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
   }) => ProviderRequestTracker | undefined;
   /**
    * Materialize a replay plan. The image budget belongs to the turn whose
@@ -158,6 +158,7 @@ export interface AiSdkCompactionDeps {
   materializeRuntimeReplayPlan: (
     plan: RuntimeEventModelReplayPlan,
     imageBudget: ProviderImageBudget,
+    checkpoint?: HistoryCompactCheckpoint,
   ) => Promise<ModelMessage[]>;
   canReplayProviderNative: (plan: RuntimeEventModelReplayPlan) => boolean;
   appendTurnTailPrompt: (
@@ -176,10 +177,12 @@ export class AiSdkCompaction {
     callKind: ModelCallKind;
     modelId: string;
     runId: string | undefined;
+    historyCompactRoute?: ModelCallAttempt['historyCompactRoute'];
   }) => ProviderRequestTracker | undefined;
   private readonly materializeRuntimeReplayPlan: (
     plan: RuntimeEventModelReplayPlan,
     imageBudget: ProviderImageBudget,
+    checkpoint?: HistoryCompactCheckpoint,
   ) => Promise<ModelMessage[]>;
   private readonly canReplayProviderNative: (plan: RuntimeEventModelReplayPlan) => boolean;
   private readonly appendTurnTailPrompt: (
@@ -463,6 +466,9 @@ export class AiSdkCompaction {
       callKind: 'history_compact',
       modelId: this.input.modelId,
       runId: input.runId,
+      ...(this.input.historyCompactRoute
+        ? { historyCompactRoute: this.input.historyCompactRoute }
+        : {}),
     });
     const foldedIds = new Set(input.draftBlock.coverage.runtimeEventIds);
     const foldedRuntimeEvents = input.priorRuntimeContext.filter((event) =>
@@ -482,7 +488,16 @@ export class AiSdkCompaction {
       ? matchHistoryCompactCheckpointPrefix(loadedCheckpoint, foldedRuntimeEvents)
       : undefined;
     const previousCheckpoint =
-      checkpointMatch && !checkpointMatch.reason ? loadedCheckpoint : undefined;
+      checkpointMatch &&
+      !checkpointMatch.reason &&
+      loadedCheckpoint &&
+      canContinueHistoryCompactCheckpointForModel(
+        loadedCheckpoint,
+        this.input.connection,
+        this.input.modelId,
+      )
+        ? loadedCheckpoint
+        : undefined;
     const newlyFoldedRuntimeEvents = previousCheckpoint
       ? checkpointMatch!.successorRuntimeEvents
       : foldedRuntimeEvents;
@@ -530,19 +545,27 @@ export class AiSdkCompaction {
       };
     }
     try {
-      const summary = await Promise.resolve(
+      const compacted = await Promise.resolve(
         summarizer({
           sessionId: this.sessionId,
           turnId: input.turnId,
           source: { foldedRuntimeEvents },
           ...(previousCheckpoint ? { previousCheckpoint } : {}),
           newlyFoldedRuntimeEvents,
+          ...(input.contextBudget.maxHistoryEstimatedTokens !== undefined
+            ? {
+                inputBudget: {
+                  maxEstimatedTokens: input.contextBudget.maxHistoryEstimatedTokens,
+                  charsPerToken: input.contextBudget.charsPerToken ?? 4,
+                },
+              }
+            : {}),
           requestShapeHashBefore: input.requestShapeHashBefore,
           abortSignal: input.abortSignal,
           ...(historyCompactTracker ? { providerRequestTracker: historyCompactTracker } : {}),
         }),
       );
-      if (!summary?.trim()) {
+      if (compacted === undefined || (typeof compacted === 'string' && !compacted.trim())) {
         return {
           ...(previousCheckpoint ? { fallbackCheckpoint: previousCheckpoint } : {}),
           diagnosticPatch: {
@@ -561,10 +584,24 @@ export class AiSdkCompaction {
           },
         };
       }
+      // The write gate enforces the invariant regardless of which summarizer
+      // produced the text (#3029): a malformed summary must not replace
+      // folded history. The default summarizer already threw with the same
+      // reasons; any other producer is validated here, and the enclosing
+      // catch maps the reason into the fail-open diagnostics.
+      if (typeof compacted === 'string') {
+        const defect = findCheckpointSummaryDefect(compacted, {
+          coveredRuntimeEvents: foldedRuntimeEvents,
+          ...(input.contextBudget.charsPerToken !== undefined
+            ? { charsPerToken: input.contextBudget.charsPerToken }
+            : {}),
+        });
+        if (defect) throw new HistoryCompactSummarizerError(defect);
+      }
       const checkpoint = buildHistoryCompactCheckpoint({
         sessionId: this.sessionId,
         coveredRuntimeEvents: foldedRuntimeEvents,
-        summary,
+        ...(typeof compacted === 'string' ? { summary: compacted } : { providerState: compacted }),
         highWaterName: input.draftBlock.highWaterName,
         highWaterSeq: input.draftBlock.highWaterSeq,
         ...(previousCheckpoint ? { previousCheckpointId: previousCheckpoint.checkpointId } : {}),
@@ -996,6 +1033,18 @@ export class AiSdkCompaction {
 
     const compactLoadPatch = await this.loadHistoryCompactBlocks(nextPolicy);
     if (compactLoadPatch.policy !== nextPolicy) nextPolicy = compactLoadPatch.policy;
+    const loadedCheckpoint = nextPolicy.historyCompact?.checkpoint;
+    if (
+      loadedCheckpoint &&
+      !canReplayHistoryCompactCheckpointForModel(
+        loadedCheckpoint,
+        this.input.connection,
+        this.input.modelId,
+      )
+    ) {
+      const { checkpoint: _incompatibleCheckpoint, ...historyCompact } = nextPolicy.historyCompact!;
+      nextPolicy = { ...nextPolicy, historyCompact };
+    }
     const loadPatch = await this.loadSynthesisCacheBlocks(nextPolicy);
     if (loadPatch.policy !== nextPolicy) nextPolicy = loadPatch.policy;
     const diagnosticPatch = mergeContextBudgetDiagnosticPatches(
@@ -1072,7 +1121,7 @@ export class AiSdkCompaction {
     const policy = this.input.contextBudget?.semanticCompact;
     if (policy?.enabled !== true || policy.mode === 'off' || !headAnchor) return undefined;
 
-    let acceptedProjection: ActiveFullCompactProjection | undefined;
+    let acceptedProjection: AcceptedActiveCompactionProjection | undefined;
     const controllerState: SemanticCompactControllerState = {
       consecutiveInvalidSummaries: 0,
       totalInvalidSummaries: 0,
@@ -1105,7 +1154,7 @@ export class AiSdkCompaction {
       const incomingMessages = options.messages;
       const projectedMessages = dryRun
         ? undefined
-        : projectAcceptedActiveFullCompactMessages(incomingMessages, acceptedProjection);
+        : projectAcceptedActiveCompactionMessages(incomingMessages, acceptedProjection);
       const messagesForRewrite = projectedMessages ?? incomingMessages;
       const summarizerModel = policy.summarizerModel
         ? this.input.modelFactory({
@@ -1162,65 +1211,7 @@ export class AiSdkCompaction {
         };
         return {
           messages: rewritten.messages,
-          makaSemanticCompactStatus: 'replaced',
-        } as ActiveCompactionProjectionResult;
-      }
-      return !dryRun && projectedMessages
-        ? ({
-            messages: projectedMessages,
-            makaSemanticCompactStatus: 'projected',
-          } as ActiveCompactionProjectionResult)
-        : undefined;
-    };
-  }
-
-  public buildActiveFullCompactProjection(
-    turnId: string,
-    runtimeEvents: readonly RuntimeEvent[] | undefined,
-    headAnchor: ActiveCompactionHeadAnchor | undefined,
-    requestShapeHashForMessages: (
-      messages: readonly ModelMessage[],
-      activeToolsForStep: readonly string[] | undefined,
-    ) => string,
-    onDiagnosticPatch?: (patch: Partial<ContextBudgetDiagnostic>) => void,
-  ): RequestProjectionStage | undefined {
-    const policy = this.input.contextBudget?.activeFullCompact;
-    if (policy?.enabled !== true || policy.mode === 'index_only' || policy.mode === 'off')
-      return undefined;
-
-    let acceptedProjection: ActiveFullCompactProjection | undefined;
-    return (options) => {
-      const activeToolsForStep = options.activeTools;
-      const dryRun = policy.mode === 'validate_only' || policy.mode === 'prepare_step_dry_run';
-      const incomingMessages = options.messages;
-      const projectedMessages = dryRun
-        ? undefined
-        : projectAcceptedActiveFullCompactMessages(incomingMessages, acceptedProjection);
-      const messagesForRewrite = projectedMessages ?? incomingMessages;
-      const rewritten = rewriteActiveFullCompactInMessages({
-        sessionId: this.sessionId,
-        turnId,
-        messages: messagesForRewrite,
-        policy,
-        runtimeEvents: runtimeEvents?.filter((event) => event.turnId === turnId),
-        stepNumber: options.stepNumber,
-        now: this.now(),
-        charsPerToken: this.input.contextBudget?.charsPerToken,
-        requestShapeHashForMessages: (messages) =>
-          requestShapeHashForMessages(messages, activeToolsForStep),
-        ...(headAnchor ? { headAnchor } : {}),
-        dryRun,
-        ...(dryRun ? { dryRunReason: policy.mode } : {}),
-      });
-      onDiagnosticPatch?.(rewritten.diagnosticPatch);
-      if (!dryRun && rewritten.decision === 'replaced') {
-        if (rewritten.block) this.recordActiveFullCompactBlock(rewritten.block);
-        acceptedProjection = {
-          sourceSignatures: incomingMessages.map(modelMessageSignature),
-          sourceSignatureMode: 'exact',
-          projectedMessages: rewritten.messages,
         };
-        return { messages: rewritten.messages };
       }
       return !dryRun && projectedMessages ? { messages: projectedMessages } : undefined;
     };
@@ -1239,23 +1230,6 @@ export class AiSdkCompaction {
       }
     } catch {
       // Semantic compact persistence is diagnostic/storage-only and must never
-      // perturb provider request projection or tool-loop progress.
-    }
-  }
-
-  private recordActiveFullCompactBlock(block: ActiveFullCompactBlock): void {
-    const recorder = this.input.recordActiveFullCompactBlock;
-    if (!recorder) return;
-    try {
-      const result = recorder(block);
-      if (result && typeof (result as PromiseLike<void>).then === 'function') {
-        void Promise.resolve(result).catch(() => {
-          // Active compact persistence is diagnostic/storage-only and must never
-          // perturb provider request projection or tool-loop progress.
-        });
-      }
-    } catch {
-      // Active compact persistence is diagnostic/storage-only and must never
       // perturb provider request projection or tool-loop progress.
     }
   }
@@ -1344,11 +1318,11 @@ export class AiSdkCompaction {
     const midTurn = compactPolicy.midTurn!;
     const charsPerToken = policy.charsPerToken ?? 4;
     const reserveTokens = midTurn.reserveTokens ?? 16_384;
-    let acceptedProjection: ActiveFullCompactProjection | undefined;
+    let acceptedProjection: AcceptedActiveCompactionProjection | undefined;
 
     return async (options) => {
       const incomingMessages = options.messages;
-      const projectedMessages = projectAcceptedActiveFullCompactMessages(
+      const projectedMessages = projectAcceptedActiveCompactionMessages(
         incomingMessages,
         acceptedProjection,
       );
@@ -1546,6 +1520,9 @@ export class AiSdkCompaction {
       callKind: 'history_compact',
       modelId: this.input.modelId,
       runId: input.origin.runId,
+      ...(this.input.historyCompactRoute
+        ? { historyCompactRoute: this.input.historyCompactRoute }
+        : {}),
     });
     const recorder = this.input.recordHistoryCompactCheckpoint!;
     const loadTurnRuntimeEvents = this.input.loadTurnRuntimeEvents!;
@@ -1654,6 +1631,10 @@ export class AiSdkCompaction {
             source: { foldedRuntimeEvents: [...coveredRuntimeEvents] },
             ...(previousCheckpoint ? { previousCheckpoint } : {}),
             newlyFoldedRuntimeEvents: [...newlyFoldedRuntimeEvents],
+            inputBudget: {
+              maxEstimatedTokens: Math.max(1, state.capacity.tokens - reserveTokens),
+              charsPerToken,
+            },
             ...(abortSignal ? { abortSignal } : {}),
             ...(midTurnTracker ? { providerRequestTracker: midTurnTracker } : {}),
           }),
@@ -1705,6 +1686,7 @@ export class AiSdkCompaction {
     const replacementMessages = await this.materializeRuntimeReplayPlan(
       { ...replayPlan, items: replayItemsWithAnchorTail },
       input.origin.imageBudget,
+      plan.checkpoint,
     );
     // Apply the shape only when it actually shrinks the request versus the
     // reference payload (the incoming request for the proactive hook, the
@@ -1729,7 +1711,7 @@ export class AiSdkCompaction {
     // only this owner can measure the fully materialized provider request.
     const replayFit = evaluateHistoryCompactCheckpointReplay(
       plan.checkpoint,
-      plan.replacementEvents.slice(1),
+      plan.checkpoint.version === 3 ? plan.replacementEvents : plan.replacementEvents.slice(1),
       policy?.charsPerToken,
       policy?.maxHistoryEstimatedTokens,
     );
@@ -2052,45 +2034,6 @@ function mergeCountsInto(
 
 // -- moved helpers (prepare-step / signature / prune) ------------------------
 
-type ActiveCompactionProjectionResult = RequestProjection & {
-  makaSemanticCompactStatus?: 'replaced' | 'projected';
-};
-
-export function composeActiveCompactionProjection(
-  attention: RequestProjectionStage | undefined,
-  capacity: RequestProjectionStage | undefined,
-): RequestProjectionStage | undefined {
-  if (!attention) return capacity;
-  if (!capacity) return attention;
-  return async (options) => {
-    const attentionResult = (await Promise.resolve(attention(options))) as
-      | ActiveCompactionProjectionResult
-      | undefined;
-    if (attentionResult?.makaSemanticCompactStatus === 'replaced') {
-      const { makaSemanticCompactStatus: _status, ...providerResult } = attentionResult;
-      return providerResult;
-    }
-    const capacityResult = await Promise.resolve(
-      capacity({
-        ...options,
-        messages: attentionResult?.messages ?? options.messages,
-        ...(attentionResult?.activeTools ? { activeTools: attentionResult.activeTools } : {}),
-      }),
-    );
-    if (!capacityResult) {
-      if (!attentionResult) return undefined;
-      const { makaSemanticCompactStatus: _status, ...providerResult } = attentionResult;
-      return providerResult;
-    }
-    return {
-      ...attentionResult,
-      ...capacityResult,
-      activeTools: capacityResult.activeTools ?? attentionResult?.activeTools,
-      messages: capacityResult.messages ?? attentionResult?.messages,
-    };
-  };
-}
-
 function activeToolResultArchiveKey(
   candidate: ActiveToolResultArchiveCandidate & { bodySha256: string },
 ): string {
@@ -2126,16 +2069,16 @@ function collectPrunableCompletedStepToolCallIds(
   return out;
 }
 
-interface ActiveFullCompactProjection {
+interface AcceptedActiveCompactionProjection {
   sourceSignatures: readonly string[];
   sourceSignatureMode: 'exact' | 'active_prune_lineage';
   projectedMessages: readonly ModelMessage[];
   semanticBlock?: SemanticCompactBlock;
 }
 
-function projectAcceptedActiveFullCompactMessages(
+function projectAcceptedActiveCompactionMessages(
   incomingMessages: readonly ModelMessage[],
-  acceptedProjection: ActiveFullCompactProjection | undefined,
+  acceptedProjection: AcceptedActiveCompactionProjection | undefined,
 ): ModelMessage[] | undefined {
   if (!acceptedProjection) return undefined;
   const sourceSignature =

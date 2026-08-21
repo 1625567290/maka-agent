@@ -14,6 +14,7 @@ import {
   Search,
   Settings as SettingsIcon,
   ShieldCheck,
+  Upload,
   Workflow,
   type LucideProps,
 } from '@maka/ui/icons';
@@ -70,12 +71,35 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
   { id: 'search', Icon: Search, enabled: true, group: 'capabilities', badge: 'Beta' },
   { id: 'usage', Icon: BarChart3, enabled: true, group: 'activity' },
   { id: 'archived-tasks', Icon: ListTodo, enabled: true, group: 'activity' },
+  { id: 'import-tasks', Icon: Upload, enabled: true, group: 'activity' },
   { id: 'daily-review', Icon: CalendarDays, enabled: true, group: 'activity' },
   { id: 'data', Icon: Database, enabled: true, group: 'system' },
   { id: 'permissions', Icon: ShieldCheck, enabled: true, group: 'system' },
   { id: 'health', Icon: Activity, enabled: true, group: 'system' },
   { id: 'about', Icon: Info, enabled: true, group: 'system' },
 ];
+
+const SETTINGS_SECTION_SCOPES: Record<
+  SettingsSection,
+  'client' | 'mixed' | 'runtime-host'
+> = {
+  general: 'mixed',
+  appearance: 'client',
+  projects: 'mixed',
+  models: 'runtime-host',
+  subagents: 'runtime-host',
+  memory: 'runtime-host',
+  'bot-chat': 'client',
+  search: 'runtime-host',
+  usage: 'client',
+  'archived-tasks': 'client',
+  'import-tasks': 'runtime-host',
+  'daily-review': 'runtime-host',
+  data: 'mixed',
+  permissions: 'runtime-host',
+  health: 'runtime-host',
+  about: 'client',
+};
 
 export type LocalizedSettingsNavItem = SettingsNavItem & { label: string; description: string };
 
@@ -106,4 +130,10 @@ export function readLastSettingsSection(): SettingsSection {
 
 export function navLabel(section: SettingsSection, locale: UiLocale): string {
   return getSettingsNavigationCopy(locale).sections[section].label;
+}
+
+export function settingsSectionScope(
+  section: SettingsSection,
+): 'client' | 'mixed' | 'runtime-host' {
+  return SETTINGS_SECTION_SCOPES[section];
 }

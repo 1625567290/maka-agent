@@ -54,9 +54,9 @@ import type { IpcHandler, ReconnectableReadIpcMain } from "./ipc-reconnect-polic
 import type { RuntimeHostTargetIpcMain } from "./runtime-host-reconnecting-ipc-main.js";
 import {
   desktopSessionResourceKey,
-  requireDesktopHostRef,
-  type DesktopHostRef,
-} from "../preload/runtime-host-identity.js";
+  requireDesktopTargetScope,
+  type DesktopTargetScope,
+} from "../shared/runtime-host-identity.js";
 
 type CandidateIpcMain = ReconnectableReadIpcMain & Pick<IpcMain, "removeHandler">;
 
@@ -76,7 +76,7 @@ export interface DesktopRuntimeHostCandidateDeps {
     target: DesktopRuntimeHostTargetPolicy,
   ) => Promise<WorkspaceTarget>;
   readonly emitSessionsChanged: (
-    scope: DesktopHostRef,
+    scope: DesktopTargetScope,
     reason: SessionChangedReason,
     sessionId?: string,
     extra?: Pick<SessionChangedEvent, "connectionSlug" | "modelId" | "turnId">,
@@ -86,7 +86,7 @@ export interface DesktopRuntimeHostCandidateDeps {
   ) => void | Promise<void>;
   readonly e2eInteractions?: RuntimeHostSessionExecutionIpcDeps["e2eInteractions"];
   readonly renderer?: {
-    send(channel: string, scope: DesktopHostRef, payload: unknown): void;
+    send(channel: string, scope: DesktopTargetScope, payload: unknown): void;
   };
   readonly onError?: RuntimeHostSessionDomainsIpcDeps["onError"];
   readonly isTargetActive?: () => boolean;
@@ -110,7 +110,7 @@ export interface DesktopRuntimeHostCandidateDeps {
     ipcMain: ReconnectableReadIpcMain,
     controls: DesktopRuntimeHostCandidateControls,
     target: DesktopRuntimeHostTargetPolicy,
-    scope: DesktopHostRef,
+    scope: DesktopTargetScope,
     isTargetActive: () => boolean,
   ) => void | (() => void | Promise<void>);
 }
@@ -287,7 +287,6 @@ async function startRemoteDesktopRuntimeHostCandidate(
   const connection = await connectRemoteRuntimeHostProfile({
     profile: remote.profile,
     credential: remote.credential,
-    surface: "desktop",
     clientInstanceId: input.clientInstanceId ?? randomUUID(),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
     ...(input.connectTimeoutMs === undefined
@@ -440,6 +439,8 @@ export async function createDesktopRuntimeHostCandidate(
       emitActiveInteractionsChanged,
       emitSubscriptionRecovered: (sessionId) =>
         domains?.sessionSubscriptionRecovered(sessionId),
+      emitObservationSeed: (sessionId, phase) =>
+        sendToRenderer?.('sessions:observation-seed', { sessionId, phase }),
       onWatchedTurnFinished: (sessionId, outcome) =>
         outcome === "completed"
           ? deps.completeComputerUseTurn(
@@ -465,6 +466,11 @@ export async function createDesktopRuntimeHostCandidate(
       ipc,
     );
     closeSessionDomains = domains.close;
+    const observedSessionIds = sessionObservations.observedSessionIds();
+    for (const sessionId of observedSessionIds) {
+      sendToRenderer('sessions:observation-seed', { sessionId, phase: 'pending' });
+    }
+    observationsAttached = true;
     const restoredSessionIds = await sessionObservations.attach(
       sessionObserver,
       (target) => ({
@@ -479,8 +485,17 @@ export async function createDesktopRuntimeHostCandidate(
         off: target.off.bind(target),
       }),
     );
-    observationsAttached = true;
+    const restoredSessionIdSet = new Set(restoredSessionIds);
+    const failedSessionIds = observedSessionIds.filter(
+      (sessionId) => !restoredSessionIdSet.has(sessionId),
+    );
+    if (failedSessionIds.length > 0) {
+      throw new Error(
+        `Failed to restore Session observations: ${failedSessionIds.join(', ')}`,
+      );
+    }
     for (const sessionId of restoredSessionIds) {
+      sendToRenderer('sessions:observation-seed', { sessionId, phase: 'ready' });
       emitSessionsChanged("message-appended", sessionId);
       emitSessionsChanged("goal-change", sessionId);
       domains.sessionSubscriptionRecovered(sessionId);
@@ -502,6 +517,7 @@ export async function createDesktopRuntimeHostCandidate(
           hostPathAccess: target.kind === "local" ? "cwd" : "none",
           ...(target.kind === "remote" ? { clientCwd: deps.workspaceRoot } : {}),
           releaseResourcesOnClose: false,
+          targetScope: scope,
           nativeSessionId: (sessionId) =>
             desktopSessionResourceKey({ ...scope, sessionId }),
           onSessionUsed: (sessionId) => nativeSessionIds.add(sessionId),
@@ -568,6 +584,7 @@ export async function createDesktopRuntimeHostCandidate(
     registerRuntimeHostSessionCatalogIpc(
       {
         client,
+        runningTurnIds: (sessionId) => sessionObserver.observedRunningTurnIds(sessionId),
         resolveCreateProject: (input) => deps.resolveSessionCreateProject(input, target),
         emitSessionsChanged,
         releaseSessionResources: releaseNativeSession,
@@ -653,7 +670,6 @@ function connectInput(
 ): ConnectOrSpawnRuntimeHostInput {
   return {
     rootPath: input.rootPath,
-    surface: "desktop",
     protocol: {
       min: RUNTIME_HOST_PROTOCOL_VERSION,
       max: RUNTIME_HOST_PROTOCOL_VERSION,
@@ -699,7 +715,7 @@ class ScopedIpcMain implements ReconnectableReadIpcMain {
 
   constructor(
     ipcMain: CandidateIpcMain,
-    private readonly scope: DesktopHostRef,
+    private readonly scope: DesktopTargetScope,
   ) {
     this.#ipcMain = ipcMain;
   }
@@ -721,7 +737,7 @@ class ScopedIpcMain implements ReconnectableReadIpcMain {
       );
     }
     const hostScopedListener: IpcHandler = (event, scope, ...args) => {
-      requireDesktopHostRef(scope, this.scope);
+      requireDesktopTargetScope(scope, this.scope);
       return listener(event, ...args);
     };
     if (reconnectableRead && this.#ipcMain.handleReconnectableRead) {

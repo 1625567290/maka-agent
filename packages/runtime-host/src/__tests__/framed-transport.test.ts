@@ -1,3 +1,4 @@
+import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import { createServer, Socket, type Server } from 'node:net';
 import { test } from 'node:test';
@@ -6,7 +7,6 @@ import {
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
   RUNTIME_HOST_MAX_MESSAGE_BYTES,
   RUNTIME_HOST_PROTOCOL_VERSION,
-  RuntimeHostProtocolError,
 } from '../protocol/index.js';
 import { FramedTransport, RuntimeHostTransportError } from '../transport/framed-transport.js';
 import { frameLocalIpcProtocolMessage } from '../transport/local-ipc-framing.js';
@@ -113,7 +113,6 @@ test('decodes split UTF-8 and coalesced Local IPC frames', async () => {
     const hello = {
       kind: 'hello' as const,
       clientInstanceId: '客户端',
-      surface: 'tui' as const,
       protocolMin: RUNTIME_HOST_PROTOCOL_VERSION,
       protocolMax: RUNTIME_HOST_PROTOCOL_VERSION,
       compatibilityEpoch: RUNTIME_HOST_COMPATIBILITY_EPOCH,

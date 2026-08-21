@@ -1,39 +1,24 @@
 /**
- * Pure presentation helpers for SessionStatus + SessionBlockedReason
- * used by the sidebar and chat header.
+ * Renderer-side presentation rules that only Desktop has: which blocked reasons
+ * are worth acting on, and what to offer after a turn fails.
  *
- * Separated from the React component layer so the copy + tone mapping
- * can be unit-tested without a DOM, mirroring `session-health-notice.ts`
- * pattern.
+ * Separated from the React component layer so the rules can be unit-tested
+ * without a DOM, mirroring the `session-health-notice.ts` pattern.
  *
- * Two contracts enforced here:
- *
- *  1. **Generalized blocked-reason copy** (@kenji review): UI labels
- *     never expose the raw `SessionBlockedReason` enum string. The
- *     mapping below is the canonical translation. New blocked reasons
- *     must extend the core enum AND this matrix together, or the
- *     `unknown` fallback applies.
- *
- *  2. **Status tone matrix**: each SessionStatus has a single visual
- *     tone (`accent / warning / destructive / info / success / muted`)
- *     consumed by both the SessionStatusIcon and the chat-header
- *     status badge. Aligns with the existing session-health-notice tone
- *     vocabulary.
+ * Turning a `SessionStatus` into a label and a dot, and a `SessionBlockedReason`
+ * into copy, is NOT here — both live in `@maka/ui`'s file of the same name,
+ * which is also where the contract that a UI label never shows a raw enum
+ * identifier is stated and enforced. This file used to re-export those and
+ * document a tone matrix "consumed by both the SessionStatusIcon and the
+ * chat-header status badge", naming two consumers that do not exist; the tone
+ * layer and the re-exports are gone (#2984).
  */
 
 import { SANDBOX_BOUNDARY_RESTART_CLOSURE_CLASS } from '@maka/core/sandbox-boundary';
-import type { SessionBlockedReason, SessionStatus, SessionSummary } from '@maka/core/session';
+import type { SessionBlockedReason, SessionSummary } from '@maka/core/session';
 import type { UiLocale } from '@maka/core/ui-locale';
-import {
-  describeBlockedReason,
-  presentSessionStatus,
-  type SessionStatusPresentation,
-  type SessionStatusTone,
-} from '@maka/ui';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 import { describeSessionErrorReason } from './session-error-presentation.js';
-export { presentSessionStatus } from '@maka/ui';
-export { describeBlockedReason } from '@maka/ui';
 
 /**
  * Session-level "blocked" is only worth interrupting the user when
@@ -56,22 +41,62 @@ export function isActionableBlocked(reason: SessionBlockedReason | undefined): b
 }
 
 /**
- * Normalize a SessionSummary as it enters renderer state: non-actionable
- * blocked sessions read as ordinary resumable sessions (`active`), so the
- * sidebar grouping, row icon, and chat-header badge all agree without
- * each consumer re-implementing the rule. Everything else passes through
- * unchanged.
+ * Normalize a SessionSummary as it enters renderer state. Authoritative
+ * known-empty live state clears a persisted `running` value that may have
+ * survived a crash, while an omitted live state keeps the legacy fallback.
+ * Non-actionable blocked sessions read as ordinary resumable sessions
+ * (`active`), so every display consumer agrees on the same projection.
  */
-export function normalizeSessionSummaryForDisplay(session: SessionSummary): SessionSummary {
-  if (session.status !== 'blocked' || isActionableBlocked(session.blockedReason)) return session;
-  const { blockedReason: _blockedReason, ...rest } = session;
+export function normalizeSessionSummaryForDisplay<T extends SessionSummary>(session: T): T {
+  const liveNormalized: T =
+    session.status === 'running' && session.runningTurnIds?.length === 0
+      ? ({ ...session, status: 'active' as const } as T)
+      : session;
+  if (
+    liveNormalized.status !== 'blocked' ||
+    isActionableBlocked(liveNormalized.blockedReason)
+  ) {
+    return liveNormalized;
+  }
+  const { blockedReason: _blockedReason, ...rest } = liveNormalized;
   void _blockedReason;
-  return { ...rest, status: 'active' };
+  return { ...rest, status: 'active' } as T;
+}
+
+/**
+ * Mutation responses describe persisted metadata and legitimately omit live
+ * run state. Preserve the last authoritative state in that case; an explicit
+ * empty or non-empty array from a catalog read always replaces it.
+ */
+export function mergeSessionSummaryForDisplay<T extends SessionSummary>(
+  current: T | undefined,
+  incoming: T,
+): T {
+  const merged: T =
+    incoming.runningTurnIds === undefined && current?.runningTurnIds !== undefined
+      ? ({ ...incoming, runningTurnIds: [...current.runningTurnIds] } as T)
+      : incoming;
+  return normalizeSessionSummaryForDisplay(merged);
+}
+
+/**
+ * Apply the same live-state preservation rule at the shared list state
+ * boundary, so every metadata mutation path gets it even when a refresh fails.
+ */
+export function mergeSessionSummaryListForDisplay<T extends SessionSummary>(
+  current: readonly T[],
+  incoming: readonly T[],
+): T[] {
+  const currentById = new Map(current.map((session) => [session.id, session]));
+  return incoming.map((session) =>
+    mergeSessionSummaryForDisplay(currentById.get(session.id), session),
+  );
 }
 
 /**
  * Generalized Chinese phrasing for a failed turn's `errorClass`
- * Mirrors `describeBlockedReason()`; UI must never display the raw enum identifier.
+ * Mirrors `describeBlockedReason()` in `@maka/ui`, under the same rule: a UI
+ * label must never display the raw enum identifier.
  *
  * Recognized classes are written by the runtime via `classifyError()`,
  * `classifyHttpStatus()`, and `event.reason` / `event.code`. The set is

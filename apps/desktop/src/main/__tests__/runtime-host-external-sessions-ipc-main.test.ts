@@ -19,7 +19,18 @@ test('forwards bounded external Session requests and publishes imported Sessions
         listExternalSessions: async (input) => {
           requests.push(input);
           return {
-            sessions: [{ id: 'source-1', name: 'Source', hostCwd: '/external' }],
+            sessions: [
+              {
+                id: 'source-1',
+                name: 'Source',
+                hostCwd: '/external',
+                importState: {
+                  importedCount: 0,
+                  importedSessionIds: [],
+                  isImporting: false,
+                },
+              },
+            ],
             nextCursor: '16',
           };
         },
@@ -41,7 +52,18 @@ test('forwards bounded external Session requests and publishes imported Sessions
       cursor: '16',
     }),
     {
-      sessions: [{ id: 'source-1', name: 'Source', cwd: '/external' }],
+      sessions: [
+        {
+          id: 'source-1',
+          name: 'Source',
+          cwd: '/external',
+          importState: {
+            importedCount: 0,
+            importedSessionIds: [],
+            isImporting: false,
+          },
+        },
+      ],
       nextCursor: '16',
     },
   );
@@ -59,7 +81,7 @@ test('forwards bounded external Session requests and publishes imported Sessions
   assert.deepEqual(events, [{ reason: 'created', sessionId: 'imported-1' }]);
 });
 
-test('preserves commit uncertainty as a structured non-retryable IPC result', async () => {
+test('an uncertain commit still asks the shell to re-read the catalog', async () => {
   const events: unknown[] = [];
   const ipc = ipcHarness();
   registerRuntimeHostExternalSessionsIpc(
@@ -85,7 +107,12 @@ test('preserves commit uncertainty as a structured non-retryable IPC result', as
     }),
     { ok: false, reason: 'commit_outcome_unknown' },
   );
-  assert.deepEqual(events, []);
+  // The task may be in the catalog, so the shell has to look. The import page's
+  // own banner cannot be the only trace: 导入任务 is a Settings page, and the
+  // moment the user leaves it the banner is unmounted -- which is exactly when
+  // they come back and import the same conversation again. No id, because not
+  // knowing which task landed is what `commit_outcome_unknown` means.
+  assert.deepEqual(events, [{ reason: 'created', sessionId: undefined }]);
 });
 
 test('rejects malformed renderer requests before they reach the Host client', async () => {

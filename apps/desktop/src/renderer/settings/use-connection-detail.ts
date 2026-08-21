@@ -13,7 +13,6 @@ import {
   type RelayModelProfile,
   type ThinkingLevel,
 } from '@maka/core/model-thinking';
-import { isWiredOAuthProvider } from '@maka/core/provider-registry';
 import {
   providerAuthRequiresSecret,
   providerAuthSupportsApiKey,
@@ -32,10 +31,12 @@ import {
   type ConnectionsBridge,
   type CredentialPresenceStatus,
 } from './provider-panel-shared';
+import { useRuntimeHostSettingsTarget } from './runtime-host-settings-target.js';
+import { runtimeHostOAuthLoginBridge } from './runtime-host-settings-bridge.js';
 
 // Maps an OAuth model-connection provider type to the browser-assisted login
 // service that can re-run its authorization from inside the connection dialog. Only
-// the loopback / polling services (Codex, Antigravity) are one-button-drivable
+// the browser-assisted services (Codex and xAI) are one-button-drivable
 // here; Claude's paste-code flow and plain API-key providers return null so the
 // notice falls back to prose instead of rendering a dead button.
 export interface OAuthLoginService {
@@ -43,22 +44,20 @@ export interface OAuthLoginService {
   display: { name: string; shortName: string };
 }
 
-export function oauthLoginServiceFor(providerType: ProviderType): OAuthLoginService | null {
+export function oauthLoginServiceFor(
+  providerType: ProviderType,
+  host: import('../../preload/bridge-contract.js').DesktopRuntimeHostRef,
+): OAuthLoginService | null {
   switch (providerType) {
     case 'openai-codex':
       return {
-        bridge: window.maka.openAiCodex as unknown as OAuthLoginFlowBridge,
+        bridge: runtimeHostOAuthLoginBridge(window.maka.openAiCodex, host),
         display: { name: 'OpenAI Codex', shortName: 'Codex' },
       };
     case 'xai-oauth':
       return {
-        bridge: window.maka.xaiOAuth as unknown as OAuthLoginFlowBridge,
+        bridge: runtimeHostOAuthLoginBridge(window.maka.xaiOAuth, host),
         display: { name: 'xAI Grok', shortName: 'SuperGrok / X Premium' },
-      };
-    case 'gemini-cli':
-      return {
-        bridge: window.maka.antigravitySubscription as unknown as OAuthLoginFlowBridge,
-        display: { name: 'Google Antigravity', shortName: 'Antigravity' },
       };
     default:
       return null;
@@ -82,6 +81,7 @@ export interface ConnectionDetailProps {
 // the guard, lifecycle gate, and cross-calls (save auto-fetches models) stay in
 // one place with zero behavior change.
 export function useConnectionDetail(props: ConnectionDetailProps) {
+  const host = useRuntimeHostSettingsTarget();
   const locale = useUiLocale();
   const copy = getProviderSettingsCopy(locale).detail;
   const { connection } = props;
@@ -114,7 +114,9 @@ export function useConnectionDetail(props: ConnectionDetailProps) {
   const toast = useToast();
   const supportsApiKey = providerAuthSupportsApiKey(connection.providerType);
   const needsOAuth = defaults.authKind === 'oauth_token';
-  const oauthLoginService = needsOAuth ? oauthLoginServiceFor(connection.providerType) : null;
+  const oauthLoginService = needsOAuth
+    ? oauthLoginServiceFor(connection.providerType, host)
+    : null;
   const usesGitHubCopilotLogin = connection.providerType === 'github-copilot';
   const supportsRemoteDiscovery = providerSupportsModelDiscovery(connection.providerType);
   const requiresCredential = providerAuthRequiresSecret(connection.providerType);
@@ -334,7 +336,7 @@ export function useConnectionDetail(props: ConnectionDetailProps) {
     }
   }
 
-  // Per-model profile declarations for openai-compatible relays, edited as a
+  // Per-model profile declarations for custom OpenAI relays, edited as a
   // LOCAL DRAFT and committed by an explicit 保存 button — never keystroke by
   // keystroke. A draft is `Record<modelId, RelayModelProfile>` seeded from the
   // saved table; entries a user empties fully drop out of the map, and the
@@ -402,6 +404,17 @@ export function useConnectionDetail(props: ConnectionDetailProps) {
         return Object.keys(rest).length > 0 ? rest : undefined;
       }
       return { ...(current ?? {}), contextWindow };
+    });
+  }
+
+  function setDraftServiceTier(modelId: string, serviceTier: 'fast' | undefined): void {
+    updateRelayProfileDraft(modelId, (current) => {
+      if (serviceTier === undefined) {
+        if (!current) return current;
+        const { serviceTier: _dropped, ...rest } = current;
+        return Object.keys(rest).length > 0 ? rest : undefined;
+      }
+      return { ...(current ?? {}), serviceTier };
     });
   }
 
@@ -555,15 +568,11 @@ export function useConnectionDetail(props: ConnectionDetailProps) {
     if (!releaseDelete) return;
     const lifecycle = connectionDetailLifecycleRef.current;
     setDeleting(true);
+    const usesOAuth = PROVIDER_DEFAULTS[connection.providerType].authKind === 'oauth_token';
     const ok = await toast.confirm({
       title: copy.deleteConnectionTitle(connection.name),
-      description: copy.deleteDescription(
-        props.isDefault,
-        isWiredOAuthProvider(connection.providerType),
-      ),
-      confirmLabel: isWiredOAuthProvider(connection.providerType)
-        ? copy.disconnectAndDelete
-        : copy.delete,
+      description: copy.deleteDescription(props.isDefault, usesOAuth),
+      confirmLabel: usesOAuth ? copy.disconnectAndDelete : copy.delete,
       cancelLabel: copy.cancel,
       destructive: true,
     });
@@ -643,6 +652,7 @@ export function useConnectionDetail(props: ConnectionDetailProps) {
     setDraftThinkingLevels,
     setDraftVision,
     setDraftContextWindow,
+    setDraftServiceTier,
     saveRelayProfiles,
     runTest,
     refreshModels,

@@ -1,5 +1,7 @@
+import type { CSSProperties } from 'react';
 import type { Meta, StoryObj } from '@storybook/react-vite';
 import type { ArtifactRecord } from '@maka/core/artifacts';
+import type { BrowserState } from '@maka/core/browser';
 import type { GitReviewSnapshot } from '@maka/core/git-review';
 import type { SessionSummary } from '@maka/core/session';
 import type { Task } from '@maka/core/task-ledger';
@@ -37,7 +39,31 @@ import { withScopedMakaBridge } from './maka-bridge';
 // 1280, above it.
 
 const SESSION_ID = 'session-workbar';
+const STACKED_WINDOW_VIEWPORT = {
+  makaStackedWindow: {
+    name: 'Maka window below the 990px stack point',
+    styles: { width: '900px', height: '900px' },
+    type: 'desktop' as const,
+  },
+};
 const NOW = Date.UTC(2026, 6, 31, 10, 30, 0);
+const EMPTY_BROWSER_STATE: BrowserState = {
+  url: '',
+  title: '',
+  canGoBack: false,
+  canGoForward: false,
+  loading: false,
+  secure: false,
+  hasPage: false,
+};
+const LOADED_BROWSER_STATE: BrowserState = {
+  ...EMPTY_BROWSER_STATE,
+  url: 'https://maka.apache.org/docs/getting-started',
+  title: 'Getting started — Apache Maka',
+  canGoBack: true,
+  secure: true,
+  hasPage: true,
+};
 const TOOL_PICKER_SOURCE_SESSION: SessionSummary = {
   id: SESSION_ID,
   name: '工作栏组件审查',
@@ -515,7 +541,9 @@ function bridge(options: {
   /** The context snapshot the composition block reads (#2323). */
   context?: ContextDiagnosticsResult;
   recordFilePath?: string;
+  browserState?: BrowserState;
 } = {}) {
+  const browserState = options.browserState ?? EMPTY_BROWSER_STATE;
   return withScopedMakaBridge({
     tasks: {
       list: async () => {
@@ -558,22 +586,47 @@ function bridge(options: {
         snapshot: gitReviewSnapshot,
       }),
     },
+    browser: {
+      getState: async () => browserState,
+      onState: unsubscribe,
+      setViewport: noop,
+      navigate: async () => undefined,
+      back: async () => undefined,
+      forward: async () => undefined,
+      reload: async () => undefined,
+      stop: async () => undefined,
+      close: async () => undefined,
+    },
     sessions: { subscribeEvents: unsubscribe },
   });
 }
 
-/** The column AppShell hands the workbar, at the width it restores by default. */
+/**
+ * The AppShell grid the workbar really lives in, with an empty conversation
+ * column. Its 990px media query is what stacks the column in narrow windows.
+ */
 function Workbar(props: {
-  tab?: 'review' | 'tasks' | 'files' | 'inspector';
+  tab?: 'review' | 'tasks' | 'browser' | 'files' | 'inspector';
   sourceSession?: SessionSummary;
+  /** Overrides the restored column width, the way the resize handle does. */
+  width?: number;
 }) {
   const emptyTabsState = createSessionWorkbarTabsState();
   const tabsState = props.tab
     ? openStaticSessionWorkbarTab(emptyTabsState, props.tab)
     : emptyTabsState;
   return (
-    <div style={{ height: 720, display: 'flex', justifyContent: 'flex-end' }}>
-      <ToastProvider>
+    <ToastProvider>
+      <div
+        className="maka-detail-with-artifacts"
+        style={{
+          // Fill the preview viewport like AppShell fills the window; a fixed
+          // height pushes the stacked workbar below the fold in short windows.
+          height: '100dvh',
+          ...(props.width ? { '--maka-session-workbar-width': `${props.width}px` } : {}),
+        } as CSSProperties}
+      >
+        <div className="mainColumn" />
         <SessionWorkbar
           sessionId={SESSION_ID}
           hidden={false}
@@ -592,8 +645,8 @@ function Workbar(props: {
           onRequestOpenTab={noop}
           sourceSession={props.sourceSession}
         />
-      </ToastProvider>
-    </div>
+      </div>
+    </ToastProvider>
   );
 }
 
@@ -613,7 +666,7 @@ export const ToolPicker: Story = {
   render: () => <Workbar sourceSession={TOOL_PICKER_SOURCE_SESSION} />,
 };
 
-// Real path: 会话工作栏 → 变更, showing the live branch comparison from the
+// Real path: 任务工作栏 → 变更, showing the live branch comparison from the
 // session cwd. The panel is Git-backed; no message or tool-result fixture is
 // involved in this story.
 export const Changes: Story = {
@@ -621,7 +674,7 @@ export const Changes: Story = {
   render: () => <Workbar tab="review" />,
 };
 
-// Real path: sidebar → a session → 展开会话工作栏, landing on the tab the app
+// Real path: sidebar → a session → 展开任务工作栏, landing on the tab the app
 // restored. Tasks is the default: an in-progress root, a child claimed and
 // blocked by a subagent, and the finished ones folded into 最近结束.
 export const Tasks: Story = {
@@ -629,19 +682,70 @@ export const Tasks: Story = {
   render: () => <Workbar tab="tasks" />,
 };
 
-// Real path: 会话工作栏 → 任务 on a session whose agent never wrote a task.
+// Real path: 任务工作栏 → 任务 on a session whose agent never wrote a task.
 export const TasksEmpty: Story = {
   decorators: [bridge({ tasks: [] })],
   render: () => <Workbar tab="tasks" />,
 };
 
-// Real path: 会话工作栏 → 任务 when `tasks.list` rejects; 重试 re-runs the read.
+// Real path: 任务工作栏 → 任务 when `tasks.list` rejects; 重试 re-runs the read.
 export const TasksLoadFailed: Story = {
   decorators: [bridge({ tasksFail: true })],
   render: () => <Workbar tab="tasks" />,
 };
 
-// Real path: 会话工作栏 → 文件, on a session whose agent wrote artifacts. The
+// Storybook cannot host the native WebContentsView, so these pin what the panel
+// itself draws — chrome and empty state — inside the real workbar shell.
+export const BrowserEmpty: Story = {
+  decorators: [bridge()],
+  render: () => <Workbar tab="browser" />,
+};
+
+// The first navigation: hasPage is derived from the URL, still empty until the
+// page commits, so the empty state and a live 停止 control share a frame.
+export const BrowserLoading: Story = {
+  decorators: [bridge({ browserState: { ...EMPTY_BROWSER_STATE, loading: true } })],
+  render: () => <Workbar tab="browser" />,
+};
+
+// A committed page. The strip below the toolbar is blank here because the native
+// view owns that rect in the app.
+export const BrowserLoaded: Story = {
+  decorators: [bridge({ browserState: LOADED_BROWSER_STATE })],
+  render: () => <Workbar tab="browser" />,
+};
+
+// An http page, where `secure` turns into Astryx's warning status on the field.
+export const BrowserInsecure: Story = {
+  decorators: [bridge({
+    browserState: { ...LOADED_BROWSER_STATE, url: 'http://192.168.1.10:8080/dashboard', title: 'Local dashboard', secure: false },
+  })],
+  render: () => <Workbar tab="browser" />,
+};
+
+// The column's 320px floor — the least room the toolbar row ever gets.
+export const BrowserAtColumnFloor: Story = {
+  decorators: [bridge({ browserState: LOADED_BROWSER_STATE })],
+  render: () => <Workbar tab="browser" width={320} />,
+};
+
+// The width the resize handle lands on most often, between the floor and default.
+export const BrowserAt400: Story = {
+  decorators: [bridge({ browserState: LOADED_BROWSER_STATE })],
+  render: () => <Workbar tab="browser" width={400} />,
+};
+
+// Below 990px the grid stacks the same right-placement column under the
+// conversation: full width, capped at 42dvh. Storybook-UI only: the smoke lane
+// loads iframes at 1280px, above the stack point, so it renders wide there.
+export const BrowserStacked: Story = {
+  parameters: { viewport: { options: STACKED_WINDOW_VIEWPORT } },
+  globals: { viewport: { value: 'makaStackedWindow', isRotated: false } },
+  decorators: [bridge({ browserState: LOADED_BROWSER_STATE })],
+  render: () => <Workbar tab="browser" />,
+};
+
+// Real path: 任务工作栏 → 文件, on a session whose agent wrote artifacts. The
 // count in the tab is the pane's own filtered total, reported upward.
 // The pane's empty state renders the same EmptyState as TraceEmpty below, so it
 // is not a second story.
@@ -650,7 +754,7 @@ export const Files: Story = {
   render: () => <Workbar tab="files" />,
 };
 
-// Real path: 会话工作栏 → 追踪, on a session that has run turns — the overview
+// Real path: 任务工作栏 → 追踪, on a session that has run turns — the overview
 // reads a context budget, token/cache figures and the session's facts off a
 // retried model call and a post-compaction call, while a turn that failed on a
 // denied tool sits in the raw record under the coverage notice the projection
@@ -660,7 +764,7 @@ export const Trace: Story = {
   render: () => <Workbar tab="inspector" />,
 };
 
-// Real path: 会话工作栏 → 追踪 on a long session whose latest call sits near the
+// Real path: 任务工作栏 → 追踪 on a long session whose latest call sits near the
 // top of its window — the tier the context bands and their legend switch to
 // before a compaction, and the state a reader is most likely to open the tab
 // for. Same session as Trace, sized differently, so the two read side by side.
@@ -669,7 +773,7 @@ export const TraceContextNearLimit: Story = {
   render: () => <Workbar tab="inspector" />,
 };
 
-// Real path: 会话工作栏 → 追踪 on a session recorded before tool schemas carried
+// Real path: 任务工作栏 → 追踪 on a session recorded before tool schemas carried
 // a name — the shape of every ledger written prior to #2323. The composition
 // block still has to show those bytes, as unnamed tools rather than as a
 // missing category, which is what gating the tool list on the NAMED rows alone
@@ -679,7 +783,7 @@ export const TraceUnnamedTools: Story = {
   render: () => <Workbar tab="inspector" />,
 };
 
-// Real path: 会话工作栏 → 追踪 when the durable metering record names the latest
+// Real path: 任务工作栏 → 追踪 when the durable metering record names the latest
 // request but its best-effort capture never landed — the composition block has
 // to SAY so, since an absent section reads as "nothing to explain" and a zero
 // reads as an empty prompt.
@@ -688,21 +792,21 @@ export const TraceCompositionUnrecorded: Story = {
   render: () => <Workbar tab="inspector" />,
 };
 
-// Real path: 会话工作栏 → 追踪 on a session that has not run a turn yet — the
+// Real path: 任务工作栏 → 追踪 on a session that has not run a turn yet — the
 // state the task-ledger e2e fixture opens on.
 export const TraceEmpty: Story = {
   decorators: [bridge()],
   render: () => <Workbar tab="inspector" />,
 };
 
-// Real path: 会话工作栏 → 追踪 when `inspector.trace` reports a failed read (an
+// Real path: 任务工作栏 → 追踪 when `inspector.trace` reports a failed read (an
 // unreadable or partially written run ledger); retry lives on the banner.
 export const TraceReadFailed: Story = {
   decorators: [bridge({ traceFail: true })],
   render: () => <Workbar tab="inspector" />,
 };
 
-// Real path: 会话工作栏 → 追踪 on a workspace whose path overflows the panel
+// Real path: 任务工作栏 → 追踪 on a workspace whose path overflows the panel
 // — the record-file row keeps its label and copy button, and the path alone
 // truncates. (The default stories above already show the row with a short
 // path; this variant pins the truncation contract.)

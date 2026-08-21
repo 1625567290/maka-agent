@@ -4,8 +4,9 @@ import type { UiLocale } from './ui-locale.js';
 
 /** Scenarios that are consumed by a current E2E, audit, or smoke entry point. */
 export type E2eFixtureScenario =
-  | 'fetched-empty'
+  | 'settings-models'
   | 'turn-narrative'
+  | 'turn-narrative-browser'
   | 'chat-prompt-rail'
   | 'settings-data'
   | 'settings-bots-onboarding'

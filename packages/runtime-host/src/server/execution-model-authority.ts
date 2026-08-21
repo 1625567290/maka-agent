@@ -367,6 +367,7 @@ type AuxiliaryModelRequest =
       readonly maxOutputTokens: number;
       readonly maxRetries?: number;
       readonly system?: string;
+      readonly providerOptions?: Record<string, unknown>;
       readonly tools?: never;
     })
   | {
@@ -484,6 +485,11 @@ async function runHostAuxiliaryModelCall(
       | Awaited<ReturnType<typeof generateProviderPrefixModelCall>>;
     try {
       result = await readDuringBackendCreation(() => {
+        const providerOptions = buildProviderOptions(
+          target.connection,
+          target.model,
+          input.header.thinkingLevel,
+        );
         const model = getAIModel({
           connection: target.connection,
           apiKey,
@@ -499,16 +505,13 @@ async function runHostAuxiliaryModelCall(
                 ? 'omit'
                 : 'none',
               abortSignal: input.abortSignal,
+              providerOptions: request.providerOptions ?? providerOptions,
             })
           : generateToolFreeModelCall({
               model,
               ...request,
               abortSignal: input.abortSignal,
-              providerOptions: buildProviderOptions(
-                target.connection,
-                target.model,
-                input.header.thinkingLevel,
-              ),
+              providerOptions: request.providerOptions ?? providerOptions,
             });
       }, input.abortSignal);
       const oauthFailure = readDeferredOAuthFailure?.();
@@ -780,7 +783,7 @@ export async function resolveExecutionTarget(
     );
   }
   const provider = PROVIDER_DEFAULTS[resolved.connection.providerType];
-  if (!provider || provider.runtimeAdapter.kind === 'unavailable') {
+  if (!provider) {
     throw new AuxiliaryModelCallConfigurationError('Runtime Host model provider is not executable');
   }
   const model = header.model.trim();

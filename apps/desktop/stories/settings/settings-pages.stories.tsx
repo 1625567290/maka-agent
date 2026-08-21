@@ -18,9 +18,11 @@ import type {
   PermissionSnapshot,
 } from '@maka/core/capabilities';
 import type { HealthSignal, HealthSnapshot } from '@maka/core/health';
+import type { DesktopExternalSessionCatalogItem } from '../../src/preload/external-session-catalog';
 import type { SessionSummary } from '@maka/core/session';
 import { revisionFamilySessionIds } from '@maka/core/session-revisions';
 import type { LlmConnection, ProviderType } from '@maka/core/llm-connections';
+import { buildChatModelChoices } from '@maka/core/chat-model-choice';
 import type { LocalMemoryBackupInfo, LocalMemoryEntryPreview, LocalMemoryState } from '@maka/core/local-memory';
 import { buildHealthSnapshot } from '@maka/core/health';
 import { createDefaultSettings, mergeSettings } from '@maka/core/settings';
@@ -30,7 +32,21 @@ import { createUiLocaleUpdateGate } from '../../src/renderer/settings/ui-locale-
 import type { ConnectionsBridge } from '../../src/renderer/settings/providers-panel';
 import type { ProjectRecord } from '@maka/core/project';
 import type { ArchivedTasksBridge } from '../../src/renderer/settings/tasks-settings-page';
+import type {
+  DesktopRuntimeHostProfileSnapshot,
+  DesktopSessionSummary,
+} from '../../src/preload/bridge-contract.js';
 import { withScopedMakaBridge } from '../maka-bridge';
+import { getDailyReviewSettingsCopy } from '../../src/renderer/locales/settings-daily-review-copy';
+
+/**
+ * Read from the copy table, not typed out again. This selector matched a
+ * literal '跟随对话默认' that the 任务 rename retired, so it silently found
+ * nothing — and `scripts/storybook-visual-smoke.mjs` disables every `play`
+ * function, so CI could not tell us. A story that drives the UI by its visible
+ * text has to source that text where the UI does.
+ */
+const DAILY_REVIEW_DEFAULT_MODEL_LABEL = getDailyReviewSettingsCopy('zh').defaultModel;
 const STORY_PLATFORM = 'darwin' as const;
 
 // Fidelity convention (#1433): every story below names the real app path
@@ -77,11 +93,12 @@ const connections: LlmConnection[] = [
 ];
 
 const connectionsBridge: ConnectionsBridge = {
-  async list() {
-    return connections;
-  },
-  async getDefault() {
-    return 'zai-live';
+  async getSnapshot() {
+    return {
+      connections,
+      defaultConnection: 'zai-live',
+      chatModelChoices: buildChatModelChoices(connections),
+    };
   },
   async setDefault() {
     /* noop */
@@ -561,12 +578,46 @@ const healthSignals: HealthSignal[] = [
 
 const healthSnapshot: HealthSnapshot = buildHealthSnapshot(NOW - 45_000, healthSignals);
 
-const makaBridge = {
-  settings: {
-    get: async () => createDefaultSettings(),
-    update: async (patch: Parameters<typeof window.maka.settings.update>[0]): Promise<UpdateAppSettingsResult> => {
-      return { settings: mergeSettings(createDefaultSettings(), patch) };
+const runtimeHostProfiles: DesktopRuntimeHostProfileSnapshot = {
+  defaultProfileId: 'local',
+  entries: [
+    {
+      profile: { id: 'local', name: 'Local', kind: 'local' },
+      enabled: true,
+      isDefault: true,
+      readiness: 'ready',
+      hostId: 'storybook-local-host',
     },
+  ],
+};
+
+let storyClientSettings = createDefaultSettings();
+let storyRuntimeHostSettings = createDefaultSettings();
+
+const makaBridge = {
+  runtimeHostProfiles: {
+    getSnapshot: async () => runtimeHostProfiles,
+    addAndEnable: async () => ({ kind: 'connected' as const, snapshot: runtimeHostProfiles }),
+    remove: async () => runtimeHostProfiles,
+    setEnabled: async () => runtimeHostProfiles,
+    setDefault: async () => runtimeHostProfiles,
+    subscribeChanges: () => () => undefined,
+  },
+  settings: {
+    getClient: async () => storyClientSettings,
+    get: async () => storyRuntimeHostSettings,
+    updateClient: async (
+      patch: Parameters<typeof window.maka.settings.updateClient>[0],
+    ): Promise<UpdateAppSettingsResult> => {
+      storyClientSettings = mergeSettings(storyClientSettings, patch);
+      return { settings: storyClientSettings };
+    },
+    update: async (patch: Parameters<typeof window.maka.settings.update>[0]): Promise<UpdateAppSettingsResult> => {
+      storyRuntimeHostSettings = mergeSettings(storyRuntimeHostSettings, patch);
+      return { settings: storyRuntimeHostSettings };
+    },
+    subscribeClientChanged: () => () => undefined,
+    subscribeExternalChanged: () => () => undefined,
     usageStats: async (): Promise<UsageStats> => usageStats,
     bots: {
       listStatuses: async () => ({}),
@@ -650,6 +701,28 @@ const makaBridge = {
   e2eFixture: {
     getState: async () => null,
   },
+  // 导入任务 reads another agent's session directory through Desktop Main. The
+  // fixture answers with one source and a short first page so the story shows
+  // the source switch, the archived filter, and 加载更多 together. It honours
+  // `includeArchived` and `cursor` rather than returning one fixed page:
+  // otherwise the archived row shows while its filter is off and 加载更多 hands
+  // back the first page forever, which is a control the story cannot be used to
+  // judge.
+  externalSessions: {
+    listSources: async () => ({ adapterIds: ['codex'] }),
+    list: async (input: { includeArchived?: boolean; cursor?: string }) => {
+      const visible = externalConversations.filter(
+        (conversation) => input.includeArchived || !conversation.archived,
+      );
+      const start = input.cursor === EXTERNAL_SECOND_PAGE ? EXTERNAL_PAGE_SIZE : 0;
+      const end = start + EXTERNAL_PAGE_SIZE;
+      return {
+        sessions: visible.slice(start, end),
+        nextCursor: end < visible.length ? EXTERNAL_SECOND_PAGE : null,
+      };
+    },
+    import: async () => ({ ok: false as const, reason: 'commit_outcome_unknown' as const }),
+  },
   // Appearance mounts CustomPetSettingsSection, which reads and subscribes on
   // window.maka.pets. Without this fixture the catalog story throws on mount
   // (subscribeChanges of undefined) and the render smoke fails the page.
@@ -684,7 +757,7 @@ function archivedTask(
     isArchived: true,
     labels: [],
     hasUnread: false,
-    status: 'done',
+    status: 'active',
     backend: 'ai-sdk',
     llmConnectionSlug: 'zai-live',
     connectionLocked: true,
@@ -731,6 +804,52 @@ const archivedTaskSessions: SessionSummary[] = [
   archivedTask('task-active', 'An active task the page must not list', 0, { isArchived: false }),
 ];
 
+// 导入任务's rows come from another agent's directory, not from Maka's store:
+// a source-native id, the cwd it ran in, and whether that agent archived it.
+/**
+ * Two rows a page, so the default view — three unarchived conversations — is
+ * one short page plus 加载更多, and turning the archived filter on changes both
+ * the first page and how many pages there are.
+ */
+const EXTERNAL_PAGE_SIZE = 2;
+const EXTERNAL_SECOND_PAGE = 'page-2';
+
+const externalConversations: DesktopExternalSessionCatalogItem[] = [
+  {
+    id: 'codex-01930f',
+    name: 'Trace the flaky worktree teardown in CI',
+    cwd: '/Users/storybook-fixture-user/workspace/maka-agent',
+    updatedAt: Date.now() - 42 * 60 * 1000,
+    importState: {
+      importedCount: 2,
+      importedSessionIds: ['imported-task-newest', 'imported-task-older'],
+      isImporting: false,
+    },
+  },
+  {
+    id: 'codex-01930e',
+    name: '把 provider catalog 的分页改成游标',
+    cwd: '/Users/storybook-fixture-user/workspace/maka-agent',
+    updatedAt: Date.now() - 3 * 60 * 60 * 1000,
+    importState: { importedCount: 1, importedSessionIds: ['imported-task-1'], isImporting: true },
+  },
+  {
+    id: 'codex-01930a',
+    name: 'Reproduce the SQLite lock contention under parallel evals',
+    cwd: '/Users/storybook-fixture-user/workspace/maka-agent',
+    updatedAt: Date.now() - 2 * 24 * 60 * 60 * 1000,
+    importState: { importedCount: 0, importedSessionIds: [], isImporting: false },
+  },
+  {
+    id: 'codex-01929c',
+    name: 'Draft the release notes for 0.9.0',
+    cwd: '/Users/storybook-fixture-user/workspace/docs',
+    updatedAt: Date.now() - 6 * 24 * 60 * 60 * 1000,
+    archived: true,
+    importState: { importedCount: 1, importedSessionIds: ['imported-archived'], isImporting: false },
+  },
+];
+
 const archivedTaskProjects: ProjectRecord[] = [
   { id: 'proj-maka', name: 'maka-agent', locations: [], available: true },
   { id: 'proj-astryx', name: 'astryx-design', locations: [], available: true },
@@ -743,7 +862,15 @@ const archivedTaskProjects: ProjectRecord[] = [
  */
 function useArchivedTasksStoryBridge(seed: readonly SessionSummary[]): ArchivedTasksBridge {
   const toast = useToast();
-  const [sessions, setSessions] = useState<SessionSummary[]>([...seed]);
+  const [sessions, setSessions] = useState<DesktopSessionSummary[]>(() =>
+    seed.map((session) => ({
+      ...session,
+      runtimeHostId: 'storybook-local',
+      profileId: 'local',
+      profileName: 'Local',
+      profileKind: 'local',
+    })),
+  );
   const confirmDelete = (sessionId: string) =>
     toast.confirm({
       title: `彻底删除「${sessions.find((session) => session.id === sessionId)?.name ?? ''}」？`,
@@ -781,10 +908,34 @@ function useArchivedTasksStoryBridge(seed: readonly SessionSummary[]): ArchivedT
     },
     onPurge: async (sessionIds) => {
       drop(sessionIds);
-      return { removed: sessionIds.length, remaining: [], verified: true, firstError: undefined };
+      return {
+        removed: sessionIds.length,
+        remaining: [],
+        restored: [],
+        verified: true,
+        firstError: undefined,
+      };
     },
   };
 }
+const gitBashSettings = mergeSettings(createDefaultSettings(), {
+  shell: {
+    preference: 'git_bash',
+    executable: 'C:\\Program Files\\Git\\bin\\bash.exe',
+  },
+});
+const withGitBashSettingsBridge = withScopedMakaBridge({
+  ...makaBridge,
+  settings: {
+    ...makaBridge.settings,
+    get: async () => gitBashSettings,
+    update: async (
+      patch: Parameters<typeof window.maka.settings.update>[0],
+    ): Promise<UpdateAppSettingsResult> => ({
+      settings: mergeSettings(gitBashSettings, patch),
+    }),
+  },
+} satisfies Record<string, unknown>);
 
 // #1364: list-page variants — empty vs populated vs long-content, per the
 // tracking issue's expected deliverables.
@@ -1020,9 +1171,6 @@ function SettingsStoryFrame(props: SettingsStoryProps) {
         }}
       >
         <SettingsSurface
-          connections={props.connections ?? connections}
-          defaultSlug={props.defaultSlug === undefined ? 'zai-live' : props.defaultSlug}
-          onRefresh={async () => undefined}
           onClose={noop}
           themePref={themePref}
           onThemeChange={setThemePref}
@@ -1036,6 +1184,8 @@ function SettingsStoryFrame(props: SettingsStoryProps) {
           onOpenDailyReview={noop}
           onOpenSession={noop}
           archivedTasks={archivedTasks}
+          onTaskImported={noop}
+          onRemoteHostAdded={noop}
         />
       </div>
     </>
@@ -1067,7 +1217,7 @@ async function waitForStoryCondition(predicate: () => boolean, errorMessage: str
 async function openDailyReviewModelSelector(canvasElement: HTMLElement): Promise<HTMLButtonElement> {
   const selector = await waitForStoryButton(
     canvasElement,
-    (candidate) => candidate.textContent?.includes('跟随对话默认') === true,
+    (candidate) => candidate.textContent?.includes(DAILY_REVIEW_DEFAULT_MODEL_LABEL) === true,
   );
   await userEvent.click(selector);
   await waitForStoryCondition(
@@ -1110,6 +1260,11 @@ export const SubagentEditor: Story = {
 // Real path: 设置 → 通用.
 export const General: Story = {
   decorators: [withSettingsBridge],
+  render: () => <SettingsStory section="general" />,
+};
+// Real path: 设置 → 通用, after selecting Git Bash for the current Runtime Host.
+export const GeneralGitBash: Story = {
+  decorators: [withGitBashSettingsBridge],
   render: () => <SettingsStory section="general" />,
 };
 // Real path: 设置 → 外观.
@@ -1240,4 +1395,74 @@ export const ArchivedTasks: Story = {
   render: () => (
     <SettingsStory section="archived-tasks" archivedTaskSessions={archivedTaskSessions} />
   ),
+};
+
+// Real path: 设置 → 导入任务 on a machine that has Codex installed.
+export const ImportTasks: Story = {
+  decorators: [withSettingsBridge],
+  render: () => <SettingsStory section="import-tasks" />,
+};
+
+function importOutcomeRecoveryBridge(): Record<string, unknown> {
+  let importAttempted = false;
+  const source = externalConversations[2];
+  return {
+    ...makaBridge,
+    externalSessions: {
+      ...makaBridge.externalSessions,
+      list: async () => ({
+        sessions: [
+          importAttempted
+            ? {
+                ...source,
+                importState: {
+                  importedCount: 1,
+                  importedSessionIds: ['outcome-recovered-task'],
+                  isImporting: false,
+                },
+              }
+            : source,
+        ],
+        nextCursor: null,
+      }),
+      import: async () => {
+        importAttempted = true;
+        return { ok: false as const, reason: 'commit_outcome_unknown' as const };
+      },
+    },
+  };
+}
+
+// The import response is deliberately unknown; the next authoritative catalog
+// read proves that the task landed and turns the banner into a usable entry.
+// Real path: 设置 → 导入任务 → 导入, when Main reports an unknown commit outcome that catalog recovery confirms.
+export const ImportTasksOutcomeUnknownRecovered: Story = {
+  decorators: [withScopedMakaBridge(importOutcomeRecoveryBridge())],
+  render: () => <SettingsStory section="import-tasks" />,
+  play: async ({ canvasElement }) => {
+    const importButton = await waitForStoryButton(canvasElement, (candidate) =>
+      ['导入', 'Import'].includes(candidate.textContent?.trim() ?? ''),
+    );
+    await userEvent.click(importButton);
+    await waitForStoryCondition(
+      () =>
+        canvasElement.textContent?.includes('已确认导入') === true ||
+        canvasElement.textContent?.includes('Import confirmed') === true,
+      'Unknown-outcome recovery did not expose the imported task',
+    );
+  },
+};
+
+// Real path: the same page on a machine with no supported agent — the common
+// case, and the one where the source switch and the filter would be chrome
+// around nothing.
+export const ImportTasksNoSource: Story = {
+  decorators: [withScopedMakaBridge({
+    ...makaBridge,
+    externalSessions: {
+      ...makaBridge.externalSessions,
+      listSources: async () => ({ adapterIds: [] }),
+    },
+  })],
+  render: () => <SettingsStory section="import-tasks" />,
 };

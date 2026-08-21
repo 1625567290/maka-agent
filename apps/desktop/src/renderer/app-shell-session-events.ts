@@ -24,6 +24,9 @@ import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 type RefBox<T> = { current: T };
 type StateUpdater<T> = (updater: (current: T) => T) => void;
 
+const TERMINAL_HANDOFF_ATTEMPTS = 3;
+const TERMINAL_HANDOFF_RETRY_DELAY_MS = 120;
+
 type ToastApi = {
   error(
     title: string,
@@ -37,15 +40,19 @@ export interface AppShellSessionEventHandlers {
   handleEvent(sessionId: string, event: SessionEvent): void;
   reconcilePersistedMessages(sessionId: string, messages: readonly StoredMessage[]): void;
   settleAssistantStreaming(sessionId: string, messageId?: string): Promise<void>;
+  flushDisplayEvents(sessionId: string): void;
+  markDisplayPending(sessionId: string): void;
+  markDisplayReady(sessionId: string): void;
 }
 
 export interface AppShellSessionDisplayBatch {
   readonly pendingEvents: Map<string, SessionEvent[]>;
+  readonly displayPendingSessions: Set<string>;
   framePending: boolean;
 }
 
 export function createAppShellSessionDisplayBatch(): AppShellSessionDisplayBatch {
-  return { pendingEvents: new Map(), framePending: false };
+  return { pendingEvents: new Map(), displayPendingSessions: new Set(), framePending: false };
 }
 
 export function createAppShellSessionEventHandlers(options: {
@@ -140,6 +147,24 @@ export function createAppShellSessionEventHandlers(options: {
     });
   }
 
+  function flushDisplayEvents(sessionId: string): void {
+    const events = takePendingDisplayEvents(sessionId);
+    if (events.length === 0) return;
+    updateLiveTurn(sessionId, events);
+  }
+
+  function markDisplayPending(sessionId: string): void {
+    displayBatch.displayPendingSessions.add(sessionId);
+  }
+
+  function markDisplayReady(sessionId: string): void {
+    displayBatch.displayPendingSessions.delete(sessionId);
+  }
+
+  function canBatchDisplayEvents(sessionId: string): boolean {
+    return !displayBatch.displayPendingSessions.has(sessionId);
+  }
+
   function updateLiveTurn(sessionId: string, events: readonly SessionEvent[]): void {
     setLiveTurnBySession((current) => replaceLiveTurns(current, new Map([[sessionId, events]])));
   }
@@ -158,13 +183,37 @@ export function createAppShellSessionEventHandlers(options: {
   }
 
   async function settleAssistantStreaming(sessionId: string, messageId?: string): Promise<void> {
+    return handoffAssistantStreaming(sessionId, messageId, true);
+  }
+
+  async function handoffAssistantStreaming(
+    sessionId: string,
+    messageId: string | undefined,
+    requireCompletedLiveText: boolean,
+  ): Promise<void> {
     const projection = liveTurnBySessionRef.current[sessionId];
     if (!projection || !messageId) return;
     const step = projection.steps.find((candidate) => candidate.stepId === messageId);
-    if (!step?.text?.complete) return;
-    const refreshed = await refreshMessages(sessionId, { requiredAssistantMessageId: messageId }).catch(() => false);
-    if (!refreshed) return;
-    settleLiveStep(sessionId, messageId);
+    if (!step?.text || (requireCompletedLiveText && !step.text.complete)) return;
+    const attempts = requireCompletedLiveText ? 1 : TERMINAL_HANDOFF_ATTEMPTS;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const refreshed = await refreshMessages(sessionId, {
+        requiredAssistantMessageId: messageId,
+      }).catch(() => false);
+      if (refreshed) {
+        settleLiveStep(sessionId, messageId);
+        return;
+      }
+      if (
+        attempt + 1 >= attempts ||
+        !liveTurnBySessionRef.current[sessionId]?.steps.some(
+          (candidate) => candidate.stepId === messageId,
+        )
+      ) return;
+      await new Promise<void>((resolve) => {
+        globalThis.setTimeout(resolve, TERMINAL_HANDOFF_RETRY_DELAY_MS);
+      });
+    }
   }
 
   function reconcilePersistedMessages(sessionId: string, messages: readonly StoredMessage[]): void {
@@ -190,6 +239,7 @@ export function createAppShellSessionEventHandlers(options: {
     if (
       scheduleFrame
       && activeIdRef.current === sessionId
+      && canBatchDisplayEvents(sessionId)
       && (event.type === 'text_delta' || event.type === 'thinking_delta')
     ) {
       scheduleDisplayEvent(sessionId, event);
@@ -267,7 +317,16 @@ export function createAppShellSessionEventHandlers(options: {
           notifyRunEnded?.({ kind: 'completed', sessionId, body });
         }
         void refreshSessions();
-        void refreshMessages(sessionId, terminalRefreshOptions(before));
+        const terminalMessageId = terminalRefreshOptions(before)?.requiredAssistantMessageId;
+        if (terminalMessageId) {
+          // Terminal durability, rather than Astryx's animation callback, is
+          // the authority for handing streamed text to the transcript. The
+          // callback remains the fast path, but a remount or interrupted-turn
+          // race can no longer strand the final reply in live-only state.
+          void handoffAssistantStreaming(sessionId, terminalMessageId, false);
+        } else {
+          void refreshMessages(sessionId);
+        }
         break;
       }
       default:
@@ -275,7 +334,14 @@ export function createAppShellSessionEventHandlers(options: {
     }
   }
 
-  return { handleEvent, reconcilePersistedMessages, settleAssistantStreaming };
+  return {
+    handleEvent,
+    reconcilePersistedMessages,
+    settleAssistantStreaming,
+    flushDisplayEvents,
+    markDisplayPending,
+    markDisplayReady,
+  };
 }
 
 function sessionEventDiagnosticDetails(

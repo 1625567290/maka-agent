@@ -28,12 +28,14 @@ const FIXTURES = [
   ['module-daily-review', '.maka-module-main'],
   ['scheduled-tasks', '.maka-module-main'],
   ['settings-general', '.settingsSurface'],
-  ['fetched-empty', '.settingsSurface'],
+  ['settings-models', '.settingsSurface'],
   ['settings-data', '.settingsSurface'],
   // 使用统计 restyle: the range/refresh row, underline tab bar, and stats
   // tables now sit under the alignment auditor's watch.
   ['settings-usage', '.settingsSurface'],
   ['turn-narrative', '.maka-session-workbar'],
+  // #2188: the browser toolbar's four-control-plus-input row.
+  ['turn-narrative-browser', '.maka-browser-panel'],
   ['settings-permissions', '.settingsSurface'],
   // #1233 deferral: bot QR-onboarding modal in its deterministic waiting state.
   ['settings-bots-onboarding', '.settingsSurface'],

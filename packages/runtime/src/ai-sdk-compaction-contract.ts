@@ -1,8 +1,8 @@
 import type { RuntimeExecutionConnection } from '@maka/core/llm-connections';
+import type { HistoryCompactRoute } from '@maka/core/model-call-attempt';
 import type { RuntimeEvent } from '@maka/core/runtime-event';
 
 import type { ProviderRequestTracker } from './provider-request-telemetry.js';
-import type { ActiveFullCompactBlock } from './active-full-compact.js';
 import type { ActiveToolResultArchiveCandidate } from './active-tool-result-prune.js';
 import type {
   ArchiveRetrievalMode,
@@ -12,7 +12,10 @@ import type {
   SynthesisCacheBlock,
   SynthesisSourceRef,
 } from './context-budget.js';
-import type { HistoryCompactCheckpoint } from './history-compact-checkpoint.js';
+import type {
+  HistoryCompactCheckpoint,
+  HistoryCompactProviderState,
+} from './history-compact-checkpoint.js';
 import type { ModelFactory } from './model-adapter.js';
 import type { SemanticCompactBlock } from './semantic-compact.js';
 import type { ToolResultArchiveCapability } from './tool-result-archive-capability.js';
@@ -106,6 +109,14 @@ export interface HistoryCompactSummaryInput {
   source: { foldedRuntimeEvents: RuntimeEvent[] };
   previousCheckpoint?: HistoryCompactCheckpoint;
   newlyFoldedRuntimeEvents?: RuntimeEvent[];
+  /**
+   * Estimated provider-input ceiling for this compaction call. A compactor
+   * should fail before dispatch when its projection cannot fit this budget.
+   */
+  inputBudget?: {
+    maxEstimatedTokens: number;
+    charsPerToken: number;
+  };
   requestShapeHashBefore?: string;
   abortSignal?: AbortSignal;
   /**
@@ -118,9 +129,24 @@ export interface HistoryCompactSummaryInput {
    */
   providerRequestTracker?: ProviderRequestTracker;
 }
+/**
+ * Produces the checkpoint summary that REPLACES the folded history. A string
+ * result must satisfy the mandated checkpoint format — the sections, fence,
+ * truncation, and size-floor rules owned by
+ * `history-compact-summary-validation.ts` (its `SUMMARY_FORMAT_TEMPLATE` is
+ * the shape to emit) — because every checkpoint write gate rejects a
+ * defective summary and fails the compaction open (#3029). A free-form
+ * plain-text summary is no longer persistable. Provider-native state objects
+ * bypass text validation; `undefined`/empty falls to the `empty_summary`
+ * gate.
+ */
 export type HistoryCompactSummarizer = (
   input: HistoryCompactSummaryInput,
-) => Promise<string | undefined> | string | undefined;
+) =>
+  | Promise<string | HistoryCompactProviderState | undefined>
+  | string
+  | HistoryCompactProviderState
+  | undefined;
 export type HistoryCompactCheckpointLoader = () =>
   | Promise<HistoryCompactCheckpoint | undefined>
   | HistoryCompactCheckpoint
@@ -128,9 +154,6 @@ export type HistoryCompactCheckpointLoader = () =>
 export type HistoryCompactCheckpointRecorder = (
   checkpoint: HistoryCompactCheckpoint,
   turnId: string,
-) => void | Promise<void>;
-export type ActiveFullCompactBlockRecorder = (
-  block: ActiveFullCompactBlock,
 ) => void | Promise<void>;
 export type SemanticCompactBlockRecorder = (block: SemanticCompactBlock) => void | Promise<void>;
 
@@ -158,11 +181,13 @@ export interface AiSdkCompactionCapabilities {
   loadHistoryCompact?: HistoryCompactLoader;
   /** Optional best-effort source-bearing history compact block writer. */
   writeHistoryCompact?: HistoryCompactWriter;
-  /** Preferred bounded V2 checkpoint loader. Legacy artifact blocks remain a read-only fallback. */
+  /** Preferred bounded checkpoint loader. Legacy artifact blocks remain a read-only fallback. */
   loadHistoryCompactCheckpoint?: HistoryCompactCheckpointLoader;
-  /** Produces a checkpoint summary from the prior summary plus newly evicted RuntimeEvents. */
+  /** Produces a checkpoint value from prior state plus newly evicted RuntimeEvents. */
   summarizeHistoryCompact?: HistoryCompactSummarizer;
-  /** Best-effort durable recorder for accepted V2 checkpoints. */
+  /** Actual route used by the configured history compactor, for durable diagnostics. */
+  historyCompactRoute?: HistoryCompactRoute;
+  /** Best-effort durable recorder for accepted checkpoints. */
   recordHistoryCompactCheckpoint?: HistoryCompactCheckpointRecorder;
   /**
    * Durable read of the given turn's persisted RuntimeEvents from the
@@ -174,8 +199,6 @@ export interface AiSdkCompactionCapabilities {
   loadTurnRuntimeEvents?: (turnId: string) => Promise<RuntimeEvent[]>;
   /** Explicit capability for folding current-run events into session-scoped history. */
   allowMidTurnHistoryCompaction?: boolean;
-  /** Optional best-effort durable recorder for accepted active full compact blocks. */
-  recordActiveFullCompactBlock?: ActiveFullCompactBlockRecorder;
   /** Optional best-effort durable recorder for accepted semantic compact blocks. */
   recordSemanticCompactBlock?: SemanticCompactBlockRecorder;
 }

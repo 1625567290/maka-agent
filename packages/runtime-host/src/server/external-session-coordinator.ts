@@ -4,11 +4,13 @@ import type {
   ExternalSessionSummary,
 } from '@maka/core/external-session';
 import type { CreateSessionInput } from '@maka/core/runtime-inputs';
-import type { SessionHeader, StoredMessage } from '@maka/core/session';
+import type { SessionExternalOrigin, SessionHeader, StoredMessage } from '@maka/core/session';
+import type { ExternalSessionImportLookupResult } from '@maka/storage';
 import type { SessionCatalogRecord } from '@maka/storage/execution-stores';
 import { ExternalSessionImporter } from '@maka/storage/external-sessions';
 import {
   EXTERNAL_SESSION_CWD_MAX_BYTES,
+  EXTERNAL_SESSION_IMPORTED_SESSION_IDS_MAX_ITEMS,
   EXTERNAL_SESSION_NAME_MAX_BYTES,
   EXTERNAL_SESSION_PAGE_MAX_ITEMS,
   EXTERNAL_SESSION_RESULT_MAX_BYTES,
@@ -32,7 +34,13 @@ type ExternalSessionStore = {
   createImportedSession(
     input: CreateSessionInput,
     messages: readonly StoredMessage[],
+    externalOrigin: SessionExternalOrigin,
   ): Promise<SessionHeader>;
+  lookupExternalSessionImports(
+    adapterId: string,
+    sourceSessionIds: readonly string[],
+    recentSessionIdLimit: number,
+  ): Promise<readonly ExternalSessionImportLookupResult[]>;
   listHeaders(): Promise<SessionHeader[]>;
   readCatalogRecord(sessionId: string): Promise<SessionCatalogRecord>;
 };
@@ -64,6 +72,29 @@ export class HostExternalSessionCoordinator {
   readonly #prepareImportedSessionHistory: HostExternalSessionCoordinatorOptions['prepareImportedSessionHistory'];
   readonly #discardImportedSession: HostExternalSessionCoordinatorOptions['discardImportedSession'];
   readonly #requestDrain: () => void;
+
+  /**
+   * One import per source at a time, keyed by adapter + source session.
+   *
+   * A repeat import is a legitimate request — it makes an independent copy, and
+   * a test below pins that. A repeat while the first is still running is not:
+   * it is one intent counted twice, and it lands two tasks the user has to tell
+   * apart and clean up.
+   *
+   * The guard has to be here rather than on the surface that asked. Import is a
+   * Host operation and the Host is what knows one is running; a client only
+   * knows about its own. The Settings page that replaced the import dialog can
+   * be unmounted mid-import by design, and its in-flight state goes with it —
+   * as would a second window's, or the CLI's.
+   *
+   * Coalesced, not rejected: the second caller gets the first one's outcome,
+   * success or failure, because it is the same operation. Entries are keyed on
+   * a JSON pair so no separator can be forged out of the ids themselves.
+   */
+  readonly #importsInFlight = new Map<
+    string,
+    Promise<OperationOutcome<'external-session.import'>>
+  >();
 
   constructor(options: HostExternalSessionCoordinatorOptions) {
     this.#adapters = options.adapters;
@@ -128,7 +159,25 @@ export class HostExternalSessionCoordinator {
       )
         .map(toWireSummary)
         .filter((summary): summary is ExternalSessionCatalogItem => summary !== undefined);
-      const page = boundedCatalogPage(sessions, offset);
+      const candidates = sessions.slice(offset, offset + EXTERNAL_SESSION_PAGE_MAX_ITEMS);
+      const imports = await this.#sessions.lookupExternalSessionImports(
+        input.adapterId,
+        candidates.map(({ id }) => id),
+        EXTERNAL_SESSION_IMPORTED_SESSION_IDS_MAX_ITEMS,
+      );
+      const importsBySource = new Map(imports.map((state) => [state.sourceSessionId, state]));
+      const enrichedCandidates = candidates.map((session) => {
+        const state = importsBySource.get(session.id);
+        return {
+          ...session,
+          importState: {
+            importedCount: state?.livePublishedImportCount ?? 0,
+            importedSessionIds: state?.recentSessionIds ?? [],
+            isImporting: this.#importsInFlight.has(importKey(input.adapterId, session.id)),
+          },
+        };
+      });
+      const page = boundedCatalogPage(enrichedCandidates, offset, sessions.length);
       const nextOffset = offset + page.length;
       return {
         ok: true,
@@ -146,6 +195,21 @@ export class HostExternalSessionCoordinator {
   }
 
   async importSession(
+    input: ExternalSessionImportInput,
+  ): Promise<OperationOutcome<'external-session.import'>> {
+    const key = importKey(input.adapterId, input.sourceSessionId);
+    const running = this.#importsInFlight.get(key);
+    if (running) return running;
+    const attempt = this.#importSession(input);
+    this.#importsInFlight.set(key, attempt);
+    try {
+      return await attempt;
+    } finally {
+      this.#importsInFlight.delete(key);
+    }
+  }
+
+  async #importSession(
     input: ExternalSessionImportInput,
   ): Promise<OperationOutcome<'external-session.import'>> {
     const adapter = this.#adapters.get(input.adapterId);
@@ -166,9 +230,9 @@ export class HostExternalSessionCoordinator {
 
     let commitAttempted = false;
     const importer = new ExternalSessionImporter(this.#adapters, {
-      createImportedSession: async (sessionInput, messages) => {
+      createImportedSession: async (sessionInput, messages, externalOrigin) => {
         commitAttempted = true;
-        return this.#sessions.createImportedSession(sessionInput, messages);
+        return this.#sessions.createImportedSession(sessionInput, messages, externalOrigin);
       },
     });
     let header: SessionHeader;
@@ -257,6 +321,7 @@ function toWireSummary(summary: ExternalSessionSummary): ExternalSessionCatalogI
     id: summary.id,
     name,
     hostCwd: truncateUtf8(summary.cwd, EXTERNAL_SESSION_CWD_MAX_BYTES),
+    importState: { importedCount: 0, importedSessionIds: [], isImporting: false },
     ...(createdAt === undefined ? {} : { createdAt }),
     ...(updatedAt === undefined ? {} : { updatedAt }),
     ...(typeof summary.archived === 'boolean' ? { archived: summary.archived } : {}),
@@ -264,19 +329,17 @@ function toWireSummary(summary: ExternalSessionSummary): ExternalSessionCatalogI
 }
 
 function boundedCatalogPage(
-  sessions: readonly ExternalSessionCatalogItem[],
+  candidates: readonly ExternalSessionCatalogItem[],
   offset: number,
+  totalCount: number,
 ): ExternalSessionCatalogItem[] {
   const page: ExternalSessionCatalogItem[] = [];
-  const end = Math.min(sessions.length, offset + EXTERNAL_SESSION_PAGE_MAX_ITEMS);
-  for (let index = offset; index < end; index += 1) {
-    const candidate = sessions[index];
-    if (!candidate) break;
+  for (const candidate of candidates) {
     const nextPage = [...page, candidate];
     const nextOffset = offset + nextPage.length;
     const result = {
       sessions: nextPage,
-      nextCursor: nextOffset < sessions.length ? String(nextOffset) : null,
+      nextCursor: nextOffset < totalCount ? String(nextOffset) : null,
     };
     if (Buffer.byteLength(JSON.stringify(result), 'utf8') > EXTERNAL_SESSION_RESULT_MAX_BYTES) {
       break;
@@ -323,6 +386,10 @@ function safeTimestamp(value: number | undefined): number | undefined {
 
 function isSourceSessionNotFound(error: unknown): boolean {
   return error instanceof Error && /Session not found|Session does not exist/i.test(error.message);
+}
+
+function importKey(adapterId: string, sourceSessionId: string): string {
+  return JSON.stringify([adapterId, sourceSessionId]);
 }
 
 function queryFailure(

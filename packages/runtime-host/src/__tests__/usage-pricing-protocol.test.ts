@@ -1,3 +1,4 @@
+import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -23,7 +24,6 @@ import {
   PRICING_PAGE_MAX_BYTES,
   PRICING_PAGE_MAX_ITEMS,
   RUNTIME_HOST_MAX_MESSAGE_BYTES,
-  RuntimeHostProtocolError,
   USAGE_PAGE_MAX_BYTES,
   USAGE_PAGE_MAX_ITEMS,
   USAGE_PROJECTION_TEXT_MAX_BYTES,
@@ -38,7 +38,6 @@ import { RuntimePolicyActivationGate } from '../server/runtime-policy-activation
 const CONNECTION_CONTEXT: ConnectionContext = {
   hostEpoch: 'usage-pricing-protocol-test',
   connectionId: 'usage-pricing-protocol-test-connection',
-  surface: 'tui',
   principal: 'local_os_user',
   acquireResidency: () => ({ release() {} }),
 };

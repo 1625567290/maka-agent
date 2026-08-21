@@ -4,7 +4,6 @@
 
 import type { MessageContent } from './events.js';
 import type {
-  BackendKind,
   SessionBlockedReason,
   SessionStatus,
   SessionToolProfile,
@@ -19,6 +18,9 @@ import type { OrchestrationMode, TurnOrchestration } from './orchestration.js';
 import type { SessionStartMode } from './explore-agent.js';
 import type { SubagentWorkspaceBinding } from './subagent-workspace.js';
 import type { ToolMode } from './tool-mode.js';
+import type { TurnOrigin } from './turn-origin.js';
+
+export type { TurnOrigin } from './turn-origin.js';
 
 export type { TurnOrchestration } from './orchestration.js';
 
@@ -32,7 +34,14 @@ export interface CreateSessionInput {
   projectId?: string | null;
   /** If omitted, runtime auto-derives a placeholder; users may rename later. */
   name?: string;
-  backend: BackendKind;
+  /**
+   * No `backend`: a live build has exactly one, so the field carried no choice
+   * — only the chance of writing the retired `'fake'` into a new row (#3211).
+   * The store stamps every new header instead. Sessions derived from an older
+   * one (branch, revision, subagent) no longer inherit its backend; a copy of a
+   * legacy row is a real session whose connection slug resolves to nothing,
+   * which is what the readiness projection already says about it.
+   */
   llmConnectionSlug: string;
   /** Falls back to the connection's defaultModel if omitted. */
   model?: string;
@@ -103,20 +112,6 @@ export interface UserMessageInput extends MessageContent {
   origin?: TurnOrigin;
 }
 
-/** Non-user trigger source for a turn. */
-export type TurnOrigin =
-  | { kind: 'scheduled_task'; scheduledTaskId: string }
-  | { kind: 'legacy_automation'; automationId: string }
-  | { kind: 'goal'; goalId: string }
-  | {
-      kind: 'agent_graph';
-      graphId: string;
-      /** Durable, graph-snapshot-scoped idempotency key for this supervisor wake. */
-      wakeId: string;
-      /** Durable identity of one delivery attempt for the wake. */
-      attemptId: string;
-    };
-
 export interface AgentSpec {
   id: string;
   name: string;
@@ -149,9 +144,6 @@ export interface ReviseBeforeTurnInput {
 }
 
 export interface SessionListFilter {
-  isArchived?: boolean;
-  isFlagged?: boolean;
-  labelSlug?: string;
   /** Return linked subagent sessions owned by this parent session. */
   subagentParentSessionId?: string;
 }

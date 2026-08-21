@@ -36,12 +36,11 @@ function makeSession(input: {
   llmConnectionSlug?: string;
 }): SessionSummary {
   const status = input.status ?? 'active';
-  const isArchived = input.isArchived ?? status === 'archived';
   return {
     id: input.id,
     name: input.name,
     isFlagged: input.isFlagged ?? false,
-    isArchived,
+    isArchived: input.isArchived ?? false,
     labels: [],
     hasUnread: input.hasUnread ?? false,
     status,
@@ -69,14 +68,19 @@ function panelProps(input: {
   activeId?: string;
   streamingSessionIds?: Set<string>;
   staleSessionIds?: Set<string>;
+  width?: number;
   viewMode?: SessionListPanelProps['viewMode'];
   groups?: SessionListPanelProps['groups'];
   projectActions?: SessionListPanelProps['projectActions'];
   worktreeSessionIds?: SessionListPanelProps['worktreeSessionIds'];
 }): SessionListPanelProps {
   return {
-    selection: input.selection ?? { section: 'sessions', filter: 'chats' },
+    selection: input.selection ?? { section: 'sessions' },
     sessions: input.sessions,
+    // The rail's own width, not just the frame's: SideNav keeps its width in
+    // `resizable`, so a narrow frame alone only clips a 260px rail instead of
+    // showing what the narrow one looks like.
+    ...(input.width === undefined ? {} : { width: input.width }),
     ...(input.activeId ? { activeId: input.activeId } : {}),
     ...(input.streamingSessionIds ? { streamingSessionIds: input.streamingSessionIds } : {}),
     ...(input.staleSessionIds ? { staleSessionIds: input.staleSessionIds } : {}),
@@ -116,7 +120,12 @@ function StoryFrame(props: {
   focusActiveRow?: boolean;
   openActiveRowMenu?: boolean;
 }) {
-  const { children, width = 240, height = 680, focusActiveRow = false, openActiveRowMenu = false } = props;
+  // 260 is `SessionListPanel`'s own default width. The frame used to default to
+  // 240 and clip the rail by 20px in every story that did not pass a width —
+  // which lands squarely on the trailing slot, so the stories could not show
+  // whether the timestamp fits. Stories that want a narrow rail pass the width
+  // to both, as `panelProps` explains.
+  const { children, width = 260, height = 680, focusActiveRow = false, openActiveRowMenu = false } = props;
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -127,7 +136,7 @@ function StoryFrame(props: {
       activeRow?.querySelector<HTMLButtonElement>(':scope > button')?.focus({ preventScroll: true });
       if (openActiveRowMenu) {
         menuTimeout = window.setTimeout(() => {
-          activeRow?.querySelector<HTMLButtonElement>('[aria-label="对话操作"]')?.click();
+          activeRow?.querySelector<HTMLButtonElement>('[aria-label="任务操作"]')?.click();
         }, 0);
       }
     }, 0);
@@ -175,24 +184,6 @@ const statusSessions = [
     lastMessageAt: NOW - 20 * 60 * 1000,
   }),
   makeSession({
-    id: 'status-review',
-    name: '待审核的文件 diff',
-    status: 'review',
-    lastMessageAt: NOW - 37 * 60 * 1000,
-  }),
-  makeSession({
-    id: 'status-done',
-    name: '已完成的 smoke run',
-    status: 'done',
-    lastMessageAt: NOW - 2 * 60 * 60 * 1000,
-  }),
-  makeSession({
-    id: 'status-archived',
-    name: '归档的旧实验',
-    status: 'archived',
-    lastMessageAt: NOW - 8 * 24 * 60 * 60 * 1000,
-  }),
-  makeSession({
     id: 'status-aborted',
     name: '中止的临时尝试',
     status: 'aborted',
@@ -221,7 +212,43 @@ const longTitleSessions = [
   }),
 ];
 
-// Real path: a fresh workspace with no conversations yet — the sidebar list before
+const liveRunAuthoritySessions: SessionSummary[] = [
+  {
+    ...makeSession({
+      id: 'live-unknown',
+      name: 'Unknown：兼容旧 Host 的 persisted fallback',
+      status: 'running',
+      lastMessageAt: NOW - 4 * 60 * 1000,
+    }),
+  },
+  {
+    ...makeSession({
+      id: 'live-known-empty',
+      name: 'Known empty：忽略崩溃遗留的 running',
+      status: 'running',
+      lastMessageAt: NOW - 3 * 60 * 1000,
+    }),
+    runningTurnIds: [],
+  },
+  {
+    ...makeSession({
+      id: 'live-remote-running',
+      name: 'Remote running：来自机器人或第二窗口',
+      lastMessageAt: NOW - 2 * 60 * 1000,
+    }),
+    runningTurnIds: ['turn-remote'],
+  },
+  {
+    ...makeSession({
+      id: 'live-local-race',
+      name: 'Local streaming：catalog 刷新前仍显示运行',
+      lastMessageAt: NOW - 1 * 60 * 1000,
+    }),
+    runningTurnIds: [],
+  },
+];
+
+// Real path: a fresh workspace with no tasks yet — the rail's list before
 // anything is created.
 export const Empty: Story = {
   render: () => (
@@ -246,12 +273,28 @@ export const ConversationStates: Story = {
   ),
 };
 
-// Real path: a workspace with long conversation titles, with the sidebar dragged to its
-// narrow end.
+// Real path: Runtime Host catalog refreshes distinguish an older Host (unknown),
+// an authoritative empty run set, a run started by another Client, and the
+// renderer-local synchronization window immediately after send.
+export const LiveRunAuthorityStates: Story = {
+  render: () => (
+    <StoryFrame>
+      <SessionListPanel {...panelProps({
+        sessions: liveRunAuthoritySessions,
+        activeId: 'live-remote-running',
+        streamingSessionIds: new Set(['live-local-race']),
+      })} />
+    </StoryFrame>
+  ),
+};
+
+// Real path: a workspace with long task titles, with the rail dragged to its
+// narrow end (180px, the panel's own minWidth).
 export const LongTitlesAndNarrow: Story = {
   render: () => (
-    <StoryFrame width={176}>
+    <StoryFrame width={180}>
       <SessionListPanel {...panelProps({
+        width: 180,
         sessions: longTitleSessions,
         activeId: 'long-title-active',
         staleSessionIds: new Set(['long-title-stale']),
@@ -284,7 +327,6 @@ export const PinnedAndRecentSections: Story = {
             makeSession({
               id: 'recent-a',
               name: '刚结束的 smoke 回归',
-              status: 'done',
               lastMessageAt: NOW - 12 * 60 * 1000,
             }),
             makeSession({
@@ -301,8 +343,8 @@ export const PinnedAndRecentSections: Story = {
   ),
 };
 
-// Real path: group-by-project — collapsible project rows, sessions flush under
-// the project (zero nest padding), worktree mark + count badge.
+// Real path: group-by-project — collapsible project rows, sessions nested 8px
+// under the project so titles share one x, worktree mark + count badge.
 export const ProjectGroups: Story = {
   render: () => {
     const maka = makeProject({
