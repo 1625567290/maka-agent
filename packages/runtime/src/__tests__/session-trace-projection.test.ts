@@ -56,6 +56,31 @@ function event(overrides: Partial<RuntimeEvent> = {}): RuntimeEvent {
 }
 
 describe('session trace projection', () => {
+  test('keeps the same turn identity separate across distinct runs', () => {
+    const trace = projectSessionTrace({
+      sessionId: 'session-1',
+      runtimeEvents: [],
+      modelCallAttempts: [
+        attempt({ runId: 'run-1', logicalCallId: 'call-1', attemptId: 'attempt-1' }),
+        attempt({
+          runId: 'run-2',
+          logicalCallId: 'call-2',
+          attemptId: 'attempt-2',
+          startedAt: 2_000,
+          completedAt: 2_500,
+        }),
+      ],
+    });
+
+    assert.deepEqual(
+      trace.turns.map(({ runId, turnId }) => ({ runId, turnId })),
+      [
+        { runId: 'run-1', turnId: 'turn-1' },
+        { runId: 'run-2', turnId: 'turn-1' },
+      ],
+    );
+  });
+
   test('preserves durable history-compaction route and provider failure facts', () => {
     const trace = projectSessionTrace({
       sessionId: 'session-1',
@@ -176,9 +201,28 @@ describe('session trace projection', () => {
     });
 
     assert.equal(trace.coverage.modelCalls, 'absent');
-    assert.deepEqual(trace.coverage.turnsMissingModelCalls, ['turn-1']);
+    assert.deepEqual(trace.coverage.turnsMissingModelCalls, [{ runId: 'run-1', turnId: 'turn-1' }]);
     assert.equal(trace.totals.modelAttempts, 0);
     assert.equal(trace.totals.costUsd, undefined);
+  });
+
+  test('known unreadable evidence makes an otherwise absent backend partial', () => {
+    for (const gap of [{ unreadableRecords: 1 }, { oversizedRuns: 1 }]) {
+      const trace = projectSessionTrace({
+        sessionId: 'session-1',
+        runtimeEvents: [
+          event({
+            id: 'usage-1',
+            ts: 1_000,
+            actions: { tokenUsage: { input: 100, output: 20, total: 120 } },
+          }),
+        ],
+        modelCallAttempts: [],
+        ...gap,
+      });
+
+      assert.equal(trace.coverage.modelCalls, 'partial');
+    }
   });
 
   test('distinguishes a partially covered session from a wholly uncovered one', () => {
@@ -202,7 +246,7 @@ describe('session trace projection', () => {
     });
 
     assert.equal(trace.coverage.modelCalls, 'partial');
-    assert.deepEqual(trace.coverage.turnsMissingModelCalls, ['turn-1']);
+    assert.deepEqual(trace.coverage.turnsMissingModelCalls, [{ runId: 'run-1', turnId: 'turn-1' }]);
     assert.equal(trace.turns.map((turn) => turn.turnId).join(','), 'turn-1,turn-2');
   });
 
@@ -258,7 +302,9 @@ describe('session trace projection', () => {
     });
 
     assert.equal(trace.coverage.modelCalls, 'partial');
-    assert.deepEqual(trace.coverage.turnsWithFewerModelCallsThanSteps, ['turn-1']);
+    assert.deepEqual(trace.coverage.turnsWithFewerModelCallsThanSteps, [
+      { runId: 'run-1', turnId: 'turn-1' },
+    ]);
     assert.deepEqual(trace.coverage.turnsMissingModelCalls, []);
   });
 

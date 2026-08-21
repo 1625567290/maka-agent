@@ -6,6 +6,117 @@ import {
   type SessionTrace,
 } from '@maka/core/session-trace';
 import { deriveInspectorPanelModel } from '../../renderer/session-inspector-panel-model.js';
+import {
+  deriveInspectorOverviewModel,
+  estimatedSessionCost,
+  hasUnavailableSessionUsage,
+} from '../../renderer/session-inspector-overview-model.js';
+
+test('does not render legacy zero cost as a known free Session', () => {
+  const summary = {
+    range: { from: 0, to: 1 },
+    totalRequests: 1,
+    totalCostUsd: 0,
+    totalTokens: {
+      input: 1,
+      output: 1,
+      cacheMiss: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      total: 2,
+    },
+    cacheHitRequests: 0,
+    cacheCreateRequests: 0,
+    errorRequests: 0,
+    provenance: {
+      coverage: {
+        attempts: 0,
+        pricedAttempts: 0,
+        unpricedAttempts: 0,
+        usageReportedAttempts: 0,
+        usagePartialAttempts: 0,
+        usageMissingAttempts: 0,
+      },
+      legacyRecords: 1,
+      unreadableRecords: 0,
+      pendingRepairs: 0,
+    },
+  };
+  assert.equal(estimatedSessionCost(summary), undefined);
+  assert.equal(estimatedSessionCost({ ...summary, totalCostUsd: 0.01 }), 0.01);
+});
+
+test('reports incomplete provenance as unavailable regardless of recorded request count', () => {
+  const summary = {
+    range: { from: 0, to: 1 },
+    totalRequests: 0,
+    totalCostUsd: 0,
+    totalTokens: {
+      input: 0,
+      output: 0,
+      cacheMiss: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+      total: 0,
+    },
+    cacheHitRequests: 0,
+    cacheCreateRequests: 0,
+    errorRequests: 0,
+    provenance: {
+      coverage: {
+        attempts: 0,
+        pricedAttempts: 0,
+        unpricedAttempts: 0,
+        usageReportedAttempts: 0,
+        usagePartialAttempts: 0,
+        usageMissingAttempts: 0,
+      },
+      legacyRecords: 0,
+      unreadableRecords: 1,
+      pendingRepairs: 0,
+    },
+  };
+
+  assert.equal(hasUnavailableSessionUsage(summary), true);
+  assert.equal(hasUnavailableSessionUsage({ ...summary, totalRequests: 1 }), true);
+});
+
+test('does not estimate a cache-hit ratio from partial usage', () => {
+  const overview = deriveInspectorOverviewModel(undefined, {
+    range: { from: 0, to: 1 },
+    totalRequests: 1,
+    totalCostUsd: 0,
+    totalTokens: {
+      input: 10,
+      output: 0,
+      cacheMiss: 0,
+      cacheRead: 10,
+      cacheWrite: 0,
+      reasoning: 0,
+      total: 10,
+    },
+    cacheHitRequests: 1,
+    cacheCreateRequests: 0,
+    errorRequests: 0,
+    provenance: {
+      coverage: {
+        attempts: 1,
+        pricedAttempts: 1,
+        unpricedAttempts: 0,
+        usageReportedAttempts: 0,
+        usagePartialAttempts: 1,
+        usageMissingAttempts: 0,
+      },
+      legacyRecords: 0,
+      unreadableRecords: 0,
+      pendingRepairs: 0,
+    },
+  });
+
+  assert.equal(overview.cacheHitRate, undefined);
+});
 
 test('shows one compact diagnostic line for a failed history-compaction call', () => {
   const trace: SessionTrace = {
@@ -71,6 +182,7 @@ test('shows one compact diagnostic line for a failed history-compaction call', (
       turnsMissingModelCalls: [],
       turnsWithFewerModelCallsThanSteps: [],
       unreadableRecords: 0,
+      oversizedRuns: 0,
     },
   };
 
@@ -80,4 +192,30 @@ test('shows one compact diagnostic line for a failed history-compaction call', (
     row?.detail,
     'route=provider_native · error=RequestRejected · HTTP 400 · code=invalid_request_error · request=req-compact-1 · retryable=false',
   );
+  const turn = deriveInspectorPanelModel(trace).turns[0];
+  assert.equal((turn as { startedAt?: number } | undefined)?.startedAt, 1);
+});
+
+test('reports runs omitted only by the bounded online view separately', () => {
+  const model = deriveInspectorPanelModel({
+    schemaVersion: SESSION_TRACE_SCHEMA_VERSION,
+    sessionId: 'session-1',
+    turns: [],
+    totals: emptyTraceTotals(),
+    coverage: {
+      modelCalls: 'partial',
+      turnsMissingModelCalls: [],
+      turnsWithFewerModelCallsThanSteps: [],
+      unreadableRecords: 0,
+      oversizedRuns: 1,
+    },
+  });
+
+  assert.deepEqual(model.coverage, {
+    kind: 'partial',
+    turnsMissing: 0,
+    turnsShort: 0,
+    unreadableRecords: 0,
+    oversizedRuns: 1,
+  });
 });

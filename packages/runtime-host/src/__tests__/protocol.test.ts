@@ -14,8 +14,8 @@ import {
   MESSAGE_OPERATION_RESULT_MAX_BYTES,
   MESSAGE_QUEUE_MAX_ENTRIES,
   negotiateProtocol,
-  RUNTIME_HOST_MAX_MESSAGE_BYTES,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
+  RUNTIME_HOST_MAX_MESSAGE_BYTES,
   RUNTIME_HOST_PROTOCOL_VERSION,
   SESSION_CONTINUITY_SCHEMA_VERSION,
   SESSION_CONTINUITY_SNAPSHOT_MAX_BYTES,
@@ -103,7 +103,11 @@ describe('Runtime Host bootstrap protocol', () => {
   });
 
   test('publishes a new compatibility epoch for backend-free ScheduledTask templates', () => {
-    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 34);
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 33);
+  });
+
+  test('publishes a new compatibility epoch for Session trace pagination', () => {
+    assert.equal(RUNTIME_HOST_COMPATIBILITY_EPOCH, 35);
   });
 
   test('selects the highest mutually supported protocol and rejects a gap', () => {
