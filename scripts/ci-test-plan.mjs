@@ -58,6 +58,7 @@ const TYPECHECK_ONLY_FILES = new Set([
 ]);
 
 const CLI_PACKAGE_FILES = new Set([
+  '.github/workflows/cli-package-validation.yml',
   'LICENSE',
   'NOTICE',
   'scripts/apply-dependency-patches.mjs',

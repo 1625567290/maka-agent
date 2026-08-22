@@ -161,6 +161,12 @@ test('ASF source authority changes select their dedicated gate', () => {
   assert.equal(planTests(['scripts/audit-alignment.mjs'], { graph }).asfSource, false);
 });
 
+test('shared CLI validation changes select installed-package validation', () => {
+  const plan = planTests(['.github/workflows/cli-package-validation.yml'], { graph });
+
+  assert.equal(plan.cliPackage, true);
+});
+
 test('desktop-only changes skip installed-package validation', () => {
   assert.equal(planTests(['apps/desktop/src/main.ts'], { graph }).cliPackage, false);
 });
