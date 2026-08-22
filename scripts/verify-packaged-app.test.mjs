@@ -57,6 +57,7 @@ test('legacy packaged resources require the historical bundled Git contract', as
     forbidPath: async (path) => forbidden.push(path),
     requireWindowsSandbox: false,
     bundledGitContract: 'legacy-required',
+    requireCanonicalIcon: false,
   });
 
   for (const path of [
@@ -321,5 +322,40 @@ describe('assertPackagedDependencyClosure', () => {
         assertPackagedDependencyClosure(withoutLicense, { ...options, collectClosure: closure }),
       /shipped license file for @fontsource-variable\/geist is missing/,
     );
+  });
+});
+
+// The resource list is contract, not implementation: the permission overlay
+// reads `assets/icon.png` at runtime, so a current build that drops it ships
+// a regression the app cannot report. The check is driven through the
+// injectable `requirePath`, so it needs no packaging and no platform.
+describe('assertPackagedResources', () => {
+  const resources = join('fake', 'resources');
+  const iconPath = join(resources, 'assets', 'icon.png');
+  const requirePathMissing = (absent) => async (path) => {
+    if (path === absent) throw new Error(`MISSING ${path}`);
+  };
+  const forbidPath = async () => {};
+
+  test('a current build must carry the canonical icon', async () => {
+    await assert.rejects(
+      () =>
+        assertPackagedResources(resources, {
+          requirePath: requirePathMissing(iconPath),
+          forbidPath,
+          requireWindowsSandbox: false,
+        }),
+      /MISSING .*icon\.png/,
+    );
+  });
+
+  test('a legacy baseline predating the packaged icon is not required to carry it', async () => {
+    await assertPackagedResources(resources, {
+      requirePath: requirePathMissing(iconPath),
+      forbidPath,
+      requireWindowsSandbox: false,
+      requireDisclaimer: false,
+      requireCanonicalIcon: false,
+    });
   });
 });

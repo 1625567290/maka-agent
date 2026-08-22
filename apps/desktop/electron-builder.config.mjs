@@ -71,10 +71,11 @@ export default {
       to: 'bundled-tools.json',
     },
     {
-      // The app icon is read at runtime by the BrowserWindow `icon` option, and
-      // `files` above does not carry `assets/`. Electron reports the missing
-      // file as an empty image rather than an error, so without this the
-      // packaged app just draws no window icon.
+      // The app icon is read at runtime by the BrowserWindow `icon` option
+      // and by the permission-overlay card, and `files` above does not carry
+      // `assets/`. Electron reports the missing file as an empty image rather
+      // than an error, so without this the packaged app just draws no window
+      // icon; `assertPackagedResources` requires it on current builds.
       from: 'assets',
       to: 'assets',
     },

@@ -733,6 +733,11 @@ export async function assertPackagedResources(
     // build, which predates the disclaimer being packaged. Requiring it there
     // would fail a release that was correct when it shipped.
     requireDisclaimer = true,
+    // Same shape as the disclaimer: the canonical icon began shipping as an
+    // extra resource with the window-icon fix, and the permission overlay
+    // reads it at runtime, so current builds must carry it — but a
+    // previously released baseline predates it.
+    requireCanonicalIcon = true,
   } = {},
 ) {
   if (bundledGitContract !== 'forbidden' && bundledGitContract !== 'legacy-required') {
@@ -751,6 +756,7 @@ export async function assertPackagedResources(
           join('licenses', 'git', 'NOTICE.txt'),
         ]
       : []),
+    ...(requireCanonicalIcon ? [join('assets', 'icon.png')] : []),
     join('workers', 'filesystem-worker.js'),
     join('licenses', 'maka', 'LICENSE'),
     join('licenses', 'maka', 'NOTICE'),
