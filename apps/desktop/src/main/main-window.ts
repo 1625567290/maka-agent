@@ -32,6 +32,7 @@ import { installMainWindowPermissionPolicy } from './main-window-permission-poli
 import { observeMainRendererProcessGone } from './main-renderer-process-gone.js';
 import { isThemePreference, toNativeThemeSource } from './theme-source.js';
 import { createWindowRevealGate } from './window-reveal.js';
+import { createWindowsMaximizeRendererSync } from './windows-maximize-renderer-sync.js';
 import {
   parseDesktopSessionResourceKey,
 } from '../shared/runtime-host-identity.js';
@@ -468,9 +469,18 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
         void writeSavedBounds(workspaceRoot, next);
       }, 400);
     };
-    mainWindow.on('resize', scheduleSave);
+    const scheduleMaximizedRendererSync = createWindowsMaximizeRendererSync(mainWindow);
+    const handleResize = (): void => {
+      scheduleSave();
+      scheduleMaximizedRendererSync();
+    };
+    const handleMaximize = (): void => {
+      scheduleSave();
+      scheduleMaximizedRendererSync();
+    };
+    mainWindow.on('resize', handleResize);
     mainWindow.on('move', scheduleSave);
-    mainWindow.on('maximize', scheduleSave);
+    mainWindow.on('maximize', handleMaximize);
     mainWindow.on('unmaximize', scheduleSave);
     mainWindow.on('close', () => {
       clearShowFallbackTimer();
