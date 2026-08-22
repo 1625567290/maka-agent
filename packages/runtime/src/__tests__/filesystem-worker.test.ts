@@ -438,6 +438,45 @@ describe('filesystem worker operations', () => {
     if (!response.ok) assert.equal(response.error.code, 'path_changed');
   });
 
+  test('accepts an unchecked write target without an identity (#3484)', async () => {
+    const root = await temporaryDirectory('maka-worker-unchecked-');
+    const target = join(root, 'file.txt');
+    await writeFile(target, 'existing', 'utf8');
+
+    const response = await executeFilesystemWorkerRequest(
+      await requestFor(
+        { kind: 'write', cwd: root, path: target, content: 'new' },
+        { enforcementPath: target, access: 'write', scope: 'exact', targetType: 'file' },
+        target,
+        'unchecked',
+      ),
+    );
+
+    assert.ok(response.ok);
+    assert.equal(response.result.kind, 'write');
+    if (response.result.kind !== 'write') return;
+    assert.equal(await readFile(target, 'utf8'), 'new');
+  });
+
+  test('rejects a write whose T0-missing target exists at execution time (#3484)', async () => {
+    const root = await temporaryDirectory('maka-worker-created-');
+    const target = join(root, 'file.txt');
+    // T0 approved the target as missing; something created it before the
+    // worker executed. Writing would clobber content the caller never saw.
+    await writeFile(target, 'external', 'utf8');
+
+    const response = await executeFilesystemWorkerRequest(
+      await requestFor(
+        { kind: 'write', cwd: root, path: target, content: 'new' },
+        { enforcementPath: target, access: 'write', scope: 'exact', targetType: 'missing' },
+      ),
+    );
+    assert.equal(response.ok, false);
+    if (!response.ok) assert.equal(response.error.code, 'path_changed');
+    // The interloper's content was never touched.
+    assert.equal(await readFile(target, 'utf8'), 'external');
+  });
+
   test('omits the diff when the content is too large to diff cheaply', async () => {
     const root = await temporaryDirectory('maka-worker-huge-');
     const target = join(root, 'huge.ts');
@@ -523,8 +562,9 @@ describe('filesystem worker operations', () => {
 
 async function requestFor(
   operation: FilesystemWorkerOperation,
-  expectedTarget: FilesystemWorkerTarget,
+  expectedTarget: Omit<FilesystemWorkerTarget, 'identity'>,
   permissionPath = operation.path,
+  identity?: FilesystemWorkerTarget['identity'],
 ): Promise<FilesystemWorkerRequest> {
   const operationBoundary: FilesystemWorkerRequest['operationBoundary'] = {
     filesystem: {
@@ -539,8 +579,18 @@ async function requestFor(
   };
   // The real caller captures the target identity at T0; mirror that here so
   // the worker's mandatory-identity check is satisfied for non-missing targets.
-  let resolvedTarget = expectedTarget;
-  if (expectedTarget.targetType !== 'missing' && !expectedTarget.identity) {
+  let resolvedTarget: FilesystemWorkerTarget = {
+    ...expectedTarget,
+    // Always replaced below; the placeholder keeps the type total.
+    identity: 'unchecked',
+  };
+  if (identity !== undefined) {
+    // The test chose the identity contract explicitly (e.g. 'unchecked' or a
+    // stale inode); keep the target exactly as given.
+    resolvedTarget = { ...expectedTarget, identity };
+  } else if (expectedTarget.targetType === 'missing') {
+    resolvedTarget = { ...expectedTarget, identity: 'missing' };
+  } else {
     const follow = expectedTarget.targetType !== 'symlink';
     try {
       const metadata = follow
@@ -552,7 +602,8 @@ async function requestFor(
       };
     } catch {
       // Target may not exist at request construction time (the test sets it up
-      // differently); leave identity absent and let the worker surface it.
+      // differently); fall back to 'missing' so the worker's own checks decide.
+      resolvedTarget = { ...expectedTarget, identity: 'missing' };
     }
   }
   return {
