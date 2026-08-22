@@ -52,3 +52,76 @@ test('a turn in flight turns the same single control into Stop', () => {
   const buttons = sendSlotButtons(renderComposer(true));
   assert.deepEqual(buttons, ['aria-label="Stop"']);
 });
+
+test('a running composer exposes Queue and Steer when the host supports follow-ups', () => {
+  const markup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <Composer
+        streaming
+        followUpMode="queue"
+        onFollowUpModeChange={() => undefined}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />
+    </LocaleProvider>,
+  );
+
+  assert.match(markup, /aria-label="Follow-up behavior"/);
+  assert.match(markup, />Queue</);
+  assert.match(markup, />Steer</);
+});
+
+test('renders authoritative queued messages with one retract action', () => {
+  const markup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <Composer
+        streaming
+        followUpMode="queue"
+        queuedMessages={{
+          steering: [],
+          followup: [{
+            entryId: 'entry-1',
+            messageId: 'message-1',
+            content: { text: 'do this next' },
+            placement: 'next_turn',
+            state: 'queued',
+          }],
+        }}
+        onRetractQueued={() => undefined}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />
+    </LocaleProvider>,
+  );
+
+  assert.match(markup, /1 queued message/);
+  assert.match(markup, /do this next/);
+  assert.match(markup, /aria-label="Retract all"/);
+});
+
+test('does not offer retract when only an in-flight steering message remains', () => {
+  const markup = renderToStaticMarkup(
+    <LocaleProvider locale="en">
+      <Composer
+        streaming
+        followUpMode="steer"
+        queuedMessages={{
+          steering: [{
+            entryId: 'entry-1',
+            messageId: 'message-1',
+            content: { text: 'adjust this run' },
+            placement: 'current_turn',
+            state: 'in_flight',
+          }],
+          followup: [],
+        }}
+        onRetractQueued={() => undefined}
+        onSend={() => undefined}
+        onStop={() => undefined}
+      />
+    </LocaleProvider>,
+  );
+
+  assert.match(markup, /adjust this run/);
+  assert.doesNotMatch(markup, /aria-label="Retract all"/);
+});
