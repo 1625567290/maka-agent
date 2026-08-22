@@ -89,6 +89,7 @@ import {
 } from './quote-companion-panel-state';
 import { UNRESOLVED_NEW_TASK_DRAFT_KEY } from './new-task-reload-intent';
 import { useNewTaskChoice } from './use-new-task-choice';
+import { NEW_TASK_PENDING_KEY } from './app-shell-pending-attachments';
 import { sideChatTitleFromPrompt } from './side-chat-command';
 import { parseDesktopSlashCommand } from './desktop-slash-command';
 import {
@@ -406,7 +407,10 @@ function AppShellContent({
   const onboarding = useOnboardingSnapshot(initialOnboardingSnapshot);
   const newTask = useNewTaskTarget({ toastApi, uiLocale });
   const currentNewTaskDraftKey = newTaskDraftKey(newTask.target);
-  const attachmentDraftKey = activeId ?? currentNewTaskDraftKey;
+  // Staged files and quotes do NOT take the target-scoped key: they belong to
+  // the composer the user is looking at, and an in-flight send needs an owner
+  // that cannot move under it. See NEW_TASK_PENDING_KEY.
+  const attachmentDraftKey = activeId ?? NEW_TASK_PENDING_KEY;
   const {
     pendingAttachments,
     pickAttachments,
@@ -423,6 +427,8 @@ function AppShellContent({
     removeQuote,
     clearQuotes,
   } = useAppShellComposerQuotes({ draftKey: attachmentDraftKey });
+  // Held for the whole of sendOwningItsTarget; see ChatComposerRegion.
+  const [newTaskSendPending, setNewTaskSendPending] = useState(false);
   // What a new chat will start with, held the way the Session holds it: a
   // Plan toggle and one orchestration value, not one fused choice.
   const [newChatPlanModeActive, setNewChatPlanModeActive] = useState(false);
@@ -2227,6 +2233,26 @@ function AppShellContent({
     });
   }
 
+  /**
+   * The send the composer calls, wrapped so the new-task target cannot move
+   * out from under it (#3408). `sendCurrent` captures the draft key it
+   * submitted from and clears exactly that key once this resolves; the picker
+   * stays live throughout, and the catalog can settle on its own. Holding the
+   * flag for the whole call gives the submission one owner, and
+   * ChatComposerRegion defers its carry until it drops.
+   */
+  async function sendOwningItsTarget(
+    text: string,
+    metadata?: ComposerSendMetadata,
+  ): Promise<boolean | void> {
+    setNewTaskSendPending(true);
+    try {
+      return await sendWithAttachments(text, metadata);
+    } finally {
+      setNewTaskSendPending(false);
+    }
+  }
+
   async function sendWithAttachments(
     text: string,
     metadata?: ComposerSendMetadata,
@@ -3229,6 +3255,7 @@ function AppShellContent({
                   activeInteraction={activeInteraction}
                   activeId={activeId}
                   newTaskDraftKey={currentNewTaskDraftKey}
+                  newTaskSendPending={newTaskSendPending}
                   stopPendingBySession={stopPendingBySession}
                   activeSandboxBoundary={activeSandboxBoundary}
                   respondToSandboxBoundary={respondToSandboxBoundary}
@@ -3249,7 +3276,7 @@ function AppShellContent({
                   // "Maka 继续中…". Both are mutually exclusive with activeStreamingLive.
                   processing={showProcessingIndicator && !activeStreamingLive}
                   continuing={showContinuingIndicator && !activeStreamingLive}
-                  onSend={sendWithAttachments}
+                  onSend={sendOwningItsTarget}
                   onStop={stop}
                   revisionNotice={
                     revisionDraft && activeId === revisionDraft.draftSessionId

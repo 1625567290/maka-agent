@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { attachmentKindFromMimeType, guessMimeFromName } from '@maka/core/attachments';
 import { useUiLocale } from '@maka/ui';
-import { pendingAttachmentSourceKey, type PendingAttachment } from './app-shell-chat-actions';
+import { pendingAttachmentSourceKey, type PendingAttachment } from './app-shell-chat-actions.js';
 import { getDesktopConversationCopy } from './locales/conversation-copy.js';
 import { localizedShellErrorMessage } from './locales/shell-copy.js';
 import {
@@ -10,7 +10,7 @@ import {
   removePendingItems,
   selectPending,
   type PendingByKey,
-} from './app-shell-pending-attachments';
+} from './app-shell-pending-attachments.js';
 
 type ToastApi = {
   error(title: string, description?: string): void;
@@ -79,6 +79,12 @@ export function useAppShellComposerAttachments(options: {
   // Live mirror of every staged item's key, for async preview arrivals to
   // check before writing: state snapshots inside a .then are stale by design.
   const stagedKeysRef = useRef<Set<string>>(new Set());
+  // The live staging key, for the one import that resolves long after it was
+  // started: the native file dialog. See pickAttachments.
+  const draftKeyRef = useRef(options.draftKey);
+  useEffect(() => {
+    draftKeyRef.current = options.draftKey;
+  }, [options.draftKey]);
   const stagedAttachments = selectPending(pendingByKey, options.draftKey);
   const pendingAttachments = useMemo(
     () =>
@@ -147,10 +153,14 @@ export function useAppShellComposerAttachments(options: {
   }
 
   async function pickAttachments(): Promise<void> {
-    const ownerKey = options.draftKey;
     try {
       const result = await window.maka.attachments.pickFiles();
       if (!result.ok) return;
+      // Resolved after the dialog closes, never captured before it opens: the
+      // surface can change while a native dialog is up, and files the user just
+      // chose belong in the composer they are looking at — not in a bucket they
+      // have since left, where the files would be invisible but still sendable.
+      const ownerKey = draftKeyRef.current;
       const staged = result.files.map(approvalToPending);
       setPendingByKey((map) => appendPending(map, ownerKey, staged));
       for (const item of staged) stagedKeysRef.current.add(item.stagingKey);
