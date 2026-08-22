@@ -4,7 +4,7 @@ import { createReadStream, readFileSync } from 'node:fs';
 import { access, mkdir, readFile, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
-import { join, resolve, sep } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 import {
   ASSET_LICENSED_RENDERER_PACKAGES,
   collectProductionClosure,
@@ -705,6 +705,13 @@ export async function assertPackagedResources(
     requirePath,
     forbidPath = assertMissing,
     requireWindowsSandbox = process.platform === 'win32',
+    // The credential-manager exclusion is written against the POSIX Git
+    // distribution, whose commands sit in a flat `libexec/git-core`. The
+    // Windows distribution has a different layout (`git/cmd/git.exe`, and its
+    // own `.dll` set that git itself loads), so the exclusion does not apply
+    // there and neither does this assertion. Scoped rather than guessed:
+    // trimming Windows needs its own measurement first.
+    assertGitTree = process.platform !== 'win32',
     // The upgrade-lifecycle check runs this against a previously released
     // build, which predates the disclaimer being packaged. Requiring it there
     // would fail a release that was correct when it shipped.
@@ -759,10 +766,83 @@ export async function assertPackagedResources(
     // app, and `distributionReady` is false for exactly this reason.
     join('bin', 'maka-cu'),
     join('tools', 'maka-cu'),
+    // Git Credential Manager and its .NET runtime are excluded from the
+    // packaged Git distribution: Maka sets `credential.helper=` on every git
+    // invocation, so nothing can reach them. Naming the entry point rather
+    // than the runtime keeps this readable; `assertPackagedGitIsComplete`
+    // covers the rest by listing the directory.
+    ...(assertGitTree ? [join('git', 'libexec', 'git-core', 'git-credential-manager')] : []),
   ];
   for (const path of forbidden) {
     await forbidPath(join(resourcesPath, path));
   }
+  if (assertGitTree) await assertPackagedGitIsComplete(resourcesPath, requirePath);
+}
+
+/**
+ * The credential-manager exclusion is a name filter over one flat directory
+ * that also holds git's own commands, so it can over-match — and a git that
+ * lost `git-remote-http` fails at clone time in a user's hands, not here.
+ *
+ * Both halves are asserted: the commands Maka actually invokes must be
+ * present, and nothing from the .NET runtime may be. Checking only the
+ * absence would pass just as well for an empty directory.
+ */
+async function assertPackagedGitIsComplete(resourcesPath, requirePath) {
+  const gitCore = join(resourcesPath, 'git', 'libexec', 'git-core');
+  // `git-workspace-service.ts` drives add / cat-file / commit / config /
+  // for-each-ref / init / rev-parse / status / worktree. Those are builtins
+  // reached through the `git` binary; what has to exist on disk is the
+  // binary itself plus the helpers git dispatches to as separate programs.
+  for (const name of ['git', 'git-remote-http', 'git-http-fetch', 'git-shell']) {
+    await requirePath(join(gitCore, name));
+  }
+  await requirePath(join(resourcesPath, 'git', 'bin', 'git'));
+  await requirePath(join(resourcesPath, 'git', 'share', 'git-core', 'templates'));
+
+  // Recursive, because the runtime is not flat: GCM ships 13 localisation
+  // directories each holding one `System.CommandLine.resources.dll`, and on
+  // Linux two native UI libraries beside the binary. A top-level-only scan
+  // reported a clean tree while all of that was still packaged — which is
+  // exactly what it did until a review checked a real artifact.
+  const runtimeLeftovers = await findCredentialManagerLeftovers(gitCore, gitCore);
+  if (runtimeLeftovers.length > 0) {
+    throw new Error(
+      `packaged git still carries the credential-manager runtime: ${runtimeLeftovers.join(', ')}`,
+    );
+  }
+}
+
+/**
+ * Every credential-manager artefact under one directory, as paths relative to
+ * the git-core root so the failure names where to look.
+ *
+ * Git's own commands here are executables and shell scripts, so matching on
+ * the .NET/native extensions cannot implicate them. `NOTICE` and
+ * `uninstall.sh` are GCM's installation leftovers, not git's — git keeps its
+ * notices in `share/doc`.
+ */
+async function findCredentialManagerLeftovers(directory, root) {
+  const leftovers = [];
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const absolute = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      leftovers.push(...(await findCredentialManagerLeftovers(absolute, root)));
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    const isRuntimeLibrary = /\.(?:dll|dylib|so)$/u.test(entry.name);
+    const isCredentialManager =
+      entry.name.startsWith('git-credential-manager') ||
+      entry.name === 'createdump' ||
+      entry.name === 'NOTICE' ||
+      entry.name === 'uninstall.sh';
+    if (isRuntimeLibrary || isCredentialManager) {
+      leftovers.push(relative(root, absolute));
+    }
+  }
+  return leftovers;
 }
 
 /**
