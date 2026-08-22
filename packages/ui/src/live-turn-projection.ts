@@ -17,7 +17,12 @@
  * under the License.
  */
 
-import type { MessageContent, ProviderRetryEvent, SessionEvent } from '@maka/core/events';
+import {
+  decodeToolStepProgress,
+  type MessageContent,
+  type ProviderRetryEvent,
+  type SessionEvent,
+} from '@maka/core/events';
 import type { StoredMessage } from '@maka/core/session';
 import type { UiLocale } from '@maka/core/ui-locale';
 import { materializeToolResultPreviewForActivity } from '@maka/core/tool-result-preview';
@@ -30,7 +35,7 @@ import { applyThinkingComplete, applyThinkingDelta } from './thinking-stream.js'
 import type { StreamingDisplayRedactionState } from './streaming-display-redaction.js';
 import { applyToolOutputChunk } from './tool-output-stream.js';
 
-type LiveTurnContentEvent = Extract<SessionEvent, { type: 'thinking_delta' | 'thinking_complete' | 'text_delta' | 'text_complete' | 'tool_start' | 'tool_output_delta' | 'tool_result_preview' | 'tool_result' }>;
+type LiveTurnContentEvent = Extract<SessionEvent, { type: 'thinking_delta' | 'thinking_complete' | 'text_delta' | 'text_complete' | 'tool_start' | 'tool_output_delta' | 'tool_progress' | 'tool_result_preview' | 'tool_result' }>;
 
 export interface LiveThinkingProjection {
   text: string;
@@ -236,6 +241,7 @@ export function applyLiveTurnEvent(
     && event.type !== 'text_complete'
     && event.type !== 'tool_start'
     && event.type !== 'tool_output_delta'
+    && event.type !== 'tool_progress'
     && event.type !== 'tool_result_preview'
     && event.type !== 'tool_result'
   ) {
@@ -251,6 +257,7 @@ export function applyLiveTurnEvent(
     || event.type === 'text_complete';
   const existingToolStep = event.type === 'tool_start'
     || event.type === 'tool_output_delta'
+    || event.type === 'tool_progress'
     || event.type === 'tool_result_preview'
     || event.type === 'tool_result'
     ? prior.steps.find((candidate) => candidate.tools.some((tool) => tool.toolUseId === event.toolUseId))
@@ -386,6 +393,24 @@ export function applyLiveTurnEvent(
       status: base.status === 'pending' ? 'running' : base.status,
       outputChunks: applied.chunks,
       outputTruncated: base.outputTruncated || applied.truncated,
+    };
+    nextStep = {
+      ...step,
+      tools: toolIndex >= 0
+        ? step.tools.map((candidate, index) => index === toolIndex ? tool : candidate)
+        : [...step.tools, tool],
+    };
+  } else if (event.type === 'tool_progress') {
+    const toolIndex = step.tools.findIndex((candidate) => candidate.toolUseId === event.toolUseId);
+    const base: ToolActivityItem = toolIndex >= 0
+      ? step.tools[toolIndex]!
+      : { toolUseId: event.toolUseId, toolName: 'Tool', status: 'running', args: undefined };
+    const progress = decodeToolStepProgress(event.chunk);
+    const tool: ToolActivityItem = {
+      ...base,
+      ...projectToolActivityIdentity(event),
+      status: isInFlightToolStatus(base.status) ? 'running' : base.status,
+      ...(progress ? { progress } : {}),
     };
     nextStep = {
       ...step,

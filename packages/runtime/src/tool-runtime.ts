@@ -30,7 +30,7 @@ import {
   type SettleSandboxBoundaryRequest,
 } from '@maka/core/sandbox-boundary';
 import { serializedByteLength } from '@maka/core/serialized-byte-length';
-import { ToolOutcomeUnknownError } from '@maka/core/events';
+import { encodeToolStepProgress, ToolOutcomeUnknownError } from '@maka/core/events';
 import type {
   SandboxBoundaryDecisionAckEvent,
   SandboxBoundaryRequestEvent,
@@ -192,6 +192,8 @@ export interface MakaToolContext {
   operationId?: string;
   abortSignal: AbortSignal;
   emitOutput: (stream: ToolOutputStream, chunk: string) => void;
+  /** Live-only bounded progress for multi-step tools. */
+  emitProgress?: (current: number, total: number) => void;
   /** Diagnostic-only trace projection. It must never affect tool execution. */
   emitRunTrace?: (
     type:
@@ -1337,6 +1339,19 @@ export class ToolRuntime {
           ...(pushedCallEvent?.operationId ? { operationId: pushedCallEvent.operationId } : {}),
           abortSignal: ctx.abortSignal,
           emitOutput: output.emit,
+          emitProgress: (current, total) => {
+            const chunk = encodeToolStepProgress({ current, total });
+            if (!chunk) return;
+            queue.push({
+              type: 'tool_progress',
+              id: this.input.newId(),
+              turnId,
+              ts: this.input.now(),
+              toolUseId,
+              chunk,
+              ...activityIdentity,
+            });
+          },
           ...(trace
             ? {
                 emitRunTrace: (

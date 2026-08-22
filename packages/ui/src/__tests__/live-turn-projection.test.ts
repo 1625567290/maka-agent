@@ -19,6 +19,7 @@
 
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
+import { encodeToolStepProgress } from '@maka/core/events';
 import {
   applyLiveTurnEvent,
   armLiveTurn,
@@ -375,6 +376,55 @@ describe('applyLiveTurnEvent', () => {
       }],
       outputTruncated: false,
     }]);
+  });
+
+  it('projects bounded multi-step tool progress onto the running row', () => {
+    const started = applyLiveTurnEvent(undefined, {
+      type: 'tool_start',
+      id: 'event-1',
+      turnId: 'turn-1',
+      stepId: 'step-1',
+      toolUseId: 'tool-1',
+      toolName: 'mcp__desktop_computer_use__maka_computer',
+      activityKind: 'computer',
+      args: {
+        action: 'element_sequence',
+        steps: [{ label: '<text:1>' }, { label: '<text:1>' }],
+      },
+      ts: 100,
+    });
+    const projection = applyLiveTurnEvent(started, {
+      type: 'tool_progress',
+      id: 'event-2',
+      turnId: 'turn-1',
+      toolUseId: 'tool-1',
+      chunk: encodeToolStepProgress({ current: 1, total: 2 })!,
+      ts: 101,
+    });
+
+    assert.deepEqual(projection.steps[0]?.tools[0]?.progress, { current: 1, total: 2 });
+    assert.equal(projection.steps[0]?.tools[0]?.status, 'running');
+  });
+
+  it('ignores invalid step progress without clearing the last valid value', () => {
+    const valid = applyLiveTurnEvent(undefined, {
+      type: 'tool_progress',
+      id: 'event-1',
+      turnId: 'turn-1',
+      toolUseId: 'tool-1',
+      chunk: encodeToolStepProgress({ current: 1, total: 2 })!,
+      ts: 100,
+    });
+    const invalid = applyLiveTurnEvent(valid, {
+      type: 'tool_progress',
+      id: 'event-2',
+      turnId: 'turn-1',
+      toolUseId: 'tool-1',
+      chunk: 'steps:3/2',
+      ts: 101,
+    });
+
+    assert.deepEqual(invalid.steps[0]?.tools[0]?.progress, { current: 1, total: 2 });
   });
 
   it('preserves steering positions when an output-first tool receives its real step', () => {
