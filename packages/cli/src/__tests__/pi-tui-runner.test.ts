@@ -3603,11 +3603,16 @@ describe('Maka Pi TUI runner', () => {
     await run;
   });
 
-  test('shows a session without a cwd in All but prevents resuming it', async () => {
+  test('keeps live status visible for a session without a cwd but prevents resuming it', async () => {
     const terminal = new FakeTerminal();
     const driver = new SlashCommandDriver([
       fakeSessionSummary('session-current', '/repo', 'Current chat'),
-      { ...fakeSessionSummary('session-legacy', '/repo', 'Legacy chat'), cwd: undefined },
+      {
+        ...fakeSessionSummary('session-legacy', '/repo', 'Legacy chat'),
+        cwd: undefined,
+        status: 'running',
+        runningTurnIds: ['turn-live'],
+      },
     ]);
     Object.defineProperty(driver, 'getSessionResumeAvailability', { value: undefined });
     const run = runMakaPiTui({
@@ -3635,7 +3640,7 @@ describe('Maka Pi TUI runner', () => {
 
     assert.match(
       plainTerminalOutput(terminal.screenOutput()),
-      /Legacy chat.*Missing working directory/,
+      /Legacy chat.*session- · running Missing working directory/,
     );
 
     terminal.input('\x1b');
