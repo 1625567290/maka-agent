@@ -20,7 +20,31 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { MessageBoxOptions, MessageBoxReturnValue } from 'electron';
-import { showFatalStartupError, showMessageBoxWithDiagnostics } from '../native-diagnostic-dialog.js';
+import {
+  copyDesktopDiagnosticReport,
+  createDesktopMainRendererDiagnosticInput,
+} from '../main-process-diagnostics.js';
+import {
+  showFatalStartupError,
+  showMainRendererProcessGoneDialog,
+  showMessageBoxWithDiagnostics,
+} from '../native-diagnostic-dialog.js';
+
+const diagnosticEnvironment = () => ({
+  appVersion: '0.1.8',
+  buildMode: 'packaged' as const,
+  buildCommit: null,
+  electronVersion: '38.0.0',
+  nodeVersion: '22.0.0',
+  chromeVersion: '140.0.0',
+  platform: 'linux' as const,
+  arch: 'x64',
+  osRelease: '6.6.0',
+  locale: 'en-US',
+  workspacePath: '/home/tester/.local/share/maka/workspaces/default',
+  homePath: '/home/tester',
+  processUptimeSeconds: 3,
+});
 
 test('copies diagnostics as an auxiliary native-dialog action', async () => {
   const shown: MessageBoxOptions[] = [];
@@ -62,21 +86,7 @@ test('fatal startup errors remain copyable without a renderer or BrowserWindow',
 
   await showFatalStartupError(new Error('Authorization: Bearer very-secret-token'), {
     locale: 'en',
-    environment: () => ({
-      appVersion: '0.1.8',
-      buildMode: 'packaged',
-      buildCommit: null,
-      electronVersion: '38.0.0',
-      nodeVersion: '22.0.0',
-      chromeVersion: '140.0.0',
-      platform: 'linux',
-      arch: 'x64',
-      osRelease: '6.6.0',
-      locale: 'en-US',
-      workspacePath: '/home/tester/.local/share/maka/workspaces/default',
-      homePath: '/home/tester',
-      processUptimeSeconds: 3,
-    }),
+    environment: diagnosticEnvironment,
     mainLogs: () => ['startup failed with Authorization: Bearer very-secret-token'],
     writeClipboard: (value) => {
       clipboard = value;
@@ -91,6 +101,51 @@ test('fatal startup errors remain copyable without a renderer or BrowserWindow',
   assert.deepEqual(shown[1]?.buttons, ['Exit', 'Copy Again']);
   assert.match(shown[1]?.detail ?? '', /Diagnostics copied/);
   assert.match(clipboard, /Surface: startup/);
+  assert.match(clipboard, /Recent main-process logs \(1\)/);
+  assert.doesNotMatch(clipboard, /very-secret-token/);
+});
+
+test('main Renderer loss keeps Copy Diagnostics auxiliary to recovery', async () => {
+  const shown: MessageBoxOptions[] = [];
+  const responses = [2, 0];
+  let clipboard = '';
+  const diagnosticInput = createDesktopMainRendererDiagnosticInput({
+    title: 'Maka main Renderer process exited unexpectedly',
+    description: 'Reason: oom',
+    details: 'Exit code: 137',
+  });
+
+  const decision = await showMainRendererProcessGoneDialog({
+    locale: 'en',
+    copyDiagnostics: () =>
+      copyDesktopDiagnosticReport(
+        {
+          environment: diagnosticEnvironment,
+          mainLogs: () => ['renderer stopped with api_key=very-secret-token'],
+          resolveActiveRuntimeHost: () => {
+            throw new Error('Renderer-loss diagnostics must remain Desktop-only');
+          },
+          resolveRuntimeHost: () => {
+            throw new Error('Renderer-loss diagnostics must not resolve a task Host');
+          },
+          writeClipboard: (value) => {
+            clipboard = value;
+          },
+        },
+        diagnosticInput,
+      ),
+    showMessageBox: async (options): Promise<MessageBoxReturnValue> => {
+      shown.push(options);
+      return { response: responses.shift() ?? 1, checkboxChecked: false };
+    },
+  });
+
+  assert.equal(decision, 'relaunch');
+  assert.deepEqual(shown[0]?.buttons, ['Relaunch', 'Exit', 'Copy Diagnostics']);
+  assert.deepEqual(shown[1]?.buttons, ['Relaunch', 'Exit', 'Copy Again']);
+  assert.match(clipboard, /Surface: renderer_process_gone/);
+  assert.match(clipboard, /Reason: oom/);
+  assert.match(clipboard, /Exit code: 137/);
   assert.match(clipboard, /Recent main-process logs \(1\)/);
   assert.doesNotMatch(clipboard, /very-secret-token/);
 });

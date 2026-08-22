@@ -93,11 +93,15 @@ import { createMainWindowController } from "./main-window.js";
 import {
   captureDesktopDiagnosticEnvironment,
   copyDesktopDiagnosticReport,
+  createDesktopMainRendererDiagnosticInput,
   createDesktopStartupDiagnosticInput,
   mainProcessLogBuffer,
   type DesktopDiagnosticsDeps,
 } from "./main-process-diagnostics.js";
-import { showMessageBoxWithDiagnostics } from "./native-diagnostic-dialog.js";
+import {
+  showMainRendererProcessGoneDialog,
+  showMessageBoxWithDiagnostics,
+} from "./native-diagnostic-dialog.js";
 import {
   resolveDesktopSessionWorkspace,
 } from "./new-session-project.js";
@@ -342,6 +346,21 @@ const mainWindowController = createMainWindowController({
   settingsStore,
   startHidden,
   onClose: () => onMainWindowClose(),
+  onRendererProcessGone: async (details) => {
+    const diagnosticInput = createDesktopMainRendererDiagnosticInput({
+      title: "Maka main Renderer process exited unexpectedly",
+      description: `Reason: ${details.reason}`,
+      details: `Exit code: ${details.exitCode}`,
+    });
+    const decision = await showMainRendererProcessGoneDialog({
+      locale: desktopLocale.current(),
+      copyDiagnostics: () =>
+        copyDesktopDiagnosticReport(desktopDiagnostics, diagnosticInput),
+      showMessageBox: (options) => dialog.showMessageBox(options),
+    });
+    if (decision === "relaunch") app.relaunch();
+    app.quit();
+  },
 });
 const runtimeHostSshTerminal = createDesktopRuntimeHostSshTerminal({
   ipcMain,
@@ -1440,10 +1459,12 @@ function wireLifecycle(): void {
     cleanup: closeRuntimeHostDesktop,
     focusOrCreateWindow: (signal) => {
       if (mainWindowController.hasOpenWindows()) mainWindowController.focus();
-      else void mainWindowController.createWindow(signal);
+      else return mainWindowController.createWindow(signal);
     },
     onCleanupError: (error) =>
       console.error("[runtime-host] shutdown failed:", error),
+    onWindowCreationError: (error) =>
+      console.error("[window] creation failed:", error),
     resumeQuit: () => app.quit(),
   });
   installDesktopShellPresentation({
@@ -1464,8 +1485,7 @@ function wireLifecycle(): void {
     if (process.platform !== "darwin") app.quit();
   });
   app.on("before-quit", quitCoordinator.handleBeforeQuit);
-  const initialWindowSignal = quitCoordinator.getWindowCreationSignal();
-  if (initialWindowSignal) void mainWindowController.createWindow(initialWindowSignal);
+  quitCoordinator.focusOrCreateWindow();
 }
 
 async function closeRuntimeHostDesktop(): Promise<void> {
