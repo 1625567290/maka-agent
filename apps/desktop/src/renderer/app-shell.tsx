@@ -462,7 +462,7 @@ function AppShellContent({
   // removed — so there is no pending state here, only the registry refs.
   const queuedCollaborationModeBySession = useRef(new Map<string, boolean>());
   const queuedOrchestrationModeBySession = useRef(new Map<string, OrchestrationMode>());
-  const [newTaskPermissionChoice, setNewTaskPermissionChoice] =
+  const [newTaskPermissionChoice, setNewTaskPermissionChoice, clearNewTaskPermissionChoice] =
     useNewTaskChoice<ChatDefaultPermissionMode>(currentNewTaskDraftKey);
   const [historyLoadPendingSessionId, setHistoryLoadPendingSessionId] = useState<string>();
   const [transcriptTurnIndex, setTranscriptTurnIndex] = useState<{
@@ -588,8 +588,8 @@ function AppShellContent({
     uiLocaleUpdateGate,
     userLabel,
     setUserLabel,
-    defaultPermissionMode,
-    setDefaultPermissionMode,
+
+
     refreshShellSettings,
   } = useShellAppearance({
     toastApi,
@@ -602,10 +602,16 @@ function AppShellContent({
   const desktopConversationCopy = getDesktopConversationCopy(uiLocale);
   const terminalPanelCopy = desktopConversationCopy.terminalPanel;
   const workbarCopy = desktopConversationCopy.workbar;
+  /**
+   * What this draft would start in: the user's choice for it if they made one,
+   * otherwise the Host default it will inherit by omission.
+   *
+   * The choice stays local to the draft. Picking Full access for one task is
+   * not a statement about every later task, so it is sent once on create and
+   * never written back to `chatDefaults` — the Settings surface owns that.
+   */
   const newTaskPermissionMode =
-    newTaskPermissionChoice ??
-    newTask.selectedHost?.chatDefaults.permissionMode ??
-    'ask';
+    newTaskPermissionChoice ?? newTask.selectedHost?.chatDefaults.permissionMode ?? 'ask';
   const setNewTaskPermissionMode = setNewTaskPermissionChoice;
   useEffect(() => {
     if (!isAppUpdateInstallFailure(appUpdateStatus)) {
@@ -1386,7 +1392,7 @@ function AppShellContent({
       ? pendingSessionView({
           sessionId: activeId,
           name: shellCopy.newConversation,
-          permissionMode: defaultPermissionMode,
+          permissionMode: newTaskPermissionMode,
         })
       : undefined);
   // Each control reads its own field. There is nothing to project and nothing
@@ -2205,7 +2211,8 @@ function AppShellContent({
     upsertSessionSummary,
     newChatModel: newChatModel ?? null,
     pendingNewChatThinkingLevel: newChatThinkingLevel ?? null,
-    newChatPermissionMode: newTaskPermissionMode,
+    newChatPermissionChoice: newTaskPermissionChoice,
+    clearNewChatPermissionChoice: clearNewTaskPermissionChoice,
     newChatCollaborationMode: newChatPlanModeActive ? 'plan' : 'agent',
     newChatOrchestrationMode: newChatOrchestrationMode,
     newTaskTarget: newTask.target,
@@ -3780,7 +3787,9 @@ function AppShellContent({
         setUiLocalePreference={setUiLocalePreference}
         uiLocaleUpdateGate={uiLocaleUpdateGate}
         setUserLabel={setUserLabel}
-        setDefaultPermissionMode={setDefaultPermissionMode}
+        refreshChatDefaults={() => {
+          void newTask.refresh();
+        }}
         settingsRequestedSection={settingsRequestedSection}
         settingsProviderCatalogOpen={settingsProviderCatalogOpen}
         settingsConnectionDetailSlug={settingsConnectionDetailSlug}
