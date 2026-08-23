@@ -205,47 +205,44 @@ test('the pointer is always on a tick while it travels down the rail', async ({
   // effect drops out and picks up again every few pixels of travel. Walked a
   // pixel at a time rather than sampled between two ticks: a single midpoint
   // would pass on a rail whose gaps sat anywhere else.
-  const travel = await page.evaluate(() => {
-    const ticks = [...document.querySelectorAll('.maka-prompt-rail-tick')];
-    if (ticks.length < 2) throw new Error('the prompt rail needs at least two ticks');
-    const first = ticks[0]!.getBoundingClientRect();
-    const last = ticks[ticks.length - 1]!.getBoundingClientRect();
-    const x = Math.round(first.left + first.width / 2);
-    const describe = (found: Element | null) =>
-      found instanceof Element
-        ? `${found.tagName.toLowerCase()}.${found.className.toString().trim().replace(/\s+/g, '.')}`
-        : 'null';
-    const probe = (y: number) => {
-      const found = document.elementFromPoint(x, y);
-      return {
-        tick: Boolean(found?.closest('.maka-prompt-rail-tick')),
-        rail: Boolean(found?.closest('.maka-prompt-rail')),
-        hit: describe(found),
-      };
-    };
-    // The whole painted column must be user-reachable. Trimming a titlebar-
-    // covered prefix here would make this test certify only the surviving
-    // middle of a broken rail.
-    const startY = Math.round(first.top + first.height / 2);
-    const endY = Math.round(last.top + last.height / 2);
-    const misses: Array<{ y: number; hit: string }> = [];
-    for (let y = startY; y <= endY; y += 1) {
-      const found = probe(y);
-      if (!found.tick) misses.push({ y, hit: found.hit });
-    }
-    return {
-      insideViewport: startY >= 0 && endY < window.innerHeight,
-      misses: misses.length,
-      span: endY - startY,
-      sample: misses.slice(0, 3),
-    };
-  });
-
-  expect(travel.span).toBeGreaterThan(0);
-  expect(travel, `rail travel hits ${JSON.stringify(travel.sample)}`).toMatchObject({
-    insideViewport: true,
-    misses: 0,
-  });
+  // The fixture readiness marker can paint before ResizeObserver publishes the
+  // rail's scrollport geometry on a cold macOS runner. Poll the actual hit-test
+  // contract so a slow first layout does not masquerade as a permanent gap.
+  await expect
+    .poll(async () => {
+      const travel = await page.evaluate(() => {
+        const ticks = [...document.querySelectorAll('.maka-prompt-rail-tick')];
+        if (ticks.length < 2) throw new Error('the prompt rail needs at least two ticks');
+        const first = ticks[0]!.getBoundingClientRect();
+        const last = ticks[ticks.length - 1]!.getBoundingClientRect();
+        const x = Math.round(first.left + first.width / 2);
+        const describe = (found: Element | null) =>
+          found instanceof Element
+            ? `${found.tagName.toLowerCase()}.${found.className.toString().trim().replace(/\s+/g, '.')}`
+            : 'null';
+        const startY = Math.round(first.top + first.height / 2);
+        const endY = Math.round(last.top + last.height / 2);
+        const misses: Array<{ y: number; hit: string }> = [];
+        for (let y = startY; y <= endY; y += 1) {
+          const found = document.elementFromPoint(x, y);
+          if (!found?.closest('.maka-prompt-rail-tick')) {
+            misses.push({ y, hit: describe(found) });
+          }
+        }
+        return {
+          insideViewport: startY >= 0 && endY < window.innerHeight,
+          misses: misses.length,
+          hasSpan: endY > startY,
+          sample: misses.slice(0, 3),
+        };
+      });
+      return travel;
+    }, { message: 'the full prompt rail column becomes continuously user-reachable' })
+    .toMatchObject({
+      insideViewport: true,
+      misses: 0,
+      hasSpan: true,
+    });
 });
 
 test('the first click of a session lands on its prompt and holds', async ({
