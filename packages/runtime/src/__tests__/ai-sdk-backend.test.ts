@@ -12229,7 +12229,9 @@ function structuredSummary(body: string): string {
 describe('AiSdkBackend steering durability and identity', () => {
   const steeringBackend = (
     model: MockLanguageModelV4,
-    options: Partial<Pick<AiSdkBackendInput, 'supportsVision' | 'readAttachmentBytes'>> = {},
+    options: Partial<
+      Pick<AiSdkBackendInput, 'supportsVision' | 'readAttachmentBytes' | 'loadTurnRuntimeEvents'>
+    > = {},
   ): AiSdkBackend =>
     createTestAiSdkBackend({
       sessionId: 'session-1',
@@ -12266,6 +12268,128 @@ describe('AiSdkBackend steering durability and identity', () => {
       if (event.type === 'steering_message') return event;
     }
   };
+
+  test('injects a steer that arrives after the turn last tool-call boundary', async () => {
+    // A tool-free turn runs exactly one provider step, and the top-of-loop
+    // drain happens before the model has said anything — so a steer typed
+    // while the answer streams has no boundary left to land on. Whether
+    // "Steer" works at all must not depend on the model happening to call a
+    // tool afterwards (#3529).
+    const model = textCompletionModel('the first answer');
+    const durable = durableTurnHarness('turn-1', 'start');
+    const backend = steeringBackend(model, {
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+    });
+    const acked: string[] = [];
+    const nacked: string[] = [];
+    let pulls = 0;
+    const events = await drainDurably(
+      backend.send(
+        durable.input({
+          pullSteering: () => {
+            pulls += 1;
+            // Nothing to take before the model speaks; the interjection lands
+            // while the first (and only) step is streaming.
+            if (pulls !== 2) return [];
+            return [
+              { id: 'lease-late', messageId: 'message-late', content: { text: 'late steer' } },
+            ];
+          },
+          ackSteering: (leaseIds: readonly string[]) => acked.push(...leaseIds),
+          nackSteering: (leaseIds: readonly string[]) => nacked.push(...leaseIds),
+        }),
+      ),
+      durable,
+    );
+
+    const steering = events.filter((event) => event.type === 'steering_message');
+    assert.equal(steering.length, 1);
+    assert.deepEqual(acked, ['lease-late']);
+    assert.deepEqual(nacked, []);
+    // Echoing the message is not the point — the model has to be asked again
+    // with it. Draining without taking another step would satisfy every
+    // assertion above while the user still never gets an answer.
+    assert.equal(model.doStreamCalls.length, 2);
+    const secondPrompt = JSON.stringify(model.doStreamCalls[1]?.prompt);
+    assert.match(secondPrompt, /late steer/);
+    // …and it has to carry what the model just said, or the correction lands on
+    // work the model cannot see.
+    assert.match(secondPrompt, /the first answer/);
+  });
+
+  test('the late-steer edge is skipped without a durable current-run reader', async () => {
+    // The no-reader projection at the top of the loop appends steering alone —
+    // it never appends the assistant output of the step just finished. Taking
+    // the continuation edge there would ask the model to redirect work it
+    // cannot see, so the edge requires the reader the way the tool-call edge
+    // does. The turn still completes; the Host folds the message into the next
+    // Turn, which is the behaviour before #3529.
+    const model = textCompletionModel('the first answer');
+    const backend = steeringBackend(model);
+    const acked: string[] = [];
+    let pulls = 0;
+    const events: SessionEvent[] = [];
+    for await (const event of backend.send({
+      turnId: 'turn-1',
+      text: 'start',
+      context: [],
+      pullSteering: () => {
+        pulls += 1;
+        if (pulls !== 2) return [];
+        return [{ id: 'lease-late', messageId: 'message-late', content: { text: 'late steer' } }];
+      },
+      ackSteering: (leaseIds) => acked.push(...leaseIds),
+    })) {
+      events.push(event);
+    }
+
+    assert.equal(model.doStreamCalls.length, 1);
+    assert.equal(events.filter((event) => event.type === 'steering_message').length, 0);
+    assert.deepEqual(acked, []);
+  });
+
+  test('a stop that lands during the final drain wins over the injected steer', async () => {
+    // The final drain awaits a durable push, so an `after_step` stop can arrive
+    // while it is in flight. Deciding to take another step from flags read
+    // BEFORE that await would spend a provider step the user already stopped —
+    // which is precisely what `after_step` exists to prevent.
+    const model = textCompletionModel('done');
+    const durable = durableTurnHarness('turn-1', 'start');
+    // The reader has to be present, or the edge is skipped for that reason
+    // instead and this test would pass while exercising nothing.
+    const backend = steeringBackend(model, {
+      loadTurnRuntimeEvents: durable.loadTurnRuntimeEvents,
+    });
+    let pulls = 0;
+    const iterator = backend
+      .send(
+        durable.input({
+          pullSteering: () => {
+            pulls += 1;
+            if (pulls !== 2) return [];
+            return [
+              { id: 'lease-late', messageId: 'message-late', content: { text: 'late steer' } },
+            ];
+          },
+          ackSteering: () => {},
+        }),
+      )
+      [Symbol.asyncIterator]();
+
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) break;
+      const event = next.value as SessionEvent;
+      durable.record(event);
+      // Consuming the echo is what resolves the drain's push, so the stop lands
+      // in the window between that resolution and the post-drain decision.
+      if (event.type === 'steering_message') await backend.stop('user_stop', 'after_step');
+    }
+
+    // The steer was still delivered — it is durable and the Host will carry it
+    // into the next Turn — but no further provider step was dispatched.
+    assert.equal(model.doStreamCalls.length, 1);
+  });
 
   test('holds the provider request until the steering event is durably consumed', async () => {
     // Persist-before-include: the initial user message is durable before the
