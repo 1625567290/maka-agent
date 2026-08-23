@@ -133,17 +133,22 @@ function inferExpressionValue(expression, scope) {
   const unwrapped = unwrapExpression(expression);
   if (isStaticRawSize(unwrapped, scope)) return 'raw-size';
   if (unwrapped.type === 'Identifier') return resolveBinding(scope, unwrapped.name);
-  if (
-    unwrapped.type === 'MemberExpression' &&
-    !unwrapped.computed &&
-    unwrapped.property.type === 'Identifier'
-  ) {
+  if (unwrapped.type === 'MemberExpression') {
     const object = inferExpressionValue(unwrapped.object, scope);
-    if (object === 'namespace') {
+    if (!unwrapped.computed && unwrapped.property.type === 'Identifier' && object === 'namespace') {
       return ICON_METADATA_EXPORTS.has(unwrapped.property.name) ? 'not-icon' : 'icon';
     }
     if (object?.kind === 'record') {
-      return object.properties.get(unwrapped.property.name) ?? 'unknown';
+      if (!unwrapped.computed && unwrapped.property.type === 'Identifier') {
+        return object.properties.get(unwrapped.property.name) ?? 'unknown';
+      }
+      if (unwrapped.computed && unwrapped.property.type === 'StringLiteral') {
+        return object.properties.get(unwrapped.property.value) ?? 'unknown';
+      }
+      const values = [...object.properties.values()];
+      if (object.closed && values.length > 0 && values.every((value) => value === 'icon')) {
+        return 'icon';
+      }
     }
   }
   if (unwrapped.type === 'ConditionalExpression') {
@@ -154,12 +159,20 @@ function inferExpressionValue(expression, scope) {
   }
   if (unwrapped.type === 'ObjectExpression') {
     const properties = new Map();
+    let closed = true;
     for (const property of unwrapped.properties) {
-      if (property.type !== 'ObjectProperty' || property.computed) continue;
+      if (property.type !== 'ObjectProperty' || property.computed) {
+        closed = false;
+        continue;
+      }
       const name = propertyName(property.key);
-      if (name !== undefined) properties.set(name, inferExpressionValue(property.value, scope));
+      if (name === undefined) {
+        closed = false;
+        continue;
+      }
+      properties.set(name, inferExpressionValue(property.value, scope));
     }
-    return { kind: 'record', properties };
+    return { kind: 'record', properties, closed };
   }
   if (unwrapped.type === 'ArrayExpression') {
     const elements = unwrapped.elements

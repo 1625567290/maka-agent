@@ -102,6 +102,39 @@ test('tracks icon provenance through Object.entries, flatMap, and destructured m
   );
 });
 
+test('tracks computed lookups into statically closed icon records', () => {
+  assert.deepEqual(
+    expressions(`
+      import { AlertCircle, CheckCircle2 } from '@maka/ui/icons';
+      const STATUS_ICONS = {
+        failed: AlertCircle,
+        completed: CheckCircle2,
+      } satisfies Record<TaskStatus, typeof AlertCircle>;
+      export const Example = ({ status }) => {
+        const StatusIcon = STATUS_ICONS[status];
+        return <StatusIcon size={13} />;
+      };
+    `),
+    ['size={13}'],
+  );
+});
+
+test('does not infer dynamic lookups from mixed or open records as icons', () => {
+  assert.deepEqual(
+    expressions(`
+      import { AlertCircle } from '@maka/ui/icons';
+      const MIXED = { failed: AlertCircle, completed: Avatar };
+      const OPEN = { failed: AlertCircle, ...extra };
+      export const Example = ({ status }) => {
+        const Mixed = MIXED[status];
+        const Open = OPEN[status];
+        return <><Mixed size={13} /><Open size={13} /></>;
+      };
+    `),
+    [],
+  );
+});
+
 test('does not treat shadowed or unrelated local tags as icons', () => {
   assert.deepEqual(
     expressions(`
