@@ -163,6 +163,82 @@ def docker_image_present(image: str) -> bool:
     return inspect.returncode == 0
 
 
+def finish_memory_bio_handshake(tls, incoming, outgoing, sock, timeout_s: float) -> str:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            tls.do_handshake()
+        except ssl.SSLWantReadError:
+            # Processing a server flight can produce the next client flight
+            # before OpenSSL asks for more input. Flush it now; waiting for
+            # another recv first deadlocks both peers.
+            pending = outgoing.read()
+            if pending:
+                sock.sendall(pending)
+            response = sock.recv(16 * 1024)
+            if not response:
+                raise AssertionError("proxy closed during the fragmented TLS handshake")
+            incoming.write(response)
+            continue
+        pending = outgoing.read()
+        if pending:
+            sock.sendall(pending)
+        return tls.version() or ""
+    raise AssertionError("fragmented TLS handshake did not complete")
+
+
+class MemoryBioHandshakeDriverTest(unittest.TestCase):
+    def test_flushes_client_flight_before_waiting_for_more_server_bytes(self) -> None:
+        events = []
+
+        class FakeOutgoing:
+            pending = b""
+
+            def read(self):
+                pending, self.pending = self.pending, b""
+                return pending
+
+        class FakeIncoming:
+            def write(self, data):
+                events.append(("write", data))
+
+        outgoing = FakeOutgoing()
+
+        class FakeTls:
+            calls = 0
+
+            def do_handshake(self):
+                self.calls += 1
+                if self.calls == 1:
+                    outgoing.pending = b"client-finished"
+                    raise ssl.SSLWantReadError()
+
+            def version(self):
+                return "TLSv1.3"
+
+        class FakeSocket:
+            def sendall(self, data):
+                events.append(("send", data))
+
+            def recv(self, _size):
+                events.append(("recv", None))
+                return b"server-finished"
+
+        result = finish_memory_bio_handshake(
+            FakeTls(), FakeIncoming(), outgoing, FakeSocket(), timeout_s=1
+        )
+
+        self.assertEqual(result, "TLSv1.3")
+        self.assertEqual(
+            events,
+            [
+                ("send", b"client-finished"),
+                ("recv", None),
+                ("write", b"server-finished"),
+            ],
+        )
+
+
 @unittest.skipUnless(
     os.environ.get("MAKA_EVAL_EGRESS_PROXY_TEST") == "1",
     "set MAKA_EVAL_EGRESS_PROXY_TEST=1 to run the live mitmproxy proxy test",
@@ -380,23 +456,7 @@ class LiveEgressFilterTest(unittest.TestCase):
             time.sleep(0.05)
             sock.sendall(client_hello[first_fragment_size:])
             sock.settimeout(10)
-            deadline = time.time() + 20
-            while time.time() < deadline:
-                pending = outgoing.read()
-                if pending:
-                    sock.sendall(pending)
-                try:
-                    tls.do_handshake()
-                    pending = outgoing.read()
-                    if pending:
-                        sock.sendall(pending)
-                    return tls.version() or ""
-                except ssl.SSLWantReadError:
-                    response = sock.recv(16 * 1024)
-                    if not response:
-                        raise AssertionError("proxy closed during the fragmented TLS handshake")
-                    incoming.write(response)
-        raise AssertionError("fragmented TLS handshake did not complete")
+            return finish_memory_bio_handshake(tls, incoming, outgoing, sock, timeout_s=20)
 
     @classmethod
     def audit_records(cls) -> list[dict[str, object]]:
