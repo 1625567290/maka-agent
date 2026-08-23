@@ -470,17 +470,13 @@ export function createMainWindowController(deps: MainWindowControllerDeps): Main
       }, 400);
     };
     const scheduleMaximizedRendererSync = createWindowsMaximizeRendererSync(mainWindow);
-    const handleResize = (): void => {
+    const handleWindowGeometryChange = (): void => {
       scheduleSave();
       scheduleMaximizedRendererSync();
     };
-    const handleMaximize = (): void => {
-      scheduleSave();
-      scheduleMaximizedRendererSync();
-    };
-    mainWindow.on('resize', handleResize);
+    mainWindow.on('resize', handleWindowGeometryChange);
     mainWindow.on('move', scheduleSave);
-    mainWindow.on('maximize', handleMaximize);
+    mainWindow.on('maximize', handleWindowGeometryChange);
     mainWindow.on('unmaximize', scheduleSave);
     mainWindow.on('close', () => {
       clearShowFallbackTimer();
