@@ -211,28 +211,43 @@ test('the pointer is always on a tick while it travels down the rail', async ({
   await expect
     .poll(async () => {
       const travel = await page.evaluate(() => {
-        const ticks = [...document.querySelectorAll('.maka-prompt-rail-tick')];
+        const ticks = [...document.querySelectorAll<HTMLElement>('.maka-prompt-rail-tick')];
         if (ticks.length < 2) throw new Error('the prompt rail needs at least two ticks');
-        const first = ticks[0]!.getBoundingClientRect();
-        const last = ticks[ticks.length - 1]!.getBoundingClientRect();
-        const x = Math.round(first.left + first.width / 2);
+        const boxes = ticks.map((tick) => tick.getBoundingClientRect());
+        const first = boxes[0]!;
+        const last = boxes[boxes.length - 1]!;
         const describe = (found: Element | null) =>
           found instanceof Element
             ? `${found.tagName.toLowerCase()}.${found.className.toString().trim().replace(/\s+/g, '.')}`
             : 'null';
-        const startY = Math.round(first.top + first.height / 2);
-        const endY = Math.round(last.top + last.height / 2);
-        const misses: Array<{ y: number; hit: string }> = [];
-        for (let y = startY; y <= endY; y += 1) {
-          const found = document.elementFromPoint(x, y);
-          if (!found?.closest('.maka-prompt-rail-tick')) {
-            misses.push({ y, hit: describe(found) });
+        const misses: Array<{ index: number; kind: 'center' | 'seam'; hit: string }> = [];
+        for (const [index, box] of boxes.entries()) {
+          const found = document.elementFromPoint(
+            box.left + box.width / 2,
+            box.top + box.height / 2,
+          );
+          if (found?.closest('.maka-prompt-rail-tick') !== ticks[index]) {
+            misses.push({ index, kind: 'center', hit: describe(found) });
+          }
+        }
+        const gaps = boxes.slice(1).map((box, index) => box.top - boxes[index]!.bottom);
+        for (let index = 0; index < boxes.length - 1; index += 1) {
+          const before = boxes[index]!;
+          const after = boxes[index + 1]!;
+          const found = document.elementFromPoint(
+            before.left + before.width / 2,
+            (before.bottom + after.top) / 2,
+          );
+          const landed = found?.closest('.maka-prompt-rail-tick');
+          if (landed !== ticks[index] && landed !== ticks[index + 1]) {
+            misses.push({ index, kind: 'seam', hit: describe(found) });
           }
         }
         return {
-          insideViewport: startY >= 0 && endY < window.innerHeight,
+          insideViewport: first.top >= 0 && last.bottom <= window.innerHeight,
           misses: misses.length,
-          hasSpan: endY > startY,
+          hasSpan: last.bottom > first.top,
+          continuousBoxes: Math.max(...gaps) <= 0.25,
           sample: misses.slice(0, 3),
         };
       });
@@ -242,6 +257,7 @@ test('the pointer is always on a tick while it travels down the rail', async ({
       insideViewport: true,
       misses: 0,
       hasSpan: true,
+      continuousBoxes: true,
     });
 });
 
