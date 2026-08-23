@@ -1547,8 +1547,14 @@ const makaBridge = {
         attachments: projectDesktopAttachmentRefs(session.scope, result.attachments),
       };
     },
-    retractQueue(sessionId: string): Promise<MessageContent> {
-      return invokeSessionRuntimeHost('sessions:retractQueue', sessionId);
+    retractQueueEntry(sessionId: string, entryId: string): Promise<void> {
+      return invokeSessionRuntimeHost('sessions:retractQueueEntry', sessionId, entryId);
+    },
+    promoteQueueEntry(sessionId: string, entryId: string): Promise<void> {
+      return invokeSessionRuntimeHost('sessions:promoteQueueEntry', sessionId, entryId);
+    },
+    reorderQueueEntries(sessionId: string, entryIds: readonly string[]): Promise<void> {
+      return invokeSessionRuntimeHost('sessions:reorderQueueEntries', sessionId, [...entryIds]);
     },
     readExecutionBoundary(sessionId: string): Promise<ExecutionBoundaryReadModel> {
       return invokeSessionRuntimeHost('sessions:readExecutionBoundary', sessionId);
