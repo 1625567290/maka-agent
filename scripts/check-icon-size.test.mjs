@@ -1,3 +1,22 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { findRawIconSizes } from './check-icon-size.mjs';
@@ -48,6 +67,38 @@ test('rejects numeric string sizes on icon tags', () => {
       export const Example = () => <Search size="16" />;
     `),
     ['size="16"'],
+  );
+});
+
+test('rejects statically provable expressions, passthroughs, and props spreads', () => {
+  assert.deepEqual(
+    expressions(`
+      import { Search } from '@maka/ui/icons';
+      const raw = 8 + 8;
+      const props = { size: '16' };
+      export const Example = () => <>
+        <Search size={'16'} />
+        <Search size={\`16\`} />
+        <Search size={8 + 8} />
+        <Search size={raw} />
+        <Search size={props.size} />
+        <Search {...props} />
+      </>;
+    `),
+    ["size={'16'}", 'size={`16`}', 'size={8 + 8}', 'size={raw}', 'size={props.size}', '{...props}'],
+  );
+});
+
+test('tracks icon provenance through Object.entries, flatMap, and destructured map callbacks', () => {
+  assert.deepEqual(
+    expressions(`
+      import * as Icons from '@maka/ui/icons';
+      const ICONS = Object.entries(Icons)
+        .flatMap(([name, value]) => value ? [{ name, Comp: value }] : [])
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      export const Example = () => ICONS.map(({ Comp }) => <Comp size={20} />);
+    `),
+    ['size={20}'],
   );
 });
 
