@@ -958,7 +958,10 @@ async function acquirePreparedRuntimeHostRootRetirementFence(
   while (Date.now() < deadline) {
     const owner = await tryAcquireInteractiveRootOwner(root);
     const status = await backend.status();
-    if (status.pid !== null && status.pid !== expectedPid) {
+    if (
+      status.pid !== expectedPid &&
+      !(status.pid === null && !status.active && status.state === 'stopped')
+    ) {
       await owner?.close().catch(() => undefined);
       throw new RuntimeHostServiceManagerError(
         'retirement_failed',

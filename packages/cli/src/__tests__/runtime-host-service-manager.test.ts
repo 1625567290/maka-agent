@@ -888,6 +888,7 @@ describe('managed Runtime Host service', () => {
     let startingPid: number | null = null;
     let stops = 0;
     let observedStartingFence = false;
+    let publishPidlessSuccessor = false;
     const backend: RuntimeHostServiceBackend = {
       ...createReadyBackend(),
       status: async () => ({
@@ -930,6 +931,10 @@ describe('managed Runtime Host service', () => {
         allow: boolean,
       ) => {
         assert.equal(expectedPid, 42);
+        if (publishPidlessSuccessor) {
+          serviceState = 'starting';
+          startingPid = null;
+        }
         return allow
           ? ({ kind: 'prepared', hostEpoch: 'host-1', pid: 42 } as const)
           : ({ kind: 'active_tasks' } as const);
@@ -1018,6 +1023,26 @@ describe('managed Runtime Host service', () => {
       pid: 42,
     });
     assert.equal(serviceState, 'stopped');
+
+    serviceState = 'running';
+    publishPidlessSuccessor = true;
+    const stopsBeforeSuccessor = stops;
+    await assert.rejects(
+      manageRuntimeHostService(
+        {
+          ...common,
+          action: 'retire',
+          expectedTarget,
+          allowInterruptActiveTasks: true,
+        },
+        backend,
+        deps,
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeHostServiceManagerError && error.code === 'retirement_failed',
+    );
+    assert.equal(stops, stopsBeforeSuccessor);
+    assert.equal(serviceState, 'starting');
   });
 
   it('fails closed without stopping a successor that won the State Root', async (t) => {
