@@ -240,6 +240,24 @@ class EgressFilterTest(unittest.TestCase):
         MODULE.next_layer(tls)
         self.assertIsNone(tls.layer)
 
+        for first, remainder in (
+            (b"\x16", b"\x03\x01\x00\x00"),
+            (b"\x16\x03", b"\x01\x00\x00"),
+        ):
+            with self.subTest(tls_prefix=first):
+                buffered = bytearray(first)
+                fragmented = SimpleNamespace(
+                    layer=None,
+                    context=context,
+                    data_client=lambda: bytes(buffered),
+                    data_server=lambda: b"",
+                )
+                MODULE.next_layer(fragmented)
+                self.assertIsNone(fragmented.layer)
+                buffered.extend(remainder)
+                MODULE.next_layer(fragmented)
+                self.assertIsNone(fragmented.layer)
+
         http = SimpleNamespace(
             layer=None,
             context=context,

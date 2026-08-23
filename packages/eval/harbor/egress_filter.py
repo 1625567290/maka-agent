@@ -256,13 +256,20 @@ def looks_like_raw_tcp(nextlayer: object) -> bool:
     """
     data_client = _next_layer_bytes(nextlayer, "data_client")
     data_server = _next_layer_bytes(nextlayer, "data_server")
-    if starts_like_tls_record(data_client):
+    if _could_start_tls_record(data_client):
         return False
     if not data_client and not data_server:
         return False
     if data_server or data_client.startswith(b"SSH"):
         return True
     return not _still_could_be_http(data_client)
+
+
+def _could_start_tls_record(data: bytes) -> bool:
+    """Keep a fragmented ClientHello undecided until its 3-byte prefix exists."""
+    if starts_like_tls_record(data):
+        return True
+    return 0 < len(data) < 3 and b"\x16\x03".startswith(data)
 
 
 def _still_could_be_http(data: bytes) -> bool:

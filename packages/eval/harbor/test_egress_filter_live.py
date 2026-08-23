@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -50,7 +51,7 @@ ORIGIN_SCRIPT = r"""
 import base64, hashlib, json, socket, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-stats = {"raw_recv": 0, "upgrade_recv": 0}
+stats = {"raw_recv": 0, "raw_closed": 0, "upgrade_recv": 0, "upgrade_closed": 0}
 
 class HttpHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -98,6 +99,8 @@ class UpgradeHandler(BaseHTTPRequestHandler):
                 stats["upgrade_recv"] += len(chunk)
         except OSError:
             pass
+        finally:
+            stats["upgrade_closed"] += 1
     def log_message(self, format, *args):
         return
 
@@ -119,6 +122,7 @@ def serve_raw():
         except OSError:
             pass
         finally:
+            stats["raw_closed"] += 1
             conn.close()
 
 class StatsHandler(BaseHTTPRequestHandler):
@@ -305,12 +309,17 @@ class LiveEgressFilterTest(unittest.TestCase):
         return data
 
     @classmethod
-    def http_via_proxy(cls, port: int, extra_headers: str = "") -> bytes:
+    def http_via_proxy(
+        cls,
+        port: int,
+        extra_headers: str = "",
+        connection: str = "close",
+    ) -> bytes:
         request = (
             f"GET http://origin:{port}/ HTTP/1.1\r\n"
             f"Host: origin:{port}\r\n"
             f"{extra_headers}"
-            "Connection: close\r\n\r\n"
+            f"Connection: {connection}\r\n\r\n"
         ).encode()
         with socket.create_connection(("127.0.0.1", cls.proxy_port), 5) as sock:
             sock.sendall(request)
@@ -336,6 +345,58 @@ class LiveEgressFilterTest(unittest.TestCase):
             except OSError:
                 return header, leftover
             return header, leftover + cls._recv_until_close(sock)
+
+    @classmethod
+    def fragmented_tls_via_proxy(cls, first_fragment_size: int) -> str:
+        incoming = ssl.MemoryBIO()
+        outgoing = ssl.MemoryBIO()
+        tls = ssl.create_default_context().wrap_bio(
+            incoming,
+            outgoing,
+            server_side=False,
+            server_hostname="example.com",
+        )
+        try:
+            tls.do_handshake()
+        except ssl.SSLWantReadError:
+            pass
+        client_hello = outgoing.read()
+        if len(client_hello) <= first_fragment_size:
+            raise AssertionError("TLS ClientHello was unexpectedly short")
+
+        with socket.create_connection(("127.0.0.1", cls.proxy_port), 5) as sock:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.sendall(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            header = b""
+            while b"\r\n\r\n" not in header:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise AssertionError("proxy closed before the CONNECT response")
+                header += chunk
+            if b" 200 " not in header.split(b"\r\n", 1)[0]:
+                raise AssertionError(header.decode("latin1", errors="replace"))
+
+            sock.sendall(client_hello[:first_fragment_size])
+            time.sleep(0.05)
+            sock.sendall(client_hello[first_fragment_size:])
+            sock.settimeout(10)
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                pending = outgoing.read()
+                if pending:
+                    sock.sendall(pending)
+                try:
+                    tls.do_handshake()
+                    pending = outgoing.read()
+                    if pending:
+                        sock.sendall(pending)
+                    return tls.version() or ""
+                except ssl.SSLWantReadError:
+                    response = sock.recv(16 * 1024)
+                    if not response:
+                        raise AssertionError("proxy closed during the fragmented TLS handshake")
+                    incoming.write(response)
+        raise AssertionError("fragmented TLS handshake did not complete")
 
     @classmethod
     def audit_records(cls) -> list[dict[str, object]]:
@@ -377,6 +438,17 @@ class LiveEgressFilterTest(unittest.TestCase):
             raise AssertionError(listed.stderr)
         return json.loads(listed.stdout)
 
+    @classmethod
+    def wait_for_origin_counter(cls, key: str, minimum: int) -> dict[str, int]:
+        deadline = time.time() + CLOSE_TIMEOUT_S
+        last = cls.origin_stats()
+        while time.time() < deadline:
+            if last.get(key, 0) >= minimum:
+                return last
+            time.sleep(0.05)
+            last = cls.origin_stats()
+        raise AssertionError(f"origin counter {key} did not reach {minimum}: {last}")
+
     def test_https_and_plain_http_still_forward(self) -> None:
         http = self.http_via_proxy(19080)
         self.assertIn(b"http-ok", http)
@@ -403,27 +475,42 @@ class LiveEgressFilterTest(unittest.TestCase):
         )
         self.assertEqual(curl.stdout, "200", curl.stderr)
 
+    def test_fragmented_tls_record_prefix_still_handshakes(self) -> None:
+        for first_fragment_size in (1, 2):
+            with self.subTest(first_fragment_size=first_fragment_size):
+                self.assertTrue(
+                    self.fragmented_tls_via_proxy(first_fragment_size).startswith("TLS")
+                )
+
     def test_connect_to_a_blocklisted_host_is_451(self) -> None:
         header, _ = self.connect_via_proxy("tbench.ai", 443, b"")
         self.assertIn(b"451", header.split(b"\r\n", 1)[0])
         self.assertIn(b"tbench_domain", header)
 
     def test_raw_connect_relays_no_bytes_and_is_audited(self) -> None:
+        closed_before = self.origin_stats()["raw_closed"]
         header, body = self.connect_via_proxy("origin", 19081)
         self.assertIn(b"200", header.split(b"\r\n", 1)[0])
         self.assertNotIn(b"RAW-BANNER", body)
         self.assertEqual(body, b"")
-        self.assertEqual(self.origin_stats()["raw_recv"], 0)
+        stats = self.wait_for_origin_counter("raw_closed", closed_before + 1)
+        self.assertEqual(stats["raw_recv"], 0)
         self.assertIn(
             {"host": "origin", "normalizedPath": ":19081", "ruleId": "raw_tunnel"},
             [{key: record.get(key) for key in ("host", "normalizedPath", "ruleId")} for record in self.audit_records()],
         )
 
     def test_http_101_raw_upgrade_is_audited_without_relaying_the_banner(self) -> None:
-        data = self.http_via_proxy(19083)
+        closed_before = self.origin_stats()["upgrade_closed"]
+        data = self.http_via_proxy(
+            19083,
+            extra_headers="Upgrade: raw\r\n",
+            connection="Upgrade",
+        )
         self.assertIn(b"101", data.split(b"\r\n", 1)[0])
         self.assertNotIn(b"UPGRADE-BANNER", data)
-        self.assertEqual(self.origin_stats()["upgrade_recv"], 0)
+        stats = self.wait_for_origin_counter("upgrade_closed", closed_before + 1)
+        self.assertEqual(stats["upgrade_recv"], 0)
         self.assertIn(
             {"host": "origin", "normalizedPath": ":19083", "ruleId": "raw_tunnel"},
             [{key: record.get(key) for key in ("host", "normalizedPath", "ruleId")} for record in self.audit_records()],
@@ -435,10 +522,10 @@ class LiveEgressFilterTest(unittest.TestCase):
             19082,
             extra_headers=(
                 "Upgrade: websocket\r\n"
-                "Connection: Upgrade\r\n"
                 f"Sec-WebSocket-Key: {key}\r\n"
                 "Sec-WebSocket-Version: 13\r\n"
             ),
+            connection="Upgrade",
         )
         self.assertIn(b"101", data.split(b"\r\n", 1)[0])
         self.assertIn(b"ws-ok", data)
