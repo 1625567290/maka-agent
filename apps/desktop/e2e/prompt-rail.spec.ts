@@ -202,9 +202,10 @@ test('the pointer is always on a tick while it travels down the rail', async ({
 }) => {
   // The hover falloff reads which tick the pointer entered. A gap between the
   // hit boxes is a band where it is over the rail and over no tick, so the
-  // effect drops out and picks up again every few pixels of travel. Walked a
-  // pixel at a time rather than sampled between two ticks: a single midpoint
-  // would pass on a rail whose gaps sat anywhere else.
+  // effect drops out and picks up again every few pixels of travel. Walk the
+  // fractional CSS-pixel path as well as every box centre and seam: integer
+  // rounding can place a narrow rail's x coordinate on its outside edge, while
+  // sparse midpoint sampling could miss an intercept elsewhere.
   // The fixture readiness marker can paint before ResizeObserver publishes the
   // rail's scrollport geometry on a cold macOS runner. Poll the actual hit-test
   // contract so a slow first layout does not masquerade as a permanent gap.
@@ -220,14 +221,25 @@ test('the pointer is always on a tick while it travels down the rail', async ({
           found instanceof Element
             ? `${found.tagName.toLowerCase()}.${found.className.toString().trim().replace(/\s+/g, '.')}`
             : 'null';
-        const misses: Array<{ index: number; kind: 'center' | 'seam'; hit: string }> = [];
+        type Miss = {
+          index: number;
+          kind: 'center' | 'seam' | 'path';
+          hit: string;
+          y?: number;
+        };
+        let missCount = 0;
+        const sample: Miss[] = [];
+        const recordMiss = (miss: Miss) => {
+          missCount += 1;
+          if (sample.length < 3) sample.push(miss);
+        };
         for (const [index, box] of boxes.entries()) {
           const found = document.elementFromPoint(
             box.left + box.width / 2,
             box.top + box.height / 2,
           );
           if (found?.closest('.maka-prompt-rail-tick') !== ticks[index]) {
-            misses.push({ index, kind: 'center', hit: describe(found) });
+            recordMiss({ index, kind: 'center', hit: describe(found) });
           }
         }
         const gaps = boxes.slice(1).map((box, index) => box.top - boxes[index]!.bottom);
@@ -240,15 +252,24 @@ test('the pointer is always on a tick while it travels down the rail', async ({
           );
           const landed = found?.closest('.maka-prompt-rail-tick');
           if (landed !== ticks[index] && landed !== ticks[index + 1]) {
-            misses.push({ index, kind: 'seam', hit: describe(found) });
+            recordMiss({ index, kind: 'seam', hit: describe(found) });
+          }
+        }
+        const x = first.left + first.width / 2;
+        const startY = first.top + first.height / 2;
+        const endY = last.top + last.height / 2;
+        for (let y = startY, index = 0; y <= endY; y += 0.25, index += 1) {
+          const found = document.elementFromPoint(x, y);
+          if (!found?.closest('.maka-prompt-rail-tick')) {
+            recordMiss({ index, kind: 'path', y, hit: describe(found) });
           }
         }
         return {
           insideViewport: first.top >= 0 && last.bottom <= window.innerHeight,
-          misses: misses.length,
+          misses: missCount,
           hasSpan: last.bottom > first.top,
           continuousBoxes: Math.max(...gaps) <= 0.25,
-          sample: misses.slice(0, 3),
+          sample,
         };
       });
       return travel;
