@@ -190,6 +190,7 @@ export interface SessionMetadataRecord {
 }
 
 export interface SessionMetadataCatalogRecord extends SessionMetadataRecord {
+  readonly activityAt: number;
   readonly lastMessagePreview?: string;
 }
 
@@ -1039,6 +1040,7 @@ export class SqliteSessionMetadataStore {
           metadata.payload_json,
           metadata.metadata_version,
           metadata.committed_at,
+          projection.activity_at,
           projection.last_message_preview
         FROM session_catalog_projection projection
         JOIN session_metadata metadata
@@ -1263,9 +1265,11 @@ export class SqliteSessionMetadataStore {
         SELECT session_id, payload_json, metadata_version, committed_at
         FROM session_metadata metadata
         ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
-        ORDER BY
-          COALESCE(last_message_at, last_used_at, created_at) DESC,
-          session_id ASC
+        ORDER BY (
+          SELECT activity_at
+          FROM session_catalog_projection projection
+          WHERE projection.session_id = metadata.session_id
+        ) DESC, session_id ASC
       `,
       )
       .all(...parameters) as unknown as SessionMetadataRow[];
@@ -3644,7 +3648,6 @@ export class SqliteSessionMetadataStore {
           session_id,
           payload_json,
           created_at,
-          last_used_at,
           last_message_at,
           name,
           is_flagged,
@@ -3668,14 +3671,13 @@ export class SqliteSessionMetadataStore {
           model,
           metadata_version,
           committed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       )
       .run(
         header.id,
         JSON.stringify(header),
         header.createdAt,
-        header.lastUsedAt,
         header.lastMessageAt ?? null,
         header.name,
         booleanInteger(header.isFlagged),
@@ -3939,7 +3941,6 @@ export class SqliteSessionMetadataStore {
         SET
           payload_json = ?,
           created_at = ?,
-          last_used_at = ?,
           last_message_at = ?,
           name = ?,
           is_flagged = ?,
@@ -3960,7 +3961,6 @@ export class SqliteSessionMetadataStore {
       .run(
         JSON.stringify(next),
         next.createdAt,
-        next.lastUsedAt,
         next.lastMessageAt ?? null,
         next.name,
         booleanInteger(next.isFlagged),
@@ -4977,6 +4977,7 @@ interface OrphanedAgentGraphOperatorRow extends OwnedAgentGraphOperatorRow {
 }
 
 interface SessionMetadataCatalogRow extends SessionMetadataRow {
+  activity_at: number;
   last_message_preview: string | null;
 }
 
@@ -5281,9 +5282,13 @@ function decodeRecord(row: SessionMetadataRow): SessionMetadataRecord {
 }
 
 function decodeCatalogRecord(row: SessionMetadataCatalogRow): SessionMetadataCatalogRecord {
+  if (!Number.isSafeInteger(row.activity_at) || row.activity_at < 0) {
+    throw new Error(`Invalid SQLite Session catalog activity for ${row.session_id}`);
+  }
   const lastMessagePreview = decodeCatalogPreview(row.last_message_preview, row.session_id);
   return {
     ...decodeRecord(row),
+    activityAt: row.activity_at,
     ...(lastMessagePreview === undefined ? {} : { lastMessagePreview }),
   };
 }
