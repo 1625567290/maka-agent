@@ -121,4 +121,23 @@ describe('Windows maximize renderer sync', () => {
 
     assert.deepEqual(fixture.calls, []);
   });
+
+  it('reports a native layout failure without stranding future syncs', () => {
+    const fixture = createFixture();
+    const failure = new Error('native layout failed');
+    const errors: unknown[] = [];
+    fixture.window.setContentView = () => { throw failure; };
+    const schedule = createWindowsMaximizeRendererSync(fixture.window, {
+      platform: 'win32',
+      defer: fixture.defer,
+      reportError: (error) => errors.push(error),
+    });
+
+    schedule();
+    assert.doesNotThrow(() => fixture.deferred.shift()?.());
+    assert.deepEqual(errors, [failure]);
+
+    schedule();
+    assert.equal(fixture.deferred.length, 1);
+  });
 });

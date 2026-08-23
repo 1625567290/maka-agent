@@ -412,10 +412,10 @@ export function rendererViewportMatchesNativeClient(layout, nativeWindow) {
   if (!Number.isFinite(nativeWindow?.clientHeight) || nativeWindow.clientHeight <= 0) return false;
   const widthScale = nativeWindow.clientWidth / layout.innerWidth;
   const heightScale = nativeWindow.clientHeight / layout.innerHeight;
-  return (
-    dimensionsMatch(widthScale, heightScale, 0.01) &&
-    dimensionsMatch(widthScale, layout.devicePixelRatio, 0.05)
-  );
+  // Electron can report CSS or physical viewport pixels depending on the
+  // packaged app's DPI-awareness mode. Proportional agreement with the native
+  // client is the stable contract; equating that scale to DPR is not.
+  return dimensionsMatch(widthScale, heightScale, 0.01);
 }
 
 function windowsWindowProbeScript(processId, nextWindowState, restoredBounds) {

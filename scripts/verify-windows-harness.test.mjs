@@ -126,6 +126,18 @@ describe('rendererLayoutMatchesViewport', () => {
     );
   });
 
+  it('accepts proportional native dimensions independently of reported DPR', () => {
+    const layout = viewportLayout();
+    layout.devicePixelRatio = 1.5;
+    assert.equal(
+      rendererViewportMatchesNativeClient(layout, {
+        clientWidth: 1920,
+        clientHeight: 1040,
+      }),
+      true,
+    );
+  });
+
   it('rejects a renderer viewport that is stale against the native client', () => {
     assert.equal(
       rendererViewportMatchesNativeClient(viewportLayout(), {

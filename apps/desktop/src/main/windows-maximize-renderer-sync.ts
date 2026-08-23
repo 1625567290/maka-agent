@@ -31,6 +31,7 @@ export interface MaximizedRendererSyncWindow<ContentView = unknown> {
 interface MaximizedRendererSyncOptions {
   platform?: NodeJS.Platform;
   defer?: (callback: () => void) => void;
+  reportError?: (error: unknown) => void;
 }
 
 /**
@@ -48,6 +49,9 @@ export function createWindowsMaximizeRendererSync<ContentView>(
 ): () => void {
   const platform = options.platform ?? process.platform;
   const defer = options.defer ?? setImmediate;
+  const reportError = options.reportError ?? ((error: unknown) => {
+    console.warn('[desktop] Windows maximize renderer sync failed:', error);
+  });
   let pending = false;
 
   return () => {
@@ -57,11 +61,17 @@ export function createWindowsMaximizeRendererSync<ContentView>(
 
     defer(() => {
       pending = false;
-      if (window.isDestroyed() || !window.isMaximized()) return;
-      if (window.webContents.isDestroyed()) return;
+      try {
+        if (window.isDestroyed() || !window.isMaximized()) return;
+        if (window.webContents.isDestroyed()) return;
 
-      window.setContentView(window.contentView);
-      window.webContents.invalidate();
+        window.setContentView(window.contentView);
+        window.webContents.invalidate();
+      } catch (error) {
+        // A best-effort layout correction must not terminate the main process
+        // if Electron tears down the native window between the guards and call.
+        reportError(error);
+      }
     });
   };
 }
