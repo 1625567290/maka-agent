@@ -121,10 +121,13 @@ except ImportError:
 try:
     from mitmproxy.proxy import commands as proxy_commands
     from mitmproxy.proxy.layer import Layer
+    from mitmproxy.proxy.layers import ClientTLSLayer, ServerTLSLayer
     from mitmproxy.proxy.layers.tcp import TCPLayer
 except ImportError:
     proxy_commands = None
     Layer = object
+    ClientTLSLayer = None
+    ServerTLSLayer = None
     TCPLayer = None
 
 try:
@@ -193,6 +196,14 @@ def next_layer(nextlayer: object) -> None:
     current = getattr(nextlayer, "layer", None)
     context = getattr(nextlayer, "context", None)
     if current is None:
+        data_client = _next_layer_bytes(nextlayer, "data_client")
+        if _is_fragmented_tls_record_prefix(data_client):
+            if ClientTLSLayer is None or ServerTLSLayer is None:
+                return
+            server_tls = ServerTLSLayer(context)
+            server_tls.child_layer = ClientTLSLayer(context)
+            nextlayer.layer = server_tls
+            return
         if not looks_like_raw_tcp(nextlayer):
             return
         record_raw_tunnel(context)
@@ -269,6 +280,10 @@ def _could_start_tls_record(data: bytes) -> bool:
     """Keep a fragmented ClientHello undecided until its 3-byte prefix exists."""
     if starts_like_tls_record(data):
         return True
+    return _is_fragmented_tls_record_prefix(data)
+
+
+def _is_fragmented_tls_record_prefix(data: bytes) -> bool:
     return 0 < len(data) < 3 and b"\x16\x03".startswith(data)
 
 

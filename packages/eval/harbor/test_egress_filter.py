@@ -229,7 +229,26 @@ class EgressFilterTest(unittest.TestCase):
             self.assertEqual(record["ruleId"], "raw_tunnel")
             self.assertEqual(record["host"], "ssh.github.com")
 
-    def test_next_layer_leaves_tls_and_http_for_the_builtin_classifier(self) -> None:
+    def test_next_layer_routes_tls_and_http_without_raw_fallback(self) -> None:
+        class FakeServerTLSLayer:
+            child_layer: object | None = None
+
+            def __init__(self, context: object) -> None:
+                self.context = context
+                context.layers.append(self)
+
+        class FakeClientTLSLayer:
+            def __init__(self, context: object) -> None:
+                self.context = context
+                context.layers.append(self)
+
+        previous_server_tls = MODULE.ServerTLSLayer
+        previous_client_tls = MODULE.ClientTLSLayer
+        self.addCleanup(setattr, MODULE, "ServerTLSLayer", previous_server_tls)
+        self.addCleanup(setattr, MODULE, "ClientTLSLayer", previous_client_tls)
+        MODULE.ServerTLSLayer = FakeServerTLSLayer
+        MODULE.ClientTLSLayer = FakeClientTLSLayer
+
         context = SimpleNamespace(layers=[])
         tls = SimpleNamespace(
             layer=None,
@@ -245,18 +264,21 @@ class EgressFilterTest(unittest.TestCase):
             (b"\x16\x03", b"\x01\x00\x00"),
         ):
             with self.subTest(tls_prefix=first):
-                buffered = bytearray(first)
+                fragmented_context = SimpleNamespace(layers=[])
                 fragmented = SimpleNamespace(
                     layer=None,
-                    context=context,
-                    data_client=lambda: bytes(buffered),
+                    context=fragmented_context,
+                    data_client=lambda first=first: first,
                     data_server=lambda: b"",
                 )
                 MODULE.next_layer(fragmented)
-                self.assertIsNone(fragmented.layer)
-                buffered.extend(remainder)
-                MODULE.next_layer(fragmented)
-                self.assertIsNone(fragmented.layer)
+                self.assertIsInstance(fragmented.layer, FakeServerTLSLayer)
+                self.assertIsInstance(fragmented.layer.child_layer, FakeClientTLSLayer)
+                self.assertEqual(
+                    fragmented_context.layers,
+                    [fragmented.layer, fragmented.layer.child_layer],
+                )
+                self.assertTrue((first + remainder).startswith(b"\x16\x03"))
 
         http = SimpleNamespace(
             layer=None,

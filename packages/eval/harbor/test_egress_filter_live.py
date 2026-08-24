@@ -426,7 +426,12 @@ class LiveEgressFilterTest(unittest.TestCase):
     def fragmented_tls_via_proxy(cls, first_fragment_size: int) -> str:
         incoming = ssl.MemoryBIO()
         outgoing = ssl.MemoryBIO()
-        tls = ssl.create_default_context().wrap_bio(
+        tls_context = ssl.create_default_context()
+        # The proxy image creates an ephemeral private CA. This test exercises
+        # protocol classification and the handshake, not CA distribution.
+        tls_context.check_hostname = False
+        tls_context.verify_mode = ssl.CERT_NONE
+        tls = tls_context.wrap_bio(
             incoming,
             outgoing,
             server_side=False,
@@ -536,7 +541,9 @@ class LiveEgressFilterTest(unittest.TestCase):
         self.assertEqual(curl.stdout, "200", curl.stderr)
 
     def test_fragmented_tls_record_prefix_still_handshakes(self) -> None:
-        for first_fragment_size in (1, 2):
+        # Three bytes are sufficient for mitmproxy's built-in TLS classifier
+        # and provide a control for the one- and two-byte fragmented prefixes.
+        for first_fragment_size in (1, 2, 3):
             with self.subTest(first_fragment_size=first_fragment_size):
                 self.assertTrue(
                     self.fragmented_tls_via_proxy(first_fragment_size).startswith("TLS")
