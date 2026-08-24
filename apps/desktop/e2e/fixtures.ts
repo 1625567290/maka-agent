@@ -446,6 +446,7 @@ async function withE2eWindow(
 
 export const test = base.extend<{
   window: Page;
+  codeScrollWindow: Page;
   onboardingWindow: Page;
   gitReviewWindow: { page: Page; projectRoot: string };
   invocableSkillsWindow: Page;
@@ -460,6 +461,16 @@ export const test = base.extend<{
   // Seeded: a pre-staged connection clears onboarding so the composer is ready.
   window: async ({}, use) => {
     await withE2eWindow({ seed: true, readinessSelector: COMPOSER_INPUT, locale: 'zh' }, use);
+  },
+  // Text selection is a native pointer interaction on macOS. Keep this window
+  // visible so Chromium receives the same focused drag sequence as a user.
+  codeScrollWindow: async ({}, use) => {
+    await withE2eWindow({
+      seed: true,
+      readinessSelector: COMPOSER_INPUT,
+      locale: 'zh',
+      showWindow: true,
+    }, use);
   },
   onboardingWindow: async ({}, use) => {
     await withE2eWindow({

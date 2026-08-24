@@ -20,7 +20,7 @@
 import { expect, test, COMPOSER_INPUT } from './fixtures';
 
 test('a one-line Markdown code block exposes native and selection horizontal scrolling', async ({
-  window: page,
+  codeScrollWindow: page,
 }) => {
   await page.setViewportSize({ width: 900, height: 700 });
   const longLine = Array.from(
@@ -101,23 +101,69 @@ test('a one-line Markdown code block exposes native and selection horizontal scr
     window.getSelection()?.removeAllRanges();
   });
   const code = viewport.locator('code');
-  const codeBox = await code.boundingBox();
-  if (!codeBox) throw new Error('code line has no visible bounds');
-  const textY = codeBox.y + Math.min(codeBox.height / 2, 18);
-  await page.mouse.move(codeBox.x + 24, textY);
-  await page.mouse.down();
-  await page.mouse.move(metrics.rect.x + metrics.rect.width + 50, textY, { steps: 20 });
-  await expect.poll(
-    () => viewport.evaluate((element) => (element as HTMLElement).scrollLeft),
-  ).toBeGreaterThan(0);
+  const selectionStart = await code.evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let textNode = walker.nextNode();
+    while (textNode && !(textNode.textContent ?? '').trim()) {
+      textNode = walker.nextNode();
+    }
+    if (!textNode?.textContent) throw new Error('code line has no selectable text');
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, Math.min(3, textNode.textContent.length));
+    const rect = range.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      throw new Error('code line text has no visible range');
+    }
+    return {
+      x: rect.left + Math.min(2, rect.width / 2),
+      y: rect.top + rect.height / 2,
+    };
+  });
+  const moveAcrossPaintedFrames = async (fromX: number, toX: number, steps: number) => {
+    for (let step = 1; step <= steps; step += 1) {
+      const progress = step / steps;
+      await page.mouse.move(fromX + (toX - fromX) * progress, selectionStart.y);
+      await page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+      );
+    }
+  };
+  await page.bringToFront();
+  await page.mouse.click(metrics.rect.x + metrics.rect.width / 2, selectionStart.y);
+  await expect.poll(() => page.evaluate(() => document.hasFocus())).toBe(true);
+  await viewport.evaluate(() => window.getSelection()?.removeAllRanges());
+  await page.mouse.dblclick(selectionStart.x, selectionStart.y, { delay: 50 });
   await expect.poll(
     () => viewport.evaluate(() => window.getSelection()?.toString().length ?? 0),
-  ).toBeGreaterThan(10);
-  const afterSelectionDrag = await viewport.evaluate((element) => ({
-    scrollLeft: (element as HTMLElement).scrollLeft,
-    selection: window.getSelection()?.toString() ?? '',
-  }));
-  await page.mouse.up();
+  ).toBeGreaterThan(3);
+
+  const extensionStartX = selectionStart.x + 120;
+  let afterSelectionDrag: { scrollLeft: number; selection: string } | undefined;
+  await page.keyboard.down('Shift');
+  await page.mouse.move(extensionStartX, selectionStart.y);
+  await page.mouse.down();
+  try {
+    await moveAcrossPaintedFrames(
+      extensionStartX,
+      metrics.rect.x + metrics.rect.width + 50,
+      20,
+    );
+    await expect.poll(
+      () => viewport.evaluate((element) => (element as HTMLElement).scrollLeft),
+    ).toBeGreaterThan(0);
+    await expect.poll(
+      () => viewport.evaluate(() => window.getSelection()?.toString().length ?? 0),
+    ).toBeGreaterThan(10);
+    afterSelectionDrag = await viewport.evaluate((element) => ({
+      scrollLeft: (element as HTMLElement).scrollLeft,
+      selection: window.getSelection()?.toString() ?? '',
+    }));
+  } finally {
+    await page.mouse.up();
+    await page.keyboard.up('Shift');
+  }
+  if (!afterSelectionDrag) throw new Error('selection drag did not settle');
   expect(afterWheelScroll).toBeGreaterThan(0);
   expect(afterKeyboardScroll).toBeGreaterThan(0);
   expect(afterSelectionDrag.scrollLeft).toBeGreaterThan(0);
