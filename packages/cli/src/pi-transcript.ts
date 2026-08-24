@@ -1745,15 +1745,16 @@ function renderNotice(entry: MakaPiNoticeEntry, width: number): string[] {
 // Shown on a fresh, empty session. Greets with the branded maka wordmark and a
 // short tagline, then points at the command-center entry points (direct input,
 // /session, /model, /setup) — enough to start without reading docs.
-// Four-line lowercase ASCII maka wordmark in Maka blue (#1098). Pure ASCII so it
+// Five-line lowercase ASCII maka wordmark in Maka blue (#1098, #3661). Pure ASCII so it
 // renders under any locale; stored without trailing spaces so the welcome lines
 // and their tests agree after rtrim. A terminal too narrow to fit it falls back
 // to a single `maka` line — see renderWelcomeBlock.
 const MAKA_WORDMARK_LINES = [
-  ' _ __    __ _  _  __   __ _',
-  "| '_ \\  / _` | | |/ / / _` |",
-  '| |_) | | (_| | |   <  | (_| |',
-  '|_.__/  \\__,_| |_|\\_\\  \\__,_|',
+  '                  _',
+  '  _ __ ___   __ _| | ____ _',
+  " | '_ ` _ \\ / _` | |/ / _` |",
+  ' | | | | | | (_| |   < (_| |',
+  ' |_| |_| |_|\\__,_|_|\\_\\__,_|',
 ];
 const MAKA_WORDMARK_WIDTH = Math.max(...MAKA_WORDMARK_LINES.map((line) => line.length));
 

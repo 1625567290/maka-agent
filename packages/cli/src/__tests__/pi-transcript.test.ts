@@ -102,9 +102,17 @@ describe('Maka Pi TUI transcript', () => {
   test('renders fresh-session guidance in the resolved locale', () => {
     const state = createMakaPiTranscriptState();
 
-    const english = renderMakaPiTranscript(state, { ...meta(), uiLocale: 'en' }, 100)
-      .map(stripAnsi)
-      .join('\n');
+    const englishLines = renderMakaPiTranscript(state, { ...meta(), uiLocale: 'en' }, 100).map(
+      stripAnsi,
+    );
+    assert.deepEqual(englishLines.slice(0, 5), [
+      '                  _',
+      '  _ __ ___   __ _| | ____ _',
+      " | '_ ` _ \\ / _` | |/ / _` |",
+      ' | | | | | | (_| |   < (_| |',
+      ' |_| |_| |_|\\__,_|_|\\_\\__,_|',
+    ]);
+    const english = englishLines.join('\n');
     assert.match(english, /Get things done together/);
     assert.match(english, /Type a message to start/);
     assert.match(english, /\/session\s+Switch or resume a session/);
