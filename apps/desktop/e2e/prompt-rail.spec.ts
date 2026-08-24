@@ -206,17 +206,40 @@ test('the pointer is always on a tick while it travels down the rail', async ({
   // fractional CSS-pixel path as well as every box centre and seam: integer
   // rounding can place a narrow rail's x coordinate on its outside edge, while
   // sparse midpoint sampling could miss an intercept elsewhere.
-  // The fixture readiness marker can paint before ResizeObserver publishes the
-  // rail's scrollport geometry on a cold macOS runner. Poll the actual hit-test
-  // contract so a slow first layout does not masquerade as a permanent gap.
-  await expect
-    .poll(async () => {
-      const travel = await page.evaluate(() => {
+  // A bounded rail is an intentional scroller. Hidden ticks outside its clip
+  // are not unreachable; they become visible when the reader scrolls the rail.
+  // Check the painted column at both edges and in the middle so every group of
+  // ticks is covered without mistaking clipped DOM boxes for viewport overflow.
+  for (const position of [
+    { name: 'top', ratio: 0 },
+    { name: 'middle', ratio: 0.5 },
+    { name: 'bottom', ratio: 1 },
+  ] as const) {
+    await expect
+      .poll(async () => page.evaluate(async ({ ratio }) => {
+        const rail = document.querySelector<HTMLElement>('.maka-prompt-rail');
         const ticks = [...document.querySelectorAll<HTMLElement>('.maka-prompt-rail-tick')];
-        if (ticks.length < 2) throw new Error('the prompt rail needs at least two ticks');
+        if (!rail || ticks.length < 2) throw new Error('the prompt rail needs at least two ticks');
+
+        const maxScroll = Math.max(0, rail.scrollHeight - rail.clientHeight);
+        const targetScroll = maxScroll * ratio;
+        rail.scrollTop = targetScroll;
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        });
+
+        const railBox = rail.getBoundingClientRect();
         const boxes = ticks.map((tick) => tick.getBoundingClientRect());
-        const first = boxes[0]!;
-        const last = boxes[boxes.length - 1]!;
+        const visible = boxes
+          .map((box, index) => ({ box, index, tick: ticks[index]! }))
+          .filter(({ box }) => {
+            const center = box.top + box.height / 2;
+            return center >= railBox.top && center <= railBox.bottom;
+          });
+        const first = visible[0];
+        const last = visible.at(-1);
+        if (!first || !last) throw new Error('the prompt rail has no visible ticks');
+
         const describe = (found: Element | null) =>
           found instanceof Element
             ? `${found.tagName.toLowerCase()}.${found.className.toString().trim().replace(/\s+/g, '.')}`
@@ -233,53 +256,68 @@ test('the pointer is always on a tick while it travels down the rail', async ({
           missCount += 1;
           if (sample.length < 3) sample.push(miss);
         };
-        for (const [index, box] of boxes.entries()) {
+
+        for (const { box, index, tick } of visible) {
           const found = document.elementFromPoint(
             box.left + box.width / 2,
             box.top + box.height / 2,
           );
-          if (found?.closest('.maka-prompt-rail-tick') !== ticks[index]) {
+          if (found?.closest('.maka-prompt-rail-tick') !== tick) {
             recordMiss({ index, kind: 'center', hit: describe(found) });
           }
         }
-        const gaps = boxes.slice(1).map((box, index) => box.top - boxes[index]!.bottom);
-        for (let index = 0; index < boxes.length - 1; index += 1) {
-          const before = boxes[index]!;
-          const after = boxes[index + 1]!;
+        for (let index = 0; index < visible.length - 1; index += 1) {
+          const before = visible[index]!;
+          const after = visible[index + 1]!;
           const found = document.elementFromPoint(
-            before.left + before.width / 2,
-            (before.bottom + after.top) / 2,
+            before.box.left + before.box.width / 2,
+            (before.box.bottom + after.box.top) / 2,
           );
           const landed = found?.closest('.maka-prompt-rail-tick');
-          if (landed !== ticks[index] && landed !== ticks[index + 1]) {
-            recordMiss({ index, kind: 'seam', hit: describe(found) });
+          if (landed !== before.tick && landed !== after.tick) {
+            recordMiss({ index: before.index, kind: 'seam', hit: describe(found) });
           }
         }
-        const x = first.left + first.width / 2;
-        const startY = first.top + first.height / 2;
-        const endY = last.top + last.height / 2;
+        const x = first.box.left + first.box.width / 2;
+        const startY = first.box.top + first.box.height / 2;
+        const endY = last.box.top + last.box.height / 2;
         for (let y = startY, index = 0; y <= endY; y += 0.25, index += 1) {
           const found = document.elementFromPoint(x, y);
           if (!found?.closest('.maka-prompt-rail-tick')) {
             recordMiss({ index, kind: 'path', y, hit: describe(found) });
           }
         }
+
+        const gaps = boxes.slice(1).map((box, index) => box.top - boxes[index]!.bottom);
         return {
-          insideViewport: first.top >= 0 && last.bottom <= window.innerHeight,
+          railInsideViewport: railBox.top >= 0 && railBox.bottom <= window.innerHeight,
+          scrollSettled: Math.abs(rail.scrollTop - targetScroll) <= 1,
+          enoughVisibleTicks: visible.length >= 2,
+          edgeReached:
+            ratio === 0
+              ? first.index === 0
+              : ratio === 1
+                ? last.index === ticks.length - 1
+                : true,
           misses: missCount,
-          hasSpan: last.bottom > first.top,
+          hasSpan: endY > startY,
           continuousBoxes: Math.max(...gaps) <= 0.25,
           sample,
         };
+      }, position), {
+        message: `the visible prompt rail column is continuously user-reachable at ${position.name}`,
+      })
+      .toMatchObject({
+        railInsideViewport: true,
+        scrollSettled: true,
+        enoughVisibleTicks: true,
+        edgeReached: true,
+        misses: 0,
+        hasSpan: true,
+        continuousBoxes: true,
+        sample: [],
       });
-      return travel;
-    }, { message: 'the full prompt rail column becomes continuously user-reachable' })
-    .toMatchObject({
-      insideViewport: true,
-      misses: 0,
-      hasSpan: true,
-      continuousBoxes: true,
-    });
+  }
 });
 
 test('the first click of a session lands on its prompt and holds', async ({

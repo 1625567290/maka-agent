@@ -276,7 +276,7 @@ test('core CI gates the stable test check on selected macOS E2E', () => {
   assert.ok(uploadStart >= 0);
   assert.match(upload, /if: always\(\)/u);
   assert.match(upload, /uses: actions\/upload-artifact@/u);
-  assert.match(upload, /path: apps\/desktop\/test-results/u);
+  assert.match(upload, /path: apps\/desktop\/e2e\/test-results/u);
   assert.match(aggregate, /needs: \[test_linux, e2e_macos\]/u);
   assert.match(aggregate, /if: always\(\)/u);
   assert.match(aggregate, /expected_macos="success"/u);

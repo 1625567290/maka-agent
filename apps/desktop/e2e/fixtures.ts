@@ -338,6 +338,7 @@ async function withE2eWindow(
     gitReviewExtraFiles,
     parentRemovalSessions,
     newTaskProject,
+    windowSize,
   }: {
     seed: boolean;
     readinessSelector: string;
@@ -353,6 +354,8 @@ async function withE2eWindow(
     gitReviewExtraFiles?: number;
     parentRemovalSessions?: boolean;
     newTaskProject?: boolean;
+    /** Deterministic native fixture size for geometry-sensitive surfaces. */
+    windowSize?: { width: number; height: number };
   },
   use: (page: Page, context: { userDataDir: string }) => Promise<void>,
 ): Promise<void> {
@@ -378,15 +381,23 @@ async function withE2eWindow(
     app = await electron.launch({
       args: ['.'],
       cwd: DESKTOP_ROOT,
-      env: buildFixtureEnv(userDataDir, homeDir, {
-        scenario: e2eFixtureScenario,
-        locale,
-        platform,
-        scrollMotion,
-        // Isolated CI displays throttle a hidden window's compositor. Geometry
-        // fixtures opt in locally; every fixture is visible on those runners.
-        showWindow: showWindow || isCiIsolatedDisplay(),
-      }),
+      env: {
+        ...buildFixtureEnv(userDataDir, homeDir, {
+          scenario: e2eFixtureScenario,
+          locale,
+          platform,
+          scrollMotion,
+          // Isolated CI displays throttle a hidden window's compositor. Geometry
+          // fixtures opt in locally; every fixture is visible on those runners.
+          showWindow: showWindow || isCiIsolatedDisplay(),
+        }),
+        ...(windowSize
+          ? {
+              MAKA_E2E_FIXTURE_WIDTH: String(windowSize.width),
+              MAKA_E2E_FIXTURE_HEIGHT: String(windowSize.height),
+            }
+          : {}),
+      },
     });
     app.on('console', (message) => {
       mainLogs.push(message.text());
@@ -535,6 +546,9 @@ export const test = base.extend<{
       readinessSelector: '[data-turn-id]',
       e2eFixtureScenario: 'chat-prompt-rail',
       showWindow: true,
+      // Keep the bounded rail in its own scrolling state so the tests exercise
+      // clipped ticks instead of relying on every runner's font metrics to fit.
+      windowSize: { width: 1240, height: 740 },
     }, use);
   },
   // The same transcript, scrolling the way the shipped app scrolls. Separate
@@ -548,6 +562,7 @@ export const test = base.extend<{
       e2eFixtureScenario: 'chat-prompt-rail',
       showWindow: true,
       scrollMotion: 'smooth',
+      windowSize: { width: 1240, height: 740 },
     }, use);
   },
   // Settings → 模型, where `no-models` is the seeded openai-compatible relay —
