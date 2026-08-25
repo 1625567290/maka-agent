@@ -43,8 +43,11 @@ import {
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import { parseRuntimeHostCommand } from '../runtime-host-cli.js';
 import {
+  openRuntimeHostManagedPackageDeployment,
+  prepareRuntimeHostManagedPackageDeployment,
   removeRuntimeHostManagedDeployment,
   resolveRuntimeHostManagedDeploymentRoot,
+  resolveRuntimeHostManagedPackageCliPath,
 } from '../runtime-host-managed-deployment.js';
 import { runManagedRuntimeHostServiceCli } from '../runtime-host-service-management-command.js';
 import { runManagedRuntimeHostUpdateCli } from '../runtime-host-update-command.js';
@@ -1228,9 +1231,24 @@ describe('managed Runtime Host service', () => {
       /Starting the Runtime Host service failed/u,
     );
     assert.match(await readFile(unitPath, 'utf8'), /--websocket-port" "41001"/u);
+
+    const replacementBackend = backend();
+    await replacementBackend.stop();
+    systemd.failNext('restart');
+    assert.ok(first.service.config);
+    const replacementConfig = {
+      ...first.service.config,
+      websocket: { ...first.service.config.websocket, port: 41_004 },
+    };
+    await assert.rejects(
+      replacementBackend.replace(replacementConfig),
+      /Starting the Runtime Host service failed/u,
+    );
+    assert.match(await readFile(unitPath, 'utf8'), /--websocket-port" "41001"/u);
+    assert.equal((await replacementBackend.status()).state, 'stopped');
   });
 
-  it('keeps the selected package configured when replacement readiness is unknown', async (t) => {
+  it('distinguishes backend replacement failure from unknown target readiness', async (t) => {
     const base = await mkdtemp(join(tmpdir(), 'maka-runtime-host-update-failure-'));
     t.after(() => rm(base, { recursive: true, force: true }));
     const clientDataRoot = join(base, 'config');
@@ -1243,6 +1261,8 @@ describe('managed Runtime Host service', () => {
     await writeFile(targetCli, '#!/usr/bin/env node\n', 'utf8');
     let state: 'running' | 'stopped' = 'running';
     let replaceCalls = 0;
+    let replaceFails = true;
+    let stopFails = false;
     const backend: RuntimeHostServiceBackend = {
       ...createReadyBackend(),
       status: async () => ({
@@ -1256,9 +1276,11 @@ describe('managed Runtime Host service', () => {
       }),
       replace: async () => {
         replaceCalls += 1;
-        throw new Error('replacement failed after launch');
+        if (replaceFails) throw new Error('replacement was not committed');
+        state = 'running';
       },
       stop: async () => {
+        if (stopFails) throw new Error('replacement could not be stopped');
         state = 'stopped';
       },
     };
@@ -1284,10 +1306,37 @@ describe('managed Runtime Host service', () => {
         error instanceof RuntimeHostServiceManagerError && error.code === 'update_incomplete',
     );
     assert.equal(replaceCalls, 1);
-    const config = JSON.parse(
+    const restored = JSON.parse(
       await readFile(resolveRuntimeHostManagedServiceConfigPath(clientDataRoot), 'utf8'),
     ) as RuntimeHostManagedServiceConfig;
-    assert.equal(config.launch.cliPath, await realpath(targetCli));
+    assert.equal(restored.launch.cliPath, await realpath(previousCli));
+
+    replaceFails = false;
+    await assert.rejects(
+      replaceRuntimeHostManagedService({ ...common, cliPath: targetCli, expectedTarget }, backend, {
+        waitForReady: async () => Promise.reject(new Error('target readiness is unknown')),
+      }),
+      (error: unknown) =>
+        error instanceof RuntimeHostServiceManagerError && error.code === 'update_incomplete',
+    );
+    assert.equal(replaceCalls, 2);
+    const retained = JSON.parse(
+      await readFile(resolveRuntimeHostManagedServiceConfigPath(clientDataRoot), 'utf8'),
+    ) as RuntimeHostManagedServiceConfig;
+    assert.equal(retained.launch.cliPath, await realpath(targetCli));
+
+    stopFails = true;
+    await assert.rejects(
+      replaceRuntimeHostManagedService({ ...common, cliPath: targetCli, expectedTarget }, backend, {
+        waitForReady: async () => Promise.reject(new Error('target readiness is unknown')),
+      }),
+      (error: unknown) =>
+        error instanceof RuntimeHostServiceManagerError &&
+        error.code === 'update_incomplete' &&
+        error.cause instanceof AggregateError &&
+        /could not be stopped/u.test(error.message),
+    );
+    assert.equal(state, 'running');
   });
 
   it('updates through the current operator and preserves exact update outcomes', async () => {
@@ -1300,7 +1349,11 @@ describe('managed Runtime Host service', () => {
       rootId: 'a'.repeat(64),
     };
     const order: string[] = [];
-    const service = (version: string, state: 'running' | 'stopped') =>
+    const service = (
+      version: string,
+      state: 'running' | 'stopped',
+      cliPath = join(deploymentRoot, 'versions', version, 'dist', 'cli.js'),
+    ) =>
       ({
         schemaVersion: 1,
         action: 'status',
@@ -1321,7 +1374,7 @@ describe('managed Runtime Host service', () => {
             websocket: { host: '127.0.0.1', port: 7400, path: '/runtime-host' },
             launch: {
               nodePath: process.execPath,
-              cliPath: join(deploymentRoot, 'versions', version, 'dist', 'cli.js'),
+              cliPath,
             },
           },
         },
@@ -1329,11 +1382,15 @@ describe('managed Runtime Host service', () => {
     let statusReads = 0;
     let observedVersion = '1.0.0';
     let observedState: 'running' | 'stopped' = 'running';
-    let readyChecks = 0;
+    let observedCliPath: string | undefined;
     let readyFailure = false;
     let operatorSupportsProcessLifetimeLock = false;
     let legacyLeaseCalls = 0;
+    let operatorStatusFailure = false;
     let operatorFailure: Extract<RuntimeHostServiceManagementFrame, { kind: 'error' }> | undefined;
+    let replaceFailure = false;
+    let cleanupFailure = false;
+    let expectAllowInterruptActiveTasks = true;
     let insideLifecycle = false;
     let output = '';
     const options = {
@@ -1346,6 +1403,24 @@ describe('managed Runtime Host service', () => {
       expectedTarget,
       allowInterruptActiveTasks: true,
     } as const;
+    const deployment = (version: string, cliPath: string) => ({
+      version,
+      root: deploymentRoot,
+      cliPath,
+      operatorPath: join(deploymentRoot, 'operator'),
+      activate: async () => {
+        assert.equal(insideLifecycle, true);
+        order.push('activate');
+        operatorSupportsProcessLifetimeLock = true;
+      },
+      cleanup: async () => {
+        order.push('cleanup');
+        if (cleanupFailure) throw new Error('Injected package cleanup failure');
+      },
+      rollback: async () => {
+        order.push('rollback');
+      },
+    });
     const overrides = {
       createBackend: createUnusedBackend,
       withLifecycleLock: async <T>(_root: string, operation: () => Promise<T>) => {
@@ -1365,23 +1440,20 @@ describe('managed Runtime Host service', () => {
         legacyLeaseCalls += 1;
         return operation([]);
       },
-      prepareDeployment: async () => ({
-        version: '2.0.0',
-        root: deploymentRoot,
-        cliPath: join(deploymentRoot, 'versions', '2.0.0', 'dist', 'cli.js'),
-        operatorPath: join(deploymentRoot, 'operator'),
-        activate: async () => {
-          assert.equal(insideLifecycle, true);
-          order.push('activate');
-          operatorSupportsProcessLifetimeLock = true;
-        },
-        cleanup: async () => {
-          order.push('cleanup');
-        },
-        rollback: async () => {
-          order.push('rollback');
-        },
-      }),
+      openDeployment: async (
+        input: Parameters<typeof openRuntimeHostManagedPackageDeployment>[0],
+      ) => deployment(input.version, input.cliPath),
+      prepareDeployment: async (
+        input: Parameters<typeof prepareRuntimeHostManagedPackageDeployment>[0],
+      ) =>
+        deployment(
+          input.version,
+          resolveRuntimeHostManagedPackageCliPath(
+            deploymentRoot,
+            input.version,
+            input.packageIntegrity,
+          ),
+        ),
       runOperator: async (
         _operatorPath: string,
         args: readonly string[],
@@ -1391,8 +1463,9 @@ describe('managed Runtime Host service', () => {
         },
       ) => {
         const action = args[0];
-        assert.ok(action === 'status' || action === 'retire' || action === 'stop');
+        assert.ok(action === 'status' || action === 'retire');
         if (action === 'status') {
+          if (operatorStatusFailure) throw new Error('The active operator is unavailable');
           assert.equal(
             invocation?.capabilityRequest,
             RUNTIME_HOST_OPERATOR_PROCESS_LIFETIME_LOCK_CAPABILITY,
@@ -1422,24 +1495,11 @@ describe('managed Runtime Host service', () => {
           };
         }
         order.push(action);
-        if (action === 'retire') assert.ok(args.includes('--allow-interrupt-active-tasks'));
-        if (action === 'stop') {
-          return {
-            schemaVersion: 1 as const,
-            kind: 'result' as const,
-            action: 'stop' as const,
-            service: {
-              platform: 'linux',
-              arch: 'x64',
-              osRelease: 'test',
-              state: 'stopped' as const,
-              pid: null,
-              lastExitCode: 3,
-              installedVersion: observedVersion,
-              stateRoot: expectedTarget.rootPath,
-              projectDirectoryRoots: [],
-            },
-          };
+        if (action === 'retire') {
+          assert.equal(
+            args.includes('--allow-interrupt-active-tasks'),
+            expectAllowInterruptActiveTasks,
+          );
         }
         if (operatorFailure) return operatorFailure;
         return {
@@ -1461,19 +1521,33 @@ describe('managed Runtime Host service', () => {
         };
       },
       verifyReady: async () => {
-        readyChecks += 1;
         if (readyFailure) throw new Error('Host is active but not ready');
       },
       manage: async (input: Parameters<typeof manageRuntimeHostService>[0]) => {
+        if (input.action === 'stop') {
+          assert.equal(insideLifecycle, true);
+          order.push('stop');
+          return service(observedVersion, 'stopped', observedCliPath);
+        }
         assert.equal(input.action, 'status');
         statusReads += 1;
         if (statusReads > 1) assert.equal(insideLifecycle, true);
-        return service(observedVersion, statusReads === 1 ? observedState : 'stopped');
+        return service(
+          observedVersion,
+          statusReads === 1 ? observedState : 'stopped',
+          observedCliPath,
+        );
       },
-      replace: async () => {
+      replace: async (input: Parameters<typeof replaceRuntimeHostManagedService>[0]) => {
         assert.equal(insideLifecycle, true);
         order.push('replace');
-        return service('2.0.0', 'running').service;
+        if (replaceFailure) {
+          throw new RuntimeHostServiceManagerError(
+            'update_incomplete',
+            'The replacement did not become ready',
+          );
+        }
+        return service('2.0.0', 'running', input.cliPath).service;
       },
       writeOutput: (value: string) => {
         output += value;
@@ -1516,15 +1590,84 @@ describe('managed Runtime Host service', () => {
     observedState = 'running';
     output = '';
     assert.equal(await runManagedRuntimeHostUpdateCli(options, overrides), 0);
-    assert.equal(readyChecks, 1);
+    assert.deepEqual(order, ['cleanup']);
+
+    cleanupFailure = true;
+    order.length = 0;
+    statusReads = 0;
+    output = '';
+    assert.equal(
+      await runManagedRuntimeHostUpdateCli({ ...options, json: true, framed: false }, overrides),
+      1,
+    );
+    assert.deepEqual(order, ['cleanup']);
+    const cleanupRecovery = JSON.parse(output) as RuntimeHostServiceManagementFrame;
+    assert.equal(
+      cleanupRecovery.kind === 'error' ? cleanupRecovery.error.code : undefined,
+      'update_incomplete',
+    );
+    cleanupFailure = false;
+
+    const localTargetCliPath = join(deploymentRoot, 'versions', '2.0.0', 'dist', 'cli.js');
+    const packageIntegrity =
+      'sha512-jUKdo/5dbM94KXq+kOZ1d+obhDLAENfI/QWr1PnXWcdu2PqDyLklJBtiVO6HRwoL1l40z1NE9Rq+hLAxCN0Fyg==';
+    order.length = 0;
+    statusReads = 0;
+    output = '';
+    assert.equal(
+      await runManagedRuntimeHostUpdateCli(
+        {
+          ...options,
+          registrySelection: {
+            integrity: packageIntegrity,
+            current: { version: '2.0.0', cliPath: localTargetCliPath },
+          },
+        },
+        overrides,
+      ),
+      0,
+    );
+    assert.deepEqual(order, ['retire', 'activate', 'replace', 'cleanup']);
+    const identityUpdate = decodeRuntimeHostServiceManagementFrame(
+      output.trim().split('\n').at(-1) ?? '',
+    );
+    assert.equal(
+      identityUpdate?.kind === 'result' && identityUpdate.action === 'update'
+        ? identityUpdate.update.kind
+        : undefined,
+      'updated',
+    );
+
+    order.length = 0;
+    statusReads = 0;
+    output = '';
+    observedCliPath = join(deploymentRoot, 'versions', 'other', 'dist', 'cli.js');
+    assert.equal(
+      await runManagedRuntimeHostUpdateCli(
+        {
+          ...options,
+          registrySelection: {
+            integrity: packageIntegrity,
+            current: { version: '2.0.0', cliPath: localTargetCliPath },
+          },
+        },
+        overrides,
+      ),
+      1,
+    );
     assert.deepEqual(order, []);
+    const staleIdentity = decodeRuntimeHostServiceManagementFrame(output.trim());
+    assert.equal(
+      staleIdentity?.kind === 'error' ? staleIdentity.error.code : undefined,
+      'target_mismatch',
+    );
+    observedCliPath = undefined;
 
     order.length = 0;
     statusReads = 0;
     output = '';
     readyFailure = true;
     assert.equal(await runManagedRuntimeHostUpdateCli(options, overrides), 0);
-    assert.equal(readyChecks, 2);
     assert.deepEqual(order, ['retire', 'activate', 'replace', 'cleanup']);
     assert.equal(legacyLeaseCalls, 1);
     const activeRecovery = decodeRuntimeHostServiceManagementFrame(
@@ -1540,12 +1683,38 @@ describe('managed Runtime Host service', () => {
     order.length = 0;
     statusReads = 0;
     output = '';
+    operatorStatusFailure = true;
+    assert.equal(await runManagedRuntimeHostUpdateCli(options, overrides), 0);
+    assert.deepEqual(order, ['stop', 'activate', 'replace', 'cleanup']);
+    operatorStatusFailure = false;
+
+    order.length = 0;
+    statusReads = 0;
+    output = '';
     operatorFailure = {
       schemaVersion: 1,
       kind: 'error',
       action: 'retire',
       error: { code: 'retirement_failed', message: 'The active Host is not reachable' },
     };
+    expectAllowInterruptActiveTasks = false;
+    const { allowInterruptActiveTasks: _allowInterruptActiveTasks, ...safeOptions } = options;
+    assert.equal(await runManagedRuntimeHostUpdateCli(safeOptions, overrides), 1);
+    assert.deepEqual(order, ['retire', 'rollback']);
+    const activeTasks = decodeRuntimeHostServiceManagementFrame(
+      output.trim().split('\n').at(-1) ?? '',
+    );
+    assert.equal(
+      activeTasks?.kind === 'result' && activeTasks.action === 'update'
+        ? activeTasks.update.kind
+        : undefined,
+      'active_tasks',
+    );
+
+    order.length = 0;
+    statusReads = 0;
+    output = '';
+    expectAllowInterruptActiveTasks = true;
     assert.equal(await runManagedRuntimeHostUpdateCli(options, overrides), 0);
     assert.deepEqual(order, ['retire', 'stop', 'activate', 'replace', 'cleanup']);
     assert.equal(legacyLeaseCalls, 1);
@@ -1563,6 +1732,64 @@ describe('managed Runtime Host service', () => {
     assert.equal(
       retirementFailure?.kind === 'error' ? retirementFailure.error.code : undefined,
       'retirement_failed',
+    );
+
+    statusReads = 0;
+    operatorFailure = undefined;
+    replaceFailure = true;
+    output = '';
+    order.length = 0;
+    assert.equal(
+      await runManagedRuntimeHostUpdateCli(
+        {
+          ...options,
+          json: true,
+          framed: false,
+          registrySelection: {
+            integrity: packageIntegrity,
+            current: {
+              version: '1.0.0',
+              cliPath: join(deploymentRoot, 'versions', '1.0.0', 'dist', 'cli.js'),
+            },
+          },
+        },
+        overrides,
+      ),
+      1,
+    );
+    assert.deepEqual(order, ['retire', 'activate', 'replace']);
+    const incomplete = JSON.parse(output) as RuntimeHostServiceManagementFrame;
+    assert.equal(
+      incomplete.kind === 'error' ? incomplete.error.code : undefined,
+      'update_incomplete',
+    );
+
+    statusReads = 0;
+    observedVersion = '3.0.0';
+    replaceFailure = false;
+    output = '';
+    order.length = 0;
+    assert.equal(
+      await runManagedRuntimeHostUpdateCli(
+        {
+          ...options,
+          registrySelection: {
+            integrity: packageIntegrity,
+            current: {
+              version: '1.0.0',
+              cliPath: join(deploymentRoot, 'versions', '1.0.0', 'dist', 'cli.js'),
+            },
+          },
+        },
+        overrides,
+      ),
+      1,
+    );
+    assert.deepEqual(order, []);
+    const staleCandidate = decodeRuntimeHostServiceManagementFrame(output.trim());
+    assert.equal(
+      staleCandidate?.kind === 'error' ? staleCandidate.error.code : undefined,
+      'target_mismatch',
     );
   });
 
