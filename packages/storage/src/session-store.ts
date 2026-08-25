@@ -45,7 +45,9 @@ import {
   isSubagentSessionRuntime,
   isSubagentSessionSpawn,
   isSessionStatus,
+  isWorkHubCoordinationSessionId,
   subagentSessionRuntimeSummary,
+  WORKHUB_COORDINATION_SESSION_ROLE,
 } from '@maka/core/session';
 import { isCollaborationMode } from '@maka/core/collaboration';
 import { isOrchestrationMode } from '@maka/core/orchestration';
@@ -75,6 +77,7 @@ import {
   type SessionConversationCopy,
   type SessionExternalOrigin,
   type SessionSummary,
+  type SessionRole,
   type StoredMessage,
   type TurnRecord,
   type TurnStateMessage,
@@ -174,6 +177,7 @@ export interface CreateStableSessionRequest {
 
 export type StableSessionCreateInput = CreateSessionInput & {
   readonly conversationCopy?: SessionConversationCopy;
+  readonly role?: SessionRole;
 };
 
 export type CreateStableSessionResult =
@@ -535,6 +539,10 @@ class SqliteSessionStore implements SessionAuthorityStore {
     initialBoundary?: ExecutionBoundary,
   ): Promise<CreateStableSessionResult> {
     await this.ensureReady();
+    // Asserted here as well as in the header builder so a malformed request is
+    // refused before claimStableSessionCreate() writes a durable claim for the
+    // identity it names.
+    assertCoordinationIdentityPairing(request.sessionId, request.input.role);
     if (
       request.input.conversationCopy &&
       request.input.conversationCopy.requestFingerprint !== request.requestFingerprint
@@ -677,7 +685,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
 
   async list(filter?: SessionListFilter): Promise<SessionSummary[]> {
     await this.ensureReady();
-    const records = (await this.metadata.list(filter)).filter(
+    const records = (await this.metadata.list(filter, 'ordinary')).filter(
       (record) => record.header.conversationCopy?.state !== 'preparing',
     );
     const withPreviews: Array<{
@@ -753,7 +761,7 @@ class SqliteSessionStore implements SessionAuthorityStore {
 
   async listHeaders(): Promise<SessionHeader[]> {
     await this.ensureReady();
-    return (await this.metadata.list())
+    return (await this.metadata.list(undefined, 'recoverable'))
       .map((record) => record.header)
       .sort((a, b) => a.id.localeCompare(b.id));
   }
@@ -1065,9 +1073,20 @@ class SqliteSessionStore implements SessionAuthorityStore {
   }
 }
 
+/**
+ * The reserved identity and the reserved role are one fact, and the invariant
+ * belongs to every creator that builds a header — subagents and Agent Graph
+ * operators included, whose inputs carry no role today.
+ */
+function assertCoordinationIdentityPairing(sessionId: string, role: SessionRole | undefined): void {
+  if (isWorkHubCoordinationSessionId(sessionId) !== (role === WORKHUB_COORDINATION_SESSION_ROLE)) {
+    throw new Error('WorkHub Coordination Session identity and role must be claimed together');
+  }
+}
+
 function buildSessionHeader(
   workspaceRoot: string,
-  input: CreateSessionInput,
+  input: CreateSessionInput & { readonly role?: SessionRole },
   sessionId: string = randomUUID(),
   conversationCopy?: SessionConversationCopy,
 ): SessionHeader {
@@ -1080,10 +1099,12 @@ function buildSessionHeader(
   }
   const now = Date.now();
   assertSafeSessionId(sessionId);
+  assertCoordinationIdentityPairing(sessionId, input.role);
   const name =
     input.name === undefined ? DEFAULT_SESSION_NAME : normalizeRequiredSessionName(input.name);
   const header: SessionHeader = {
     id: sessionId,
+    ...(input.role === undefined ? {} : { role: input.role }),
     workspaceRoot,
     cwd: input.cwd,
     ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
@@ -1139,6 +1160,7 @@ export function normalizeSessionHeader(
 ): SessionHeader {
   const valid =
     header.id === sessionId &&
+    (header.role === undefined || header.role === WORKHUB_COORDINATION_SESSION_ROLE) &&
     typeof header.workspaceRoot === 'string' &&
     typeof header.cwd === 'string' &&
     (header.projectId === undefined ||

@@ -22,6 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { agentGraphIdForRootSession } from '@maka/runtime/stream-graph-coordinator';
 import { BackendRegistry, SessionManager } from '@maka/runtime/session-manager';
@@ -55,6 +56,10 @@ import type {
   BackendSendInput,
 } from '@maka/core/backend-types';
 import type { SessionEvent } from '@maka/core/events';
+import {
+  WORKHUB_COORDINATION_SESSION_ID,
+  WORKHUB_COORDINATION_SESSION_ROLE,
+} from '@maka/core/session';
 import type { MakaTool } from '@maka/runtime/tool-runtime';
 import { clientCapabilityConnectionIdentity } from './fixtures/client-capability.js';
 import {
@@ -63,6 +68,7 @@ import {
   type RootTurnAdmissionStore,
 } from '@maka/storage/execution-stores';
 import { openInteractiveArtifactStoreForWrite } from '@maka/storage/artifact-stores';
+import { OPERATIONAL_STATE_DATABASE_NAME } from '@maka/storage/operational-state-store';
 import { resolveStorageRoot, tryAcquireInteractiveRootOwner } from '@maka/storage/root-authority';
 import type { SubscriptionFrame, TurnSnapshot } from '../protocol/index.js';
 import { HostAgentGraphExecutionCoordinator } from '../server/agent-graph-execution-coordinator.js';
@@ -115,6 +121,100 @@ function assertStartedTurn(outcome: TurnStartOutcome): asserts outcome is Starte
     assert.fail('Expected a started Turn outcome');
   }
 }
+
+test('turn.start rejects the reserved WorkHub Coordination Session identity', async () => {
+  const fixture = await createFailureFixture({
+    registerBackend: (backends) =>
+      backends.register('ai-sdk', (backendContext) => new FakeBackend(backendContext)),
+  });
+  try {
+    assert.deepEqual(fixture.coordinator.prepare(WORKHUB_COORDINATION_SESSION_ID), {
+      kind: 'unavailable',
+      reason: 'WorkHub Coordination Session execution requires WorkHub authority',
+    });
+    const outcome = await fixture.interactiveTurns.handlers['turn.start'](
+      {
+        sessionId: WORKHUB_COORDINATION_SESSION_ID,
+        turnId: 'coordination-turn',
+        content: { text: 'Run a tool from WorkHub.' },
+      },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+
+    assert.deepEqual(outcome, {
+      ok: false,
+      error: {
+        code: 'operation_unavailable',
+        message: 'WorkHub Coordination Session execution requires WorkHub authority',
+      },
+    });
+    assert.deepEqual(
+      await fixture.coordinator.handlers['turn.resume.query'](
+        {
+          sessionId: WORKHUB_COORDINATION_SESSION_ID,
+          sourceRunId: 'source-run',
+          expectedRuntimeEventHighWater: 1,
+        },
+        operationContext(fixture.hostEpoch, fixture.acquireResidency),
+      ),
+      {
+        ok: false,
+        error: {
+          code: 'operation_unavailable',
+          message: 'WorkHub Coordination Session execution requires WorkHub authority',
+        },
+      },
+    );
+    assert.equal(
+      await fixture.stores.agentRunStore.readRootTurnAdmission(
+        WORKHUB_COORDINATION_SESSION_ID,
+        'coordination-turn',
+      ),
+      undefined,
+    );
+  } finally {
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.dispose();
+  }
+});
+
+test('turn.start rejects a corrupt Coordination role on an ordinary identity', async () => {
+  const fixture = await createFailureFixture({
+    registerBackend: (backends) =>
+      backends.register('ai-sdk', (backendContext) => new FakeBackend(backendContext)),
+    corruptSessionRole: true,
+  });
+  try {
+    const outcome = await fixture.interactiveTurns.handlers['turn.start'](
+      {
+        sessionId: fixture.sessionId,
+        turnId: 'corrupt-coordination-role-turn',
+        content: { text: 'This must remain outside ordinary execution.' },
+      },
+      operationContext(fixture.hostEpoch, fixture.acquireResidency),
+    );
+
+    assert.deepEqual(outcome, {
+      ok: false,
+      error: {
+        code: 'operation_unavailable',
+        message: 'WorkHub Coordination Session execution requires WorkHub authority',
+      },
+    });
+    assert.equal(
+      await fixture.stores.agentRunStore.readRootTurnAdmission(
+        fixture.sessionId,
+        'corrupt-coordination-role-turn',
+      ),
+      undefined,
+    );
+  } finally {
+    await fixture.coordinator.close();
+    await fixture.messages.close();
+    await fixture.dispose();
+  }
+});
 
 test('prepares a fresh Agent Graph epoch before durable external Turn admission', async () => {
   let fixture!: FailureFixture;
@@ -4761,6 +4861,7 @@ async function registerSessionCapability(
 
 async function createFailureFixture(options: {
   registerBackend(backends: BackendRegistry): void;
+  corruptSessionRole?: boolean;
   childTools?: MakaTool[];
   wrapAdmissionStore?(store: RootTurnAdmissionStore): RootTurnAdmissionStore;
   wrapMessageAuthority?(authority: RuntimeMessageAuthority): RuntimeMessageAuthority;
@@ -4803,6 +4904,22 @@ async function createFailureFixture(options: {
     model: 'fake-model',
     permissionMode: 'ask',
   });
+  if (options.corruptSessionRole) {
+    const database = new DatabaseSync(
+      join(capability.canonicalPath, OPERATIONAL_STATE_DATABASE_NAME),
+    );
+    try {
+      database
+        .prepare(
+          `UPDATE session_metadata
+           SET payload_json = json_set(payload_json, '$.role', ?)
+           WHERE session_id = ?`,
+        )
+        .run(WORKHUB_COORDINATION_SESSION_ROLE, session.id);
+    } finally {
+      database.close();
+    }
+  }
   const admissionStore = options.wrapAdmissionStore?.(stores.agentRunStore) ?? stores.agentRunStore;
   const rootAdmissionOwner = new RootAdmissionOwner(admissionStore);
   await rootAdmissionOwner.recoverSession(session.id);

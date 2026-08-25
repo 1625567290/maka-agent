@@ -164,6 +164,7 @@ import { HostTaskLedgerCoordinator } from './task-ledger-coordinator.js';
 import { HostTurnControlCoordinator } from './turn-control-coordinator.js';
 import { HostUsagePricingCoordinator } from './usage-pricing-coordinator.js';
 import { HostWebSearchCoordinator } from './web-search-coordinator.js';
+import { HostWorkHubCoordinationCoordinator } from './workhub-coordination-coordinator.js';
 import {
   createHostWebSearchService,
   createHostWebSearchToolFromService,
@@ -1211,6 +1212,18 @@ export async function createExecutionRuntimeHostComposition(
       workspaceResolver,
       requestDrain: context.requestDrain,
     });
+    const workHubCoordination = new HostWorkHubCoordinationCoordinator({
+      stateRoot: context.owner.capability.canonicalPath,
+      stores: stores.sessionStore,
+      admission: sessionAdmission,
+      continuity: continuityCoordinator,
+      resolveCreateTarget: async () => {
+        const { projectId: _projectId, ...target } =
+          await sessionCatalog.resolveExternalSessionImportTarget();
+        return { ...target, permissionMode: 'explore' };
+      },
+      requestDrain: context.requestDrain,
+    });
     scheduledTasks = new HostScheduledTaskCoordinator({
       store: openedScheduledTaskStore,
       sessions: stores.sessionStore,
@@ -1382,6 +1395,10 @@ export async function createExecutionRuntimeHostComposition(
             }
           },
         },
+      }),
+      createRuntimeHostDomainModule({
+        id: 'workhub',
+        handlers: [workHubCoordination.handlers],
       }),
       createRuntimeHostDomainModule({
         id: 'configuration',

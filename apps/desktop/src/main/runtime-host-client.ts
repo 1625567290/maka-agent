@@ -830,6 +830,10 @@ export class DesktopRuntimeHostClient {
     );
   }
 
+  resolveWorkHubCoordinationSession() {
+    return this.request("workhub.coordination.resolve", {});
+  }
+
   listExternalSessionSources(): Promise<ExternalSessionSourceQueryResult> {
     return this.request("external-session.source.query", {});
   }

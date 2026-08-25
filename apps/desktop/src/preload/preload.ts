@@ -22,6 +22,10 @@ import { encodeIngestItems } from './attachment-ingest-payload.js';
 import { collectThreadSearchResponses } from './multi-host-thread-search.js';
 import { notifyWhenSeeded } from './seed-completion.js';
 import { releaseSessionObservation } from './session-observation-release.js';
+import {
+  resolveDesktopWorkHubCoordinationCreateScope,
+  resolveDesktopWorkHubCoordinationSession,
+} from './workhub-coordination-session.js';
 import type {
   MakaBridge,
   OnboardingSnapshot,
@@ -837,6 +841,14 @@ async function listDesktopSessionsWithCoverage(): Promise<{
   );
 }
 
+async function createDesktopSessionOnScope(
+  scope: DesktopTargetScope,
+  input?: CreateSessionRequestInput,
+): Promise<DesktopSessionSummary> {
+  const session = await ipcRenderer.invoke('sessions:create', scope, input) as SessionSummary;
+  return projectSessionSummary(scope, session);
+}
+
 function sendActiveRuntimeHost(channel: string, ...args: unknown[]): void {
   void activeRuntimeHostRef()
     .then((scope) => ipcRenderer.send(channel, scope, ...args))
@@ -1356,11 +1368,10 @@ const makaBridge = {
       input?: CreateSessionRequestInput,
     ): Promise<DesktopSessionSummary> {
       const scope = await runtimeHostScope(target);
-      const session = await ipcRenderer.invoke('sessions:create', scope, {
+      return createDesktopSessionOnScope(scope, {
         ...input,
         projectId: target.projectId,
-      }) as SessionSummary;
-      return projectSessionSummary(scope, session);
+      });
     },
   },
   pets: {
@@ -1506,6 +1517,24 @@ const makaBridge = {
       };
     },
   },
+  workHub: {
+    resolveCoordinationSession(): Promise<string> {
+      return resolveDesktopWorkHubCoordinationSession(
+        activeRuntimeHostRef,
+        (scope) => ipcRenderer.invoke('workhub:resolveCoordinationSession', scope),
+      );
+    },
+    async createSession(
+      coordinationSessionId: string,
+      input: { name: string },
+    ): Promise<DesktopSessionSummary> {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(
+        coordinationSessionId,
+        runtimeHostSessionRef,
+      );
+      return createDesktopSessionOnScope(scope, input);
+    },
+  },
   sessions: {
     list(filter?: SessionListFilter): Promise<DesktopSessionSummary[]> {
       return listDesktopSessions(filter);
@@ -1521,8 +1550,7 @@ const makaBridge = {
      */
     async create(input?: CreateSessionRequestInput): Promise<DesktopSessionSummary> {
       const scope = await activeRuntimeHostRef();
-      const session = await ipcRenderer.invoke('sessions:create', scope, input) as SessionSummary;
-      return projectSessionSummary(scope, session);
+      return createDesktopSessionOnScope(scope, input);
     },
     async send(
       sessionId: string,

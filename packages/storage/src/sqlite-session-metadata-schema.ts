@@ -1155,6 +1155,14 @@ const MIGRATIONS: ReadonlyMap<number, string> = new Map([
     END;
   `,
   ],
+  [
+    30,
+    `
+    CREATE UNIQUE INDEX session_metadata_one_workhub_coordination_session
+      ON session_metadata(json_extract(payload_json, '$.role'))
+      WHERE json_extract(payload_json, '$.role') = 'workhub_coordination';
+  `,
+  ],
 ]);
 
 export function configureSqliteSessionMetadataDatabase(db: DatabaseSync): void {

@@ -54,7 +54,7 @@ import {
 import { SQLITE_AGENT_GRAPH_CONTROL_TABLES } from '../sqlite-session-metadata-schema.js';
 
 describe('SqliteSessionMetadataStore', () => {
-  test('migrates v27 metadata to v28 without backfilling external origin', async () => {
+  test('migrates v27 metadata to the current schema without backfilling external origin', async () => {
     const root = await mkdtemp(join(tmpdir(), 'maka-session-metadata-v27-'));
     const path = join(root, 'state.sqlite');
     const legacyHeader = fullHeader({
@@ -75,6 +75,7 @@ describe('SqliteSessionMetadataStore', () => {
     const legacy = new DatabaseSync(path);
     try {
       legacy.exec(`
+        DROP INDEX session_metadata_one_workhub_coordination_session;
         DROP INDEX session_metadata_by_external_origin;
         ALTER TABLE session_metadata DROP COLUMN external_adapter_id;
         ALTER TABLE session_metadata DROP COLUMN external_source_session_id;
@@ -539,6 +540,7 @@ describe('SqliteSessionMetadataStore', () => {
       const legacy = new DatabaseSync(path);
       try {
         legacy.exec(`
+          DROP INDEX session_metadata_one_workhub_coordination_session;
           ALTER TABLE session_metadata ADD COLUMN status TEXT;
           ALTER TABLE session_metadata ADD COLUMN status_updated_at INTEGER;
           UPDATE session_metadata
@@ -799,6 +801,7 @@ describe('SqliteSessionMetadataStore', () => {
       const legacy = new DatabaseSync(path);
       try {
         legacy.exec(`
+          DROP INDEX session_metadata_one_workhub_coordination_session;
           ALTER TABLE session_metadata ADD COLUMN status TEXT;
           ALTER TABLE session_metadata ADD COLUMN status_updated_at INTEGER;
           UPDATE session_metadata
@@ -2098,7 +2101,7 @@ describe('SqliteSessionMetadataStore', () => {
         }),
       );
 
-      const listed = await store.list();
+      const listed = await store.list(undefined, 'all');
       assert.deepEqual(
         listed.map((record) => record.header.id),
         ['archived', 'newer', 'older'],
@@ -2194,9 +2197,10 @@ describe('SqliteSessionMetadataStore', () => {
         }),
       );
 
-      const children = await store.list({
-        subagentParentSessionId: subagentParent.parentSessionId,
-      });
+      const children = await store.list(
+        { subagentParentSessionId: subagentParent.parentSessionId },
+        'all',
+      );
       assert.deepEqual(
         children.map((record) => record.header.id),
         ['child-session'],

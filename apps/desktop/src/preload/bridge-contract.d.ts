@@ -710,6 +710,15 @@ export interface MakaBridge {
       handler: () => void,
     ): () => void;
   };
+  workHub: {
+    /** Resolve the active Runtime Host's stable coordination conversation. */
+    resolveCoordinationSession(): Promise<string>;
+    /** Create an ordinary Session on the exact Host owning the resolved conversation. */
+    createSession(
+      coordinationSessionId: string,
+      input: { name: string },
+    ): Promise<DesktopSessionSummary>;
+  };
   sessions: {
     list(filter?: SessionListFilter): Promise<DesktopSessionSummary[]>;
     listWithCoverage(): Promise<{

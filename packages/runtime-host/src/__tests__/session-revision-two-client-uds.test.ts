@@ -28,6 +28,7 @@ import { decodeCanonicalToolResultContent } from '@maka/core/tool-result-record-
 import { type AgentGraphOperatorProvisionRequest } from '@maka/core/agent-graph-topology';
 import { type AgentRunHeader } from '@maka/core/agent-run';
 import { type RuntimeEvent } from '@maka/core/runtime-event';
+import { WORKHUB_COORDINATION_SESSION_ID } from '@maka/core/session';
 import { agentGraphIdForRootSession } from '@maka/runtime/stream-graph-coordinator';
 import { FAKE_ASK_USER_QUESTION_PROMPT } from '@maka/runtime/test-only/fake-backend';
 import { createAgentGraphControlStore } from '@maka/storage/agent-graph-control-store';
@@ -151,6 +152,35 @@ async function verifyConcurrentRevisionAuthority(
   const tui = await connectClient(root);
   try {
     const source = await querySession(desktop, sourceSessionId);
+    for (const operation of ['session.branch.create', 'session.revision.create'] as const) {
+      await assert.rejects(
+        desktop.request(operation, {
+          sourceSessionId,
+          targetSessionId: WORKHUB_COORDINATION_SESSION_ID,
+          sourceTurnId: 'turn-1',
+          expectedSourceRevision: source.revision,
+        }),
+        operationError('operation_conflict'),
+      );
+      // The reservation holds on both sides: the Coordination transcript cannot
+      // be lifted out into an ordinary Session that would then be executable.
+      await assert.rejects(
+        desktop.request(operation, {
+          sourceSessionId: WORKHUB_COORDINATION_SESSION_ID,
+          targetSessionId: 'coordination-copy-target',
+          sourceTurnId: 'turn-1',
+          expectedSourceRevision: source.revision,
+        }),
+        operationError('operation_conflict'),
+      );
+    }
+    assert.deepEqual(
+      await tui.request('session.catalog.query', {
+        kind: 'get',
+        sessionId: 'coordination-copy-target',
+      }),
+      { kind: 'session', session: null },
+    );
     const continuationSource = await querySession(desktop, continuationSourceSessionId);
     await assert.rejects(
       desktop.request('session.branch.create', {

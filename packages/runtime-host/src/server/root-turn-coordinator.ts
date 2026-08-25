@@ -30,7 +30,7 @@ import {
   type MessageContent,
   type SessionEvent,
 } from '@maka/core/events';
-import type { SessionHeader } from '@maka/core/session';
+import { isWorkHubCoordinationSessionId, type SessionHeader } from '@maka/core/session';
 import { resolveEffectiveOrchestration } from '@maka/core/orchestration';
 import {
   decodeSkillInvocationResult,
@@ -104,6 +104,7 @@ import {
   runtimeHostExecutionUnavailableReason,
   runtimeHostExternalTurnUnavailableReason,
   runtimeHostSafeBoundaryContinuationUnavailableReason,
+  WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON,
 } from './host-session-availability.js';
 import type {
   HostedExecutionAdmission,
@@ -462,6 +463,12 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
   }
 
   async readSessionHeader(sessionId: string): Promise<HostMessageSessionHeader | null> {
+    if (isWorkHubCoordinationSessionId(sessionId)) {
+      return {
+        isArchived: false,
+        unavailableReason: WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON,
+      };
+    }
     try {
       const header = await this.stores.sessionStore.readHeaderSnapshot(sessionId);
       if (header.conversationCopy?.state === 'preparing') return null;
@@ -612,6 +619,9 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
   }
 
   prepare(sessionId: string): HostedExecutionPreparation {
+    if (isWorkHubCoordinationSessionId(sessionId)) {
+      return { kind: 'unavailable', reason: WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON };
+    }
     if (this.#admissions.isDraining) {
       return {
         kind: 'unavailable',
@@ -667,6 +677,14 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     input: HostedExecutionAdmission,
     preparedReservation?: RootTurnReservation,
   ): Promise<HostedExecutionAdmissionResult> {
+    if (isWorkHubCoordinationSessionId(input.sessionId)) {
+      return Promise.reject(
+        new RuntimeHostedRootUnavailableError(
+          input.sessionId,
+          WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON,
+        ),
+      );
+    }
     return this.runCommand(async () => {
       const activeAtEntry = this.#executions.has(input.sessionId);
       let reservation =
@@ -999,6 +1017,9 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     admissionLease: SessionAdmissionLease,
     commitAdmission: (canonicalContent: MessageContent) => Promise<void>,
   ): Promise<{ readonly turnId: string } | { readonly error: string }> {
+    if (isWorkHubCoordinationSessionId(input.sessionId)) {
+      return Promise.resolve({ error: WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON });
+    }
     return this.runCommand(async () => {
       const content = normalizeMessageContent(input.content);
       if (
@@ -1313,6 +1334,11 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     request: RootMessageStartRequest,
     context: ConnectionContext,
   ): Promise<RootMessageStartOutcome> {
+    if (isWorkHubCoordinationSessionId(request.sessionId)) {
+      return Promise.resolve(
+        operationUnavailable(WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON),
+      );
+    }
     return this.runCommand(async () => {
       await this.awaitTerminalRootCleanup(request.sessionId);
       const activeAtEntry = this.#executions.has(request.sessionId);
@@ -1513,6 +1539,9 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     input: TurnResumeQueryInput,
     context: ConnectionContext,
   ): Promise<OperationOutcome<'turn.resume.query'>> {
+    if (isWorkHubCoordinationSessionId(input.sessionId)) {
+      return operationUnavailable(WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON);
+    }
     return this.sessionAdmission.run(input.sessionId, async () => {
       let header: SessionHeader;
       try {
@@ -1575,6 +1604,11 @@ export class RootTurnCoordinator implements HostedExecutionAuthority {
     input: TurnResumeStartInput,
     context: ConnectionContext,
   ): Promise<TurnResumeStartOutcome> {
+    if (isWorkHubCoordinationSessionId(input.sessionId)) {
+      return Promise.resolve(
+        operationUnavailable(WORKHUB_COORDINATION_EXECUTION_UNAVAILABLE_REASON),
+      );
+    }
     return this.runCommand(async () => {
       const turnInput = continuationTurnInput(input.sessionId, input.turnId);
       const activeAtEntry = this.#executions.has(input.sessionId);
