@@ -21,9 +21,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import {
+  decodeWorkHubCoordinationAnswerInput,
+  decodeWorkHubCoordinationRecordInput,
   decodeWorkHubCoordinationResolveInput,
   decodeWorkHubCoordinationResolveResult,
   HOST_OPERATION_SPECS,
+  REMOTE_OWNER_OPERATION_GRANTS,
   RUNTIME_HOST_COMPATIBILITY_EPOCH,
 } from '../protocol/index.js';
 
@@ -33,13 +36,49 @@ test('WorkHub Coordination resolve has a closed empty input and bounded identity
     sessionId: 'coordination',
   });
   assert.equal(HOST_OPERATION_SPECS['workhub.coordination.resolve'].mode, 'command');
-  assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 48);
+  assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 49);
   assert.throws(
     () => decodeWorkHubCoordinationResolveInput({ sessionId: 'caller-selected' }),
     (error) => error instanceof RuntimeHostProtocolError,
   );
   assert.throws(
     () => decodeWorkHubCoordinationResolveResult({ sessionId: 'coordination', role: 'injected' }),
+    (error) => error instanceof RuntimeHostProtocolError,
+  );
+});
+
+test('WorkHub Coordination answer and summary inputs are closed and bounded', () => {
+  assert.deepEqual(
+    decodeWorkHubCoordinationAnswerInput({ turnId: 'answer-turn', text: 'What changed?' }),
+    { turnId: 'answer-turn', text: 'What changed?' },
+  );
+  assert.deepEqual(
+    decodeWorkHubCoordinationRecordInput({
+      turnId: 'summary-turn',
+      userText: 'Continue payment work',
+      assistantText: 'Submitted to Payment',
+    }),
+    {
+      turnId: 'summary-turn',
+      userText: 'Continue payment work',
+      assistantText: 'Submitted to Payment',
+    },
+  );
+  assert.equal(HOST_OPERATION_SPECS['workhub.coordination.answer'].mode, 'command');
+  assert.equal(HOST_OPERATION_SPECS['workhub.coordination.record'].mode, 'command');
+  assert.equal(REMOTE_OWNER_OPERATION_GRANTS.includes('workhub.coordination.answer'), true);
+  assert.equal(REMOTE_OWNER_OPERATION_GRANTS.includes('workhub.coordination.record'), true);
+  assert.throws(
+    () => decodeWorkHubCoordinationAnswerInput({ turnId: 'turn', text: 'answer', extra: true }),
+    (error) => error instanceof RuntimeHostProtocolError,
+  );
+  assert.throws(
+    () =>
+      decodeWorkHubCoordinationRecordInput({
+        turnId: 'turn',
+        userText: 'user',
+        assistantText: 'x'.repeat(8 * 1024 + 1),
+      }),
     (error) => error instanceof RuntimeHostProtocolError,
   );
 });

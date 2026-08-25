@@ -834,6 +834,18 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.coordination.resolve", {});
   }
 
+  answerWorkHubCoordination(
+    input: OperationInput<"workhub.coordination.answer">,
+  ): Promise<OperationOutput<"workhub.coordination.answer">> {
+    return this.request("workhub.coordination.answer", input);
+  }
+
+  recordWorkHubCoordination(
+    input: OperationInput<"workhub.coordination.record">,
+  ): Promise<OperationOutput<"workhub.coordination.record">> {
+    return this.request("workhub.coordination.record", input);
+  }
+
   listExternalSessionSources(): Promise<ExternalSessionSourceQueryResult> {
     return this.request("external-session.source.query", {});
   }

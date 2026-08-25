@@ -26,14 +26,12 @@ import {
   WorkHubCoordinationStatus,
   WorkHubProjectionRefreshGate,
   WorkHubSurfaceRouteGate,
-  projectedWorkHubTurnPresentation,
   submitWorkHubSurfaceInput,
-  visibleWorkHubProjectedTurns,
+  visibleWorkHubConversation,
   workHubSubmissionCanCorrect,
   workHubSubmissionClearsDraft,
 } from '../../renderer/workhub-surface.js';
 import {
-  boundedWorkHubTimelineText,
   createWorkHubController,
   WORKHUB_ROUTING_STRATEGY_ID,
   type WorkHubController,
@@ -96,13 +94,6 @@ test('surface projection refresh gate rejects older reads after a newer refresh 
   assert.equal(second(), false);
 });
 
-test('projected archived Session keeps the actual turn state visible', () => {
-  assert.deepEqual(projectedWorkHubTurnPresentation('failed', true, 'zh'), {
-    heading: '来自已归档 Session：',
-    state: '失败',
-  });
-});
-
 test('surface keeps the Composer draft when routing fails or the target is waiting', () => {
   assert.equal(workHubSubmissionClearsDraft(undefined), false);
   assert.equal(workHubSubmissionClearsDraft({
@@ -134,108 +125,42 @@ test('surface disables correction after a request was steered into existing work
   assert.equal(workHubSubmissionCanCorrect({ ...submission, steered: true }), false);
 });
 
-test('surface hides a rebuilt Session turn while the matching local turn is still mounted', () => {
-  assert.deepEqual(
-    visibleWorkHubProjectedTurns(
-      [{
-        messageId: 'user-0',
-        target: { sessionId: 'payment' },
-        turnId: 'turn-payment',
-        text: '检查支付回调风险',
-        state: 'running',
-        updatedAt: 9,
-      }, {
-        messageId: 'user-1',
-        target: { sessionId: 'payment' },
-        turnId: 'turn-payment',
-        text: '补充重复投递测试',
-        state: 'completed',
-        updatedAt: 10,
-      }],
-      [{
-        requestId: 'request-payment',
-        text: '补充重复投递测试',
-        state: 'settled',
-        outcome: {
-          kind: 'submitted',
-          strategyId: WORKHUB_ROUTING_STRATEGY_ID,
-          requestId: 'request-payment',
-          target: { sessionId: 'payment' },
-          turnId: 'turn-payment',
-          evidence: 'explicit_target',
-        },
-      }],
-    ),
-    [{
-      messageId: 'user-0',
-      target: { sessionId: 'payment' },
-      turnId: 'turn-payment',
-      text: '检查支付回调风险',
-      state: 'running',
-      updatedAt: 9,
-    }],
-  );
-});
-
-test('surface canonicalizes bounded text before suppressing a local duplicate', () => {
-  const text = '长'.repeat(700);
-  assert.deepEqual(visibleWorkHubProjectedTurns([{
-    messageId: 'user-long',
-    target: { sessionId: 'payment' },
-    turnId: 'turn-long',
-    text: boundedWorkHubTimelineText(text),
-    state: 'running',
-    updatedAt: 10,
-  }], [{
-    requestId: 'request-long',
-    text,
-    state: 'settled',
+test('surface replaces a local discussion placeholder with its durable model answer', () => {
+  const local = [{
+    requestId: 'discussion-turn',
+    text: 'What is next?',
+    state: 'settled' as const,
     outcome: {
-      kind: 'submitted',
+      kind: 'discussion' as const,
       strategyId: WORKHUB_ROUTING_STRATEGY_ID,
-      requestId: 'request-long',
-      target: { sessionId: 'payment' },
-      turnId: 'turn-long',
-      evidence: 'explicit_target',
+      requestId: 'discussion-turn',
+      text: 'What is next?',
     },
-  }]), []);
-});
-
-test('surface suppresses the newest matching projected steering turn', () => {
-  const projected = [{
-    messageId: 'user-old',
-    target: { sessionId: 'payment' },
-    turnId: 'turn-payment',
-    text: '继续检查',
-    state: 'running' as const,
-    updatedAt: 9,
-  }, {
-    messageId: 'user-new',
-    target: { sessionId: 'payment' },
-    turnId: 'turn-payment',
-    text: '继续检查',
-    state: 'running' as const,
+  }];
+  const durable = [{
+    messageId: 'user-message',
+    turnId: 'discussion-turn',
+    text: 'What is next?',
+    result: 'Slice 3 is next.',
+    state: 'completed' as const,
     updatedAt: 10,
   }];
-  assert.deepEqual(visibleWorkHubProjectedTurns(projected, [{
-    requestId: 'request-new',
-    text: '继续检查',
-    state: 'settled',
-    outcome: {
-      kind: 'submitted',
-      strategyId: WORKHUB_ROUTING_STRATEGY_ID,
-      requestId: 'request-new',
-      target: { sessionId: 'payment' },
-      turnId: 'turn-payment',
-      evidence: 'explicit_target',
-    },
-  }]), [projected[0]]);
+
+  assert.deepEqual(visibleWorkHubConversation(durable, local), {
+    coordination: durable,
+    local: [],
+  });
 });
 
 test('surface keeps clarification and successful routing in WorkHub', async () => {
   const submissions: WorkHubSubmitInput[] = [];
   const controller: WorkHubController = {
     read: async () => ({ sessions: [], turns: [] }),
+    openConversation: async (handler) => {
+      handler([]);
+      return { close: async () => undefined };
+    },
+    recordConversationTurn: async ({ turnId }) => ({ turnId }),
     resetVisitContext: () => {},
     subscribe: () => () => {},
     submit: async (input) => {
@@ -285,6 +210,11 @@ test('surface keeps clarification and successful routing in WorkHub', async () =
 test('surface leaves discussion in WorkHub instead of creating a task view', async () => {
   const controller: WorkHubController = {
     read: async () => ({ sessions: [], turns: [] }),
+    openConversation: async (handler) => {
+      handler([]);
+      return { close: async () => undefined };
+    },
+    recordConversationTurn: async ({ turnId }) => ({ turnId }),
     resetVisitContext: () => {},
     subscribe: () => () => {},
     submit: async (input) => ({

@@ -1225,6 +1225,7 @@ export async function createExecutionRuntimeHostComposition(
       stores: stores.sessionStore,
       admission: sessionAdmission,
       continuity: continuityCoordinator,
+      executions: coordinator,
       resolveCreateTarget: async () => {
         const { projectId: _projectId, ...target } =
           await sessionCatalog.resolveExternalSessionImportTarget();

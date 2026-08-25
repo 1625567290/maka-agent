@@ -22,7 +22,9 @@ import type { ReconnectableReadIpcMain } from './ipc-reconnect-policy.js';
 
 type RuntimeHostWorkHubClient = Pick<
   DesktopRuntimeHostClient,
-  'resolveWorkHubCoordinationSession'
+  | 'answerWorkHubCoordination'
+  | 'recordWorkHubCoordination'
+  | 'resolveWorkHubCoordinationSession'
 >;
 
 /** Projects the Runtime Host WorkHub domain onto renderer IPC. */
@@ -32,5 +34,11 @@ export function registerRuntimeHostWorkHubIpc(
 ): void {
   ipcMain.handle('workhub:resolveCoordinationSession', () =>
     client.resolveWorkHubCoordinationSession(),
+  );
+  ipcMain.handle('workhub:answer', (_event, input) =>
+    client.answerWorkHubCoordination(input),
+  );
+  ipcMain.handle('workhub:record', (_event, input) =>
+    client.recordWorkHubCoordination(input),
   );
 }

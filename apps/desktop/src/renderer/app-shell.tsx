@@ -126,6 +126,7 @@ import { createWorkHubController } from './workhub-controller.js';
 import { startWorkHubCoordinationLifecycle } from './workhub-coordination-lifecycle.js';
 import { scopeWorkHubSessionsToCoordinationHost } from './workhub-coordination-host-scope.js';
 import { createDesktopWorkHubSessionPort } from './workhub-session-port.js';
+import { createDesktopWorkHubCoordinationPort } from './workhub-coordination-port.js';
 import { WorkHubCoordinationStatus, WorkHubSurface } from './workhub-surface.js';
 import { getShellCopy, localizedShellErrorMessage } from './locales/shell-copy';
 import { getDesktopConversationCopy } from './locales/conversation-copy';
@@ -1524,6 +1525,14 @@ function AppShellContent({
   const workHubCoordinationGeneration = workHubCoordinationGenerationRef.current;
   const workHubController = useMemo(
     () => createWorkHubController({
+      coordination: createDesktopWorkHubCoordinationPort({
+        sessionId: workHubCoordinationSessionId ?? 'workhub-coordination-unresolved',
+        transcripts: window.maka.transcripts,
+        answer: (input) =>
+          window.maka.workHub.answer(workHubCoordinationSessionId!, input),
+        record: (input) =>
+          window.maka.workHub.record(workHubCoordinationSessionId!, input),
+      }),
       sessions: createDesktopWorkHubSessionPort({
         sessions: scopeWorkHubSessionsToCoordinationHost(
           window.maka.sessions,

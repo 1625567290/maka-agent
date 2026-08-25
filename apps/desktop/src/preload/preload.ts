@@ -1536,6 +1536,26 @@ const makaBridge = {
         (scope) => ipcRenderer.invoke('workhub:resolveCoordinationSession', scope),
       );
     },
+    async answer(
+      coordinationSessionId: string,
+      input: { turnId: string; text: string },
+    ): Promise<{ turnId: string }> {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(
+        coordinationSessionId,
+        runtimeHostSessionRef,
+      );
+      return ipcRenderer.invoke('workhub:answer', scope, input) as Promise<{ turnId: string }>;
+    },
+    async record(
+      coordinationSessionId: string,
+      input: { turnId: string; userText: string; assistantText: string },
+    ): Promise<{ turnId: string }> {
+      const scope = await resolveDesktopWorkHubCoordinationCreateScope(
+        coordinationSessionId,
+        runtimeHostSessionRef,
+      );
+      return ipcRenderer.invoke('workhub:record', scope, input) as Promise<{ turnId: string }>;
+    },
     async createSession(
       coordinationSessionId: string,
       input: { name: string },
