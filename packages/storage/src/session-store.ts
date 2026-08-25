@@ -80,6 +80,14 @@ import {
   type TurnStateMessage,
   type UserMessage,
 } from '@maka/core/session';
+import type { MessageAdmissionStore, PendingMessageAdmission } from './message-admission-store.js';
+import {
+  isVisibleSessionMessage,
+  lastMessagePreviewForMessages,
+  latestVisibleMessageAt,
+  projectSessionCatalogMessages,
+} from './session-message-projection.js';
+export { projectSessionCatalogMessages };
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -299,7 +307,7 @@ export interface SessionStore {
   close?(): Promise<void>;
 }
 
-export interface SessionAuthorityStore extends SessionStore {
+export interface SessionAuthorityStore extends SessionStore, MessageAdmissionStore {
   /** Read a bounded set of durable messages at an inclusive transcript watermark. */
   readTranscriptMessagesSnapshot(
     sessionId: string,
@@ -857,6 +865,51 @@ class SqliteSessionStore implements SessionAuthorityStore {
     for (const listener of this.transcriptChangeListeners) listener(sessionId);
   }
 
+  async commitMessageAdmission(
+    admission: PendingMessageAdmission,
+  ): Promise<PendingMessageAdmission> {
+    await this.ensureReady();
+    return this.metadata.commitMessageAdmission(admission);
+  }
+
+  async readMessageAdmission(
+    sessionId: string,
+    messageId: string,
+  ): Promise<PendingMessageAdmission | undefined> {
+    await this.ensureReady();
+    return this.metadata.readMessageAdmission(sessionId, messageId);
+  }
+
+  async listMessageAdmissions(sessionId: string): Promise<readonly PendingMessageAdmission[]> {
+    await this.ensureReady();
+    return this.metadata.listMessageAdmissions(sessionId);
+  }
+
+  async markMessagesHandedOff(input: {
+    sessionId: string;
+    messageIds: readonly string[];
+    turnId: string;
+  }): Promise<void> {
+    await this.ensureReady();
+    await this.metadata.markMessagesHandedOff(input);
+    for (const listener of this.transcriptChangeListeners) listener(input.sessionId);
+  }
+
+  async updateMessageAdmission(admission: PendingMessageAdmission): Promise<void> {
+    await this.ensureReady();
+    await this.metadata.updateMessageAdmission(admission);
+  }
+
+  async reorderMessageAdmissions(sessionId: string, messageIds: readonly string[]): Promise<void> {
+    await this.ensureReady();
+    await this.metadata.reorderMessageAdmissions(sessionId, messageIds);
+  }
+
+  async cancelMessageAdmissions(sessionId: string, messageIds: readonly string[]): Promise<void> {
+    await this.ensureReady();
+    await this.metadata.cancelMessageAdmissions(sessionId, messageIds);
+  }
+
   subscribeTranscriptChanges(listener: (sessionId: string) => void): () => void {
     this.transcriptChangeListeners.add(listener);
     return () => this.transcriptChangeListeners.delete(listener);
@@ -1360,32 +1413,6 @@ function toCatalogSummary(
   };
 }
 
-export function projectSessionCatalogMessages(messages: readonly StoredMessage[]): {
-  readonly lastMessageAt?: number;
-  readonly lastMessagePreview?: string;
-} {
-  const lastMessageAt = latestVisibleMessageAt(messages);
-  const lastMessagePreview = lastMessagePreviewForMessages(messages);
-  return {
-    ...(lastMessageAt === undefined ? {} : { lastMessageAt }),
-    ...(lastMessagePreview === undefined ? {} : { lastMessagePreview }),
-  };
-}
-
-function latestVisibleMessageAt(messages: readonly StoredMessage[]): number | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!;
-    if (isVisibleSessionMessage(message)) return message.ts;
-  }
-  return undefined;
-}
-
-function isVisibleSessionMessage(
-  message: StoredMessage,
-): message is Extract<StoredMessage, { type: 'user' | 'assistant' }> {
-  return message.type === 'user' || message.type === 'assistant';
-}
-
 function maxTimestamp(left: number | undefined, right: number | undefined): number | undefined {
   if (left === undefined) return right;
   if (right === undefined) return left;
@@ -1394,34 +1421,6 @@ function maxTimestamp(left: number | undefined, right: number | undefined): numb
 
 function normalizeSessionName(name: string): string {
   return name === 'New Session' ? DEFAULT_SESSION_NAME : name;
-}
-
-function lastMessagePreviewForMessages(messages: readonly StoredMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!;
-    if (message.type === 'user') {
-      // Prefer the human-facing view when the stored model text is a composed
-      // envelope (e.g. explicit skill invocation).
-      const text = normalizePreviewText(message.displayText ?? message.text);
-      if (text) return truncatePreview(text);
-      if (message.attachments && message.attachments.length > 0) return '附件';
-    }
-    if (message.type === 'assistant') {
-      const text = normalizePreviewText(message.text);
-      if (text) return truncatePreview(text);
-    }
-  }
-  return undefined;
-}
-
-function normalizePreviewText(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-function truncatePreview(text: string, maxLength = 96): string {
-  const chars = Array.from(text);
-  if (chars.length <= maxLength) return text;
-  return `${chars.slice(0, maxLength - 1).join('')}…`;
 }
 
 export function createUserMessage(input: {
