@@ -18,7 +18,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { ChatMessage, ChatMessageBubble, ChatMessageList } from '@astryxdesign/core';
+import {
+  ChatMessage,
+  ChatMessageBubble,
+  ChatMessageList,
+  Skeleton,
+} from '@astryxdesign/core';
 import { Button } from '@astryxdesign/core/Button';
 import type { UiLocale } from '@maka/core/ui-locale';
 import { ChatSurfaceLayout, Composer } from '@maka/ui';
@@ -147,38 +152,45 @@ export function projectedWorkHubTurnPresentation(
 export function WorkHubSurface(props: {
   controller: WorkHubController;
   locale: UiLocale;
+  initialFocusSessionId?: string;
   onOpenSession(sessionId: string): void;
 }) {
   const copy = workHubCopy(props.locale);
   const [projection, setProjection] = useState<WorkHubProjection>({ sessions: [], turns: [] });
   const [turns, setTurns] = useState<WorkHubConversationTurn[]>([]);
   const [pending, setPending] = useState(false);
+  const [initialLoadSettled, setInitialLoadSettled] = useState(false);
   // React state paints the lock; the gate closes the same-frame window before
   // a rerender can disable Composer and clarification controls.
   const routeGate = useRef(new WorkHubSurfaceRouteGate()).current;
   const refreshGate = useRef(new WorkHubProjectionRefreshGate()).current;
   const [loadError, setLoadError] = useState(false);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (focusSessionId?: string) => {
     const isLatest = refreshGate.begin();
     try {
-      const next = await props.controller.read();
+      const next = await props.controller.read(focusSessionId
+        ? { focus: { sessionId: focusSessionId } }
+        : undefined);
       if (!isLatest()) return;
       setProjection(next);
       setLoadError(false);
+      setInitialLoadSettled(true);
     } catch {
       if (!isLatest()) return;
       setLoadError(true);
+      setInitialLoadSettled(true);
     }
   }, [props.controller, refreshGate]);
 
   useEffect(() => {
-    void refresh();
+    void refresh(props.initialFocusSessionId);
     const unsubscribe = props.controller.subscribe(() => void refresh());
     return () => {
       refreshGate.invalidate();
       unsubscribe();
+      props.controller.resetVisitContext();
     };
-  }, [props.controller, refresh, refreshGate]);
+  }, [props.controller, props.initialFocusSessionId, refresh, refreshGate]);
 
   const route = useCallback(async (
     input: WorkHubSubmitInput,
@@ -217,14 +229,14 @@ export function WorkHubSurface(props: {
 
   const send = useCallback(async (value: string) => {
     const text = value.trim();
-    if (!text || routeGate.pending) return false;
+    if (!text || !initialLoadSettled || routeGate.pending) return false;
     const requestId = crypto.randomUUID();
     setTurns((current) => [...current, { requestId, text, state: 'routing' }]);
     const result = await route({ requestId, text });
     // Composer clears only accepted drafts. Waiting, delivery failures, and a
     // ref-blocked duplicate keep the exact text available for retry.
     return workHubSubmissionClearsDraft(result);
-  }, [route, routeGate]);
+  }, [initialLoadSettled, route, routeGate]);
   const projectedTurns = visibleWorkHubProjectedTurns(projection.turns, turns);
   const conversationEmpty = projectedTurns.length === 0 && turns.length === 0;
 
@@ -237,7 +249,7 @@ export function WorkHubSurface(props: {
           draftKey="workhub"
           onSend={send}
           onStop={() => {}}
-          sendBlocked={pending}
+          sendBlocked={pending || !initialLoadSettled}
           modelLabel="WorkHub"
         />
       )}
@@ -248,7 +260,9 @@ export function WorkHubSurface(props: {
             <h1>WorkHub</h1>
             <p>{copy.subtitle}</p>
           </div>
-          <span>{copy.workCount(projection.sessions.length)}</span>
+          <span>{initialLoadSettled
+            ? copy.workCount(projection.sessions.length)
+            : copy.loading}</span>
         </header>
 
         <div className="maka-chat-shell">
@@ -258,7 +272,9 @@ export function WorkHubSurface(props: {
             gap={4}
             isStreaming={pending}
           >
-            {loadError ? (
+            {!initialLoadSettled ? (
+              <WorkHubLoadingState label={copy.loading} />
+            ) : loadError ? (
               <div className="workhub-empty" role="alert">{copy.loadFailed}</div>
             ) : conversationEmpty ? (
               <div className="workhub-empty">
@@ -287,6 +303,9 @@ export function WorkHubSurface(props: {
                       requestId: turn.requestId,
                       text: turn.text,
                       explicitTarget: target,
+                      ...(turn.outcome?.kind === 'clarification' && turn.outcome.correction
+                        ? { correction: turn.outcome.correction }
+                        : {}),
                     })}
                     onCorrect={(from, target) => void route({
                       requestId: turn.requestId,
@@ -307,6 +326,27 @@ export function WorkHubSurface(props: {
         </div>
       </main>
     </ChatSurfaceLayout>
+  );
+}
+
+function WorkHubLoadingState(props: { label: string }) {
+  return (
+    <div
+      className="workhub-turns workhub-loading"
+      role="status"
+      aria-busy="true"
+      aria-label={props.label}
+    >
+      {[0, 1].map((index) => (
+        <div key={index} className="workhub-turn workhub-loading-turn" aria-hidden="true">
+          <div className="workhub-loading-user">
+            <Skeleton width="38%" height={44} radius="rounded" index={index * 3} />
+          </div>
+          <Skeleton width="28%" height={12} radius="rounded" index={index * 3 + 1} />
+          <Skeleton width="100%" height={72} radius={3} index={index * 3 + 2} />
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -533,6 +573,7 @@ function workHubCopy(locale: UiLocale) {
       waitingForDecision: '这项工作正在等待你的决定。',
       requestNotSent: '新请求尚未发送；处理原 Session 中的交互后可以再次发送。',
       routing: '正在判断应该交给哪个 Session…', loadFailed: '无法读取已有工作。',
+      loading: '正在读取已有工作…',
       submitFailed: '输入未能送达，请重试。', scrollToBottom: '滚动到底部', archived: '已归档',
       states: { active: '活跃', running: '进行中', waiting_for_user: '等待你', blocked: '受阻', aborted: '已中止' },
       turnStates: { running: '进行中', completed: '已完成', aborted: '已中止', failed: '失败' },
@@ -557,6 +598,7 @@ function workHubCopy(locale: UiLocale) {
     waitingForDecision: 'This work is waiting for your decision.',
     requestNotSent: 'The new request was not sent. Resolve the interaction in its Session, then send again.',
     routing: 'Choosing the right Session…', loadFailed: 'Could not read existing work.',
+    loading: 'Loading existing work…',
     submitFailed: 'The input could not be delivered. Try again.', scrollToBottom: 'Scroll to bottom', archived: 'Archived',
     states: { active: 'Active', running: 'Running', waiting_for_user: 'Waiting for you', blocked: 'Blocked', aborted: 'Aborted' },
     turnStates: { running: 'Running', completed: 'Completed', aborted: 'Aborted', failed: 'Failed' },

@@ -91,6 +91,15 @@
   flex-direction: column;
 }
 
+.workhub-loading-user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.workhub-loading-turn {
+  min-height: 172px;
+}
+
 .workhub-turn {
   display: flex;
   flex-direction: column;

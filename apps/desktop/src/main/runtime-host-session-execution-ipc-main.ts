@@ -299,7 +299,9 @@ export function registerRuntimeHostSessionExecutionIpc(
         }
         const submitted = await deps.client.submitMessage({
           sessionId,
-          messageId: newId(),
+          // Preserve the renderer's command identity in the durable message so
+          // a lost IPC reply can be reconciled as root-vs-steering later.
+          messageId: turnId,
           content: startInput.content,
           placement: "current_turn",
         });

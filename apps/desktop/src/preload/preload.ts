@@ -105,7 +105,10 @@ import type {
 import type { BotProvider } from '@maka/core/bot-chat-settings';
 import type { BotOnboardingSnapshot, BotOnboardingStartInput } from '@maka/core/bot-onboarding';
 import type { HealthSnapshot } from '@maka/core/health';
-import { collectRuntimeHostSessionCatalogs } from './runtime-host-session-catalog.js';
+import {
+  collectRuntimeHostSessionCatalogs,
+  collectRuntimeHostSessionCatalogsWithCoverage,
+} from './runtime-host-session-catalog.js';
 import type { ExecutionBoundaryReadModel, SandboxBoundaryResponse } from '@maka/core/sandbox-boundary';
 import type {
   ActiveInteractionRequestEvent,
@@ -819,6 +822,21 @@ async function listDesktopSessions(
   );
 }
 
+async function listDesktopSessionsWithCoverage(): Promise<{
+  sessions: DesktopSessionSummary[];
+  completeHostIds: string[];
+}> {
+  const scopes = await runtimeHostScopeList();
+  return collectRuntimeHostSessionCatalogsWithCoverage(
+    scopes.map((scope) => ({
+      hostId: scope.hostId,
+      sessions: ipcRenderer.invoke('sessions:list', scope)
+        .then((sessions: SessionCatalogSummary[]) =>
+          sessions.map((session) => projectSessionSummary(scope, session))),
+    })),
+  );
+}
+
 function sendActiveRuntimeHost(channel: string, ...args: unknown[]): void {
   void activeRuntimeHostRef()
     .then((scope) => ipcRenderer.send(channel, scope, ...args))
@@ -1491,6 +1509,9 @@ const makaBridge = {
   sessions: {
     list(filter?: SessionListFilter): Promise<DesktopSessionSummary[]> {
       return listDesktopSessions(filter);
+    },
+    listWithCoverage() {
+      return listDesktopSessionsWithCoverage();
     },
     /**
      * The single session-creation channel (#1433). `mode` names a

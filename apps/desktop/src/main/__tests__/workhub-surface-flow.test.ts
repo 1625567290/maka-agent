@@ -31,6 +31,7 @@ import {
 import {
   boundedWorkHubTimelineText,
   createWorkHubController,
+  WORKHUB_ROUTING_STRATEGY_ID,
   type WorkHubController,
   type WorkHubSubmitInput,
 } from '../../renderer/workhub-controller.js';
@@ -79,14 +80,14 @@ test('surface keeps the Composer draft when routing fails or the target is waiti
   assert.equal(workHubSubmissionClearsDraft(undefined), false);
   assert.equal(workHubSubmissionClearsDraft({
     kind: 'waiting',
-    strategyId: 'wh-r2.3-session-core-evidence',
+    strategyId: WORKHUB_ROUTING_STRATEGY_ID,
     requestId: 'waiting',
     text: '继续处理',
     target: { sessionId: 'payment' },
   }), false);
   assert.equal(workHubSubmissionClearsDraft({
     kind: 'discussion',
-    strategyId: 'wh-r2.3-session-core-evidence',
+    strategyId: WORKHUB_ROUTING_STRATEGY_ID,
     requestId: 'discussion',
     text: '先讨论方向',
   }), true);
@@ -95,7 +96,7 @@ test('surface keeps the Composer draft when routing fails or the target is waiti
 test('surface disables correction after a request was steered into existing work', () => {
   const submission = {
     kind: 'submitted' as const,
-    strategyId: 'wh-r2.3-session-core-evidence' as const,
+    strategyId: WORKHUB_ROUTING_STRATEGY_ID,
     requestId: 'steered',
     target: { sessionId: 'payment' },
     turnId: 'turn-existing',
@@ -130,7 +131,7 @@ test('surface hides a rebuilt Session turn while the matching local turn is stil
         state: 'settled',
         outcome: {
           kind: 'submitted',
-          strategyId: 'wh-r2.3-session-core-evidence',
+          strategyId: WORKHUB_ROUTING_STRATEGY_ID,
           requestId: 'request-payment',
           target: { sessionId: 'payment' },
           turnId: 'turn-payment',
@@ -164,7 +165,7 @@ test('surface canonicalizes bounded text before suppressing a local duplicate', 
     state: 'settled',
     outcome: {
       kind: 'submitted',
-      strategyId: 'wh-r2.3-session-core-evidence',
+      strategyId: WORKHUB_ROUTING_STRATEGY_ID,
       requestId: 'request-long',
       target: { sessionId: 'payment' },
       turnId: 'turn-long',
@@ -195,7 +196,7 @@ test('surface suppresses the newest matching projected steering turn', () => {
     state: 'settled',
     outcome: {
       kind: 'submitted',
-      strategyId: 'wh-r2.3-session-core-evidence',
+      strategyId: WORKHUB_ROUTING_STRATEGY_ID,
       requestId: 'request-new',
       target: { sessionId: 'payment' },
       turnId: 'turn-payment',
@@ -208,13 +209,14 @@ test('surface keeps clarification and successful routing in WorkHub', async () =
   const submissions: WorkHubSubmitInput[] = [];
   const controller: WorkHubController = {
     read: async () => ({ sessions: [], turns: [] }),
+    resetVisitContext: () => {},
     subscribe: () => () => {},
     submit: async (input) => {
       submissions.push(input);
       if (!input.explicitTarget) {
         return {
           kind: 'clarification',
-          strategyId: 'wh-r2.3-session-core-evidence',
+          strategyId: WORKHUB_ROUTING_STRATEGY_ID,
           requestId: input.requestId,
           text: input.text,
           options: [{
@@ -226,7 +228,7 @@ test('surface keeps clarification and successful routing in WorkHub', async () =
       }
       return {
         kind: 'submitted',
-        strategyId: 'wh-r2.3-session-core-evidence',
+        strategyId: WORKHUB_ROUTING_STRATEGY_ID,
         requestId: input.requestId,
         target: input.explicitTarget,
         turnId: 'turn-payment',
@@ -256,10 +258,11 @@ test('surface keeps clarification and successful routing in WorkHub', async () =
 test('surface leaves discussion in WorkHub instead of creating a task view', async () => {
   const controller: WorkHubController = {
     read: async () => ({ sessions: [], turns: [] }),
+    resetVisitContext: () => {},
     subscribe: () => () => {},
     submit: async (input) => ({
       kind: 'discussion',
-      strategyId: 'wh-r2.3-session-core-evidence',
+      strategyId: WORKHUB_ROUTING_STRATEGY_ID,
       requestId: input.requestId,
       text: input.text,
     }),

@@ -44,14 +44,16 @@ test('WorkHub rebuilds Session conversation after navigating away and back', asy
     }),
   ).toBeVisible();
 
-  const routedPrompt = `继续${sessionName}，补充重复投递测试点。`;
+  const routedPrompt = '继续这个工作，补充重复投递测试点。';
   const workHubComposer = page.locator(
     '.workhub-surface .maka-composer-editor [contenteditable="true"]',
   );
   await workHubComposer.fill(routedPrompt);
   await workHubComposer.press('Enter');
   await expect(page.locator('.workhub-submitted').last()).toBeVisible();
-  await page.locator('.workhub-submitted > button').last().click();
+  await page.locator('.workhub-turn', { hasText: routedPrompt })
+    .locator('.workhub-submitted > button')
+    .click();
   await expect(page.getByRole('main', { name: 'WorkHub' })).toBeHidden();
 
   await page.getByRole('button', { name: 'WorkHub', exact: true }).click();
@@ -61,4 +63,48 @@ test('WorkHub rebuilds Session conversation after navigating away and back', asy
       hasText: routedPrompt,
     }),
   ).toBeVisible();
+});
+
+test('WorkHub handles a first natural-language correction', async ({
+  window: page,
+}) => {
+  const composer = page.locator(COMPOSER_INPUT);
+  await composer.fill('检查支付回调重复投递时的幂等性');
+  await composer.press('Enter');
+  await expect(page.getByRole('button', { name: '重新生成' })).toHaveCount(1, {
+    timeout: 20_000,
+  });
+  await page.evaluate(async () => {
+    await window.maka.settings.updateClient({ workHub: { enabled: true } });
+  });
+  await expect(page.getByRole('main', { name: 'WorkHub' })).toBeVisible();
+  await page.evaluate(async () => {
+    await window.maka.sessions.create({ name: '登录稳定性' });
+  });
+  await expect(page.getByText('2 项工作', { exact: true })).toBeVisible();
+
+  const workHubComposer = page.locator(
+    '.workhub-surface .maka-composer-editor [contenteditable="true"]',
+  );
+  await workHubComposer.fill('继续这个工作，补充重复投递测试点。');
+  await workHubComposer.press('Enter');
+  const continuedTurn = page.locator('.workhub-turn', {
+    hasText: '继续这个工作，补充重复投递测试点。',
+  });
+  await expect(
+    continuedTurn.locator('.workhub-submitted-session strong'),
+  ).toHaveText('检查支付回调重复投递时的幂等性');
+
+  await workHubComposer.fill('不是这个，换成登录稳定性，补充刷新令牌失败判定。');
+  await expect(
+    page.locator('.workhub-surface').getByRole('button', { name: '发送' }),
+  ).toBeEnabled();
+  await workHubComposer.press('Enter');
+
+  await expect(page.locator('.workhub-correction-note').last()).toBeVisible();
+  await expect(
+    page.locator('.workhub-turn', {
+      hasText: '不是这个，换成登录稳定性，补充刷新令牌失败判定。',
+    }).locator('.workhub-submitted-session strong'),
+  ).toHaveText('登录稳定性');
 });

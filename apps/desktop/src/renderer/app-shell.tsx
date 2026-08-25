@@ -1476,14 +1476,21 @@ function AppShellContent({
     captureActiveComposerClaim,
   });
   refreshProjectSkillsRef.current = moduleHub.commands.refreshProjectSkills;
-  const workHubController = useMemo(() => createWorkHubController({
-    sessions: createDesktopWorkHubSessionPort({
-      sessions: window.maka.sessions,
-      transcripts: window.maka.transcripts,
-      projectName: (projectId) => projects.find((project) => project.id === projectId)?.name,
-      newTurnId: () => crypto.randomUUID(),
-    }),
-  }), [projects]);
+  const workHubProjectsRef = useRef(projects);
+  workHubProjectsRef.current = projects;
+  const workHubControllerRef = useRef<ReturnType<typeof createWorkHubController> | null>(null);
+  if (!workHubControllerRef.current) {
+    workHubControllerRef.current = createWorkHubController({
+      sessions: createDesktopWorkHubSessionPort({
+        sessions: window.maka.sessions,
+        transcripts: window.maka.transcripts,
+        projectName: (projectId) =>
+          workHubProjectsRef.current.find((project) => project.id === projectId)?.name,
+        newTurnId: () => crypto.randomUUID(),
+      }),
+    });
+  }
+  const workHubController = workHubControllerRef.current;
   // Where a NEW chat starts. Built unconditionally and handed to the composer,
   // which renders it only while no session owns it — the project is fixed once
   // the first message creates one, so there is nothing to pick after that.
@@ -2802,6 +2809,7 @@ function AppShellContent({
                 <WorkHubSurface
                   controller={workHubController}
                   locale={uiLocale}
+                  {...(activeId ? { initialFocusSessionId: activeId } : {})}
                   onOpenSession={openSessionInChat}
                 />
               ) : (
