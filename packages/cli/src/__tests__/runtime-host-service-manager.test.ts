@@ -63,6 +63,10 @@ import {
   type RuntimeHostServiceBackend,
 } from '../runtime-host-service-manager.js';
 import {
+  readRuntimeHostManagedUpdatePolicy,
+  writeRuntimeHostManagedUpdatePolicy,
+} from '../runtime-host-update-policy-store.js';
+import {
   createSystemdUserRuntimeHostService,
   renderSystemdUnit,
   resolveSystemdUserRuntimeHostServicePath,
@@ -263,7 +267,7 @@ describe('managed Runtime Host service', () => {
   });
 
   it('installs, reports, and cleanly uninstalls while retaining the State Root', async (t) => {
-    const base = await mkdtemp(join(tmpdir(), 'maka-runtime-host-service-'));
+    const base = await realpath(await mkdtemp(join(tmpdir(), 'maka-runtime-host-service-')));
     t.after(() => rm(base, { recursive: true, force: true }));
     const homeDir = join(base, 'home');
     const clientDataRoot = join(base, 'config', 'Maka');
@@ -271,11 +275,14 @@ describe('managed Runtime Host service', () => {
     const projectPath = join(base, 'projects');
     await writeFile(join(base, 'placeholder'), '', 'utf8');
     await mkdir(projectPath, { recursive: true });
-    const env = { XDG_CONFIG_HOME: join(base, 'xdg-config') };
+    const env = {
+      XDG_CONFIG_HOME: join(base, 'xdg-config'),
+      XDG_DATA_HOME: join(base, 'xdg-data'),
+    };
     const configPath = resolveRuntimeHostManagedServiceConfigPath(clientDataRoot);
     const serviceId = resolveRuntimeHostManagedServiceId(clientDataRoot);
     const deploymentRoot = resolveRuntimeHostManagedDeploymentRoot(serviceId, {
-      env: { XDG_DATA_HOME: join(base, 'xdg-data') },
+      env,
       homeDir,
       platform: 'linux',
     });
@@ -302,6 +309,9 @@ describe('managed Runtime Host service', () => {
     const managerDeps = {
       allocateLoopbackPort: async () => 49_999,
       waitForReady: async () => undefined,
+      environment: env,
+      homeDir,
+      platform: 'linux' as const,
     } as const;
 
     const installed = await manageRuntimeHostService(
@@ -394,6 +404,43 @@ describe('managed Runtime Host service', () => {
       rootPath: root.canonicalPath,
       rootId: root.rootId,
     } as const;
+    const updatePolicy = {
+      schemaVersion: 1 as const,
+      policy: { kind: 'channel' as const, channel: 'latest' as const },
+      target: expectedTarget,
+    };
+    await writeRuntimeHostManagedUpdatePolicy(deploymentRoot, updatePolicy);
+    await writeFile(configPath, '{not-json', 'utf8');
+    await manageRuntimeHostService(
+      {
+        ...common,
+        cliPath: globalCliPath,
+        action: 'uninstall',
+        retainManagedDeployment: true,
+        expectedTarget,
+      },
+      backend(),
+      managerDeps,
+    );
+    assert.equal(await readRuntimeHostManagedUpdatePolicy(deploymentRoot), null);
+    await access(deploymentRoot);
+
+    await manageRuntimeHostService({ ...common, action: 'install' }, backend(), managerDeps);
+    assert.equal(await readRuntimeHostManagedUpdatePolicy(deploymentRoot), null);
+    await writeRuntimeHostManagedUpdatePolicy(deploymentRoot, updatePolicy);
+    await assert.rejects(
+      manageRuntimeHostService(
+        {
+          ...common,
+          action: 'uninstall',
+          expectedTarget: { ...expectedTarget, rootId: 'f'.repeat(64) },
+        },
+        backend(),
+      ),
+      (error: unknown) =>
+        error instanceof RuntimeHostServiceManagerError && error.code === 'target_mismatch',
+    );
+    assert.deepEqual(await readRuntimeHostManagedUpdatePolicy(deploymentRoot), updatePolicy);
     await assert.rejects(
       cleanupRuntimeHostManagedDeployment(
         { clientDataRoot, cliPath: canonicalCliPath, expectedTarget },
@@ -412,6 +459,7 @@ describe('managed Runtime Host service', () => {
       },
       backend(),
     );
+    assert.equal(await readRuntimeHostManagedUpdatePolicy(deploymentRoot), null);
     await cleanupRuntimeHostManagedDeployment(
       { clientDataRoot, cliPath: canonicalCliPath, expectedTarget },
       backend(),
@@ -822,7 +870,9 @@ describe('managed Runtime Host service', () => {
     const legacyFrame = decodeRuntimeHostServiceManagementFrame(await run());
     assert.equal(legacyFrame?.kind, 'result');
     assert.equal(
-      legacyFrame?.kind === 'result' ? legacyFrame.operatorCapabilities : undefined,
+      legacyFrame?.kind === 'result' && legacyFrame.action === 'status'
+        ? legacyFrame.operatorCapabilities
+        : undefined,
       undefined,
     );
 
@@ -830,7 +880,9 @@ describe('managed Runtime Host service', () => {
       RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY;
     const frame = decodeRuntimeHostServiceManagementFrame(await run());
     assert.equal(frame?.kind, 'result');
-    if (frame?.kind !== 'result') assert.fail('Expected a service result frame');
+    if (frame?.kind !== 'result' || frame.action !== 'status') {
+      assert.fail('Expected a service status result frame');
+    }
     assert.equal(frame.service.installedVersion, '1.2.3');
     assert.deepEqual(frame.operatorCapabilities, ['access-management-v1']);
     assert.equal(frame.service.stateRoot, '/srv/maka');
@@ -839,9 +891,12 @@ describe('managed Runtime Host service', () => {
     process.env[RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV] =
       RUNTIME_HOST_OPERATOR_PROCESS_LIFETIME_LOCK_CAPABILITY;
     const lockFrame = decodeRuntimeHostServiceManagementFrame(await run());
-    assert.deepEqual(lockFrame?.kind === 'result' ? lockFrame.operatorCapabilities : undefined, [
-      'process-lifetime-lock-v1',
-    ]);
+    assert.deepEqual(
+      lockFrame?.kind === 'result' && lockFrame.action === 'status'
+        ? lockFrame.operatorCapabilities
+        : undefined,
+      ['process-lifetime-lock-v1'],
+    );
   });
 
   it('reads service logs when an interrupted install left no config', async (t) => {

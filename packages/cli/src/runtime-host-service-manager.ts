@@ -47,8 +47,11 @@ import {
 import {
   isRuntimeHostManagedDeploymentCli,
   removeRuntimeHostManagedDeployment,
+  resolveExistingRuntimeHostManagedDeploymentRoot,
   resolveRuntimeHostManagedDeploymentForCli,
+  resolveRuntimeHostManagedDeploymentRoot,
 } from './runtime-host-managed-deployment.js';
+import { writeRuntimeHostManagedUpdatePolicy } from './runtime-host-update-policy-store.js';
 
 const SERVICE_CONFIG_FILE = 'runtime-host-service.json';
 const SERVICE_LIFECYCLE_LOCK_FILE = 'runtime-host-setup';
@@ -201,6 +204,7 @@ interface RuntimeHostServiceManagerDeps {
   >;
   readonly environment: NodeJS.ProcessEnv;
   readonly homeDir: string;
+  readonly platform: NodeJS.Platform;
 }
 
 export class RuntimeHostServiceManagerError extends Error {
@@ -237,6 +241,7 @@ export async function manageRuntimeHostService(
     prepareRetirement: prepareRuntimeHostRetirement,
     environment: process.env,
     homeDir: homedir(),
+    platform: process.platform,
     ...overrides,
   };
   const configPath = resolveRuntimeHostManagedServiceConfigPath(input.clientDataRoot);
@@ -309,6 +314,7 @@ export async function replaceRuntimeHostManagedService(
     prepareRetirement: prepareRuntimeHostRetirement,
     environment: process.env,
     homeDir: homedir(),
+    platform: process.platform,
     ...overrides,
   };
   const configPath = resolveRuntimeHostManagedServiceConfigPath(input.clientDataRoot);
@@ -402,6 +408,33 @@ async function manageRuntimeHostServiceLocked(
     const managedDeploymentRoot =
       before?.managedDeploymentRoot ??
       resolveRuntimeHostManagedDeploymentForCli(serviceId, input.cliPath);
+    let policyDeploymentRoot: string | undefined;
+    try {
+      policyDeploymentRoot = await resolveExistingRuntimeHostManagedDeploymentRoot(
+        managedDeploymentRoot ??
+          resolveRuntimeHostManagedDeploymentRoot(serviceId, {
+            env: deps.environment,
+            homeDir: deps.homeDir,
+            platform: deps.platform,
+          }),
+        serviceId,
+      );
+    } catch (error) {
+      throw new RuntimeHostServiceManagerError(
+        'uninstall_incomplete',
+        'Unable to safely inspect the managed Runtime Host deployment before revoking automatic update policy',
+        { cause: error },
+      );
+    }
+    if (!policyDeploymentRoot && invalidConfig && !managedDeploymentRoot) {
+      throw new RuntimeHostServiceManagerError(
+        'uninstall_incomplete',
+        'Unable to confirm automatic update policy revocation because the service config is invalid and its managed deployment could not be located',
+      );
+    }
+    if (policyDeploymentRoot) {
+      await writeRuntimeHostManagedUpdatePolicy(policyDeploymentRoot, null);
+    }
     await backend.uninstall();
     await removeRuntimeHostServiceFile(configPath, 'service config');
     if (managedDeploymentRoot && !input.retainManagedDeployment) {
