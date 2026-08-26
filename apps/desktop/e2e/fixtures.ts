@@ -357,7 +357,13 @@ async function withE2eWindow(
     /** Deterministic native fixture size for geometry-sensitive surfaces. */
     windowSize?: { width: number; height: number };
   },
-  use: (page: Page, context: { userDataDir: string }) => Promise<void>,
+  use: (
+    page: Page,
+    context: {
+      userDataDir: string;
+      activateWindow(): Promise<{ appActive: boolean; windowFocused: boolean }>;
+    },
+  ) => Promise<void>,
 ): Promise<void> {
   const userDataDir = await mkdtemp(path.join(tmpdir(), 'maka-e2e-'));
   // Lives inside the throwaway userData dir so the existing teardown removes
@@ -434,7 +440,27 @@ async function withE2eWindow(
       const rendererDetail = rendererLogs.length > 0 ? `\nRenderer console:\n${rendererLogs.join('\n')}` : '';
       throw new Error(`${detail}${mainDetail}${rendererDetail}`, { cause: error });
     }
-    await use(page, { userDataDir });
+    const activateWindow = async () => {
+      await app.evaluate(({ app: electronApp }) => {
+        if (process.platform === 'darwin') electronApp.focus({ steal: true });
+        else electronApp.focus();
+      });
+      const windowHandle = await app.browserWindow(page);
+      let windowFocused = false;
+      try {
+        windowFocused = await windowHandle.evaluate((window) => {
+          if (window.isMinimized()) window.restore();
+          window.show();
+          window.focus();
+          return window.isFocused();
+        });
+      } finally {
+        await windowHandle.dispose();
+      }
+      const appActive = await app.evaluate(({ app: electronApp }) => electronApp.isActive());
+      return { appActive, windowFocused };
+    };
+    await use(page, { userDataDir, activateWindow });
   } finally {
     try {
       if (app) await closeElectronApplication(app, 5_000);
@@ -446,7 +472,10 @@ async function withE2eWindow(
 
 export const test = base.extend<{
   window: Page;
-  codeScrollWindow: Page;
+  codeScrollWindow: {
+    page: Page;
+    activate(): Promise<{ appActive: boolean; windowFocused: boolean }>;
+  };
   onboardingWindow: Page;
   gitReviewWindow: { page: Page; projectRoot: string };
   invocableSkillsWindow: Page;
@@ -470,7 +499,9 @@ export const test = base.extend<{
       readinessSelector: COMPOSER_INPUT,
       locale: 'zh',
       showWindow: true,
-    }, use);
+    }, async (page, { activateWindow }) => {
+      await use({ page, activate: activateWindow });
+    });
   },
   onboardingWindow: async ({}, use) => {
     await withE2eWindow({

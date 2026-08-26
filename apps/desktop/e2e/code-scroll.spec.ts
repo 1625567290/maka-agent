@@ -20,7 +20,7 @@
 import { expect, test, COMPOSER_INPUT } from './fixtures';
 
 test('a one-line Markdown code block exposes native and selection horizontal scrolling', async ({
-  codeScrollWindow: page,
+  codeScrollWindow: { page, activate },
 }) => {
   await page.setViewportSize({ width: 900, height: 700 });
   const longLine = Array.from(
@@ -138,6 +138,9 @@ test('a one-line Markdown code block exposes native and selection horizontal scr
     }
   };
   await page.bringToFront();
+  const nativeFocus = await activate();
+  expect(nativeFocus.appActive).toBe(true);
+  expect(nativeFocus.windowFocused).toBe(true);
   await page.mouse.click(metrics.rect.x + metrics.rect.width / 2, selectionGesture.y);
   await expect.poll(() => page.evaluate(() => document.hasFocus())).toBe(true);
   await viewport.evaluate(() => window.getSelection()?.removeAllRanges());
