@@ -29,6 +29,7 @@ import type {
 import type {
   AppIcon,
   AppIconChoice,
+  AppIconTarget,
   AppSettings,
   ChatDefaultsSettings,
   SettingsTestResult,
@@ -128,11 +129,21 @@ import type { DesktopSessionSummary } from '../shared/desktop-session-projection
  * picker can say which rather than showing one generic failure.
  */
 export type AppIconSelectResult =
-  | { readonly ok: true; readonly selection: AppIconChoice }
+  | {
+      readonly ok: true;
+      readonly selection: AppIconChoice;
+      /** Absent when one icon serves both appearances. */
+      readonly darkSelection?: AppIconChoice;
+    }
   | { readonly ok: false; readonly reason: 'invalid_id' | 'missing_artwork' | 'write_failed' };
 
 export type AppIconRemoveResult =
-  | { readonly ok: true; readonly selection: AppIconChoice }
+  | {
+      readonly ok: true;
+      readonly selection: AppIconChoice;
+      /** Absent when one icon serves both appearances. */
+      readonly darkSelection?: AppIconChoice;
+    }
   | { readonly ok: false; readonly reason: 'invalid_id' | 'reset_failed' | 'remove_failed' };
 
 export type AppIconImportResult =
@@ -1409,7 +1420,7 @@ export interface MakaBridge {
      * generic settings channel so it queues behind import and removal in the
      * main process, and so a choice whose artwork is gone can be refused.
      */
-    selectIcon(icon: AppIconChoice): Promise<AppIconSelectResult>;
+    selectIcon(icon: AppIconChoice, target?: AppIconTarget): Promise<AppIconSelectResult>;
     /** Opens a file picker in the main process and stores a normalized copy. */
     importIcon(): Promise<AppIconImportResult>;
     /**
