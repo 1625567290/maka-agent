@@ -346,8 +346,19 @@ test('pull request triggers stay on an explicit allowlist', () => {
     'gitoxide-helper-admission.yml',
     'release-windows-check.yml',
     'runtime-host-owner-platform.yml',
+    'windows-recovery.yml',
     'windows-sandbox-w0.yml',
   ]);
+});
+
+test('Windows recovery publishes one stable PR and main check for ruleset enforcement', () => {
+  const workflow = readWorkflow('windows-recovery.yml');
+
+  assert.match(workflow, /\n {2}pull_request:\n {4}branches: \[main\]/u);
+  assert.match(workflow, /\n {2}push:\n {4}branches: \[main\]/u);
+  assert.match(workflow, /\n {2}workflow_dispatch:/u);
+  assert.match(workflow, /\n {4}name: windows_recovery/u);
+  assert.match(workflow, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/u);
 });
 
 test('the sandbox lane pairs its path filter with a nightly run', () => {
@@ -436,6 +447,20 @@ test('specialized platform workflows stay reachable without pull requests', () =
   }
   assert.match(cli, /\n  workflow_call:/u);
   assert.match(baseline, /\n  schedule:/u);
+});
+
+test('Windows recovery executes the exact managed dependency ADS regressions', () => {
+  const recovery = readWorkflow('windows-recovery.yml');
+
+  assert.match(recovery, /name: Verify managed dependency alternate streams/u);
+  assert.match(recovery, /--test-name-pattern="NTFS alternate stream"/u);
+  assert.match(
+    recovery,
+    /packages\/storage\/dist\/__tests__\/managed-dependency-environment\.test\.js/u,
+  );
+  assert.match(recovery, /# tests 3/u);
+  assert.match(recovery, /# pass 3/u);
+  assert.match(recovery, /# skipped 0/u);
 });
 
 test('workflows never persist the job credential into the checkout', () => {
