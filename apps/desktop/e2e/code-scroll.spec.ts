@@ -101,51 +101,57 @@ test('a one-line Markdown code block exposes native and selection horizontal scr
     window.getSelection()?.removeAllRanges();
   });
   const code = viewport.locator('code');
-  const selectionStart = await code.evaluate((element) => {
+  const selectionGesture = await code.evaluate((element) => {
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
     let textNode = walker.nextNode();
     while (textNode && !(textNode.textContent ?? '').trim()) {
       textNode = walker.nextNode();
     }
     if (!textNode?.textContent) throw new Error('code line has no selectable text');
-    const range = document.createRange();
-    range.setStart(textNode, 0);
-    range.setEnd(textNode, Math.min(3, textNode.textContent.length));
-    const rect = range.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
+    const startRange = document.createRange();
+    startRange.setStart(textNode, 0);
+    startRange.setEnd(textNode, 1);
+    const anchorRange = document.createRange();
+    anchorRange.setStart(textNode, 0);
+    anchorRange.setEnd(textNode, Math.min(12, textNode.textContent.length));
+    const startRect = startRange.getBoundingClientRect();
+    const anchorRect = anchorRange.getBoundingClientRect();
+    if (
+      startRect.width <= 0 || startRect.height <= 0 ||
+      anchorRect.width <= 0 || anchorRect.height <= 0
+    ) {
       throw new Error('code line text has no visible range');
     }
     return {
-      x: rect.left + Math.min(2, rect.width / 2),
-      y: rect.top + rect.height / 2,
+      startX: startRect.left + startRect.width / 2,
+      anchorX: anchorRect.right - startRect.width / 2,
+      y: startRect.top + startRect.height / 2,
     };
   });
   const moveAcrossPaintedFrames = async (fromX: number, toX: number, steps: number) => {
     for (let step = 1; step <= steps; step += 1) {
       const progress = step / steps;
-      await page.mouse.move(fromX + (toX - fromX) * progress, selectionStart.y);
+      await page.mouse.move(fromX + (toX - fromX) * progress, selectionGesture.y);
       await page.evaluate(
         () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
       );
     }
   };
   await page.bringToFront();
-  await page.mouse.click(metrics.rect.x + metrics.rect.width / 2, selectionStart.y);
+  await page.mouse.click(metrics.rect.x + metrics.rect.width / 2, selectionGesture.y);
   await expect.poll(() => page.evaluate(() => document.hasFocus())).toBe(true);
   await viewport.evaluate(() => window.getSelection()?.removeAllRanges());
-  await page.mouse.dblclick(selectionStart.x, selectionStart.y, { delay: 50 });
-  await expect.poll(
-    () => viewport.evaluate(() => window.getSelection()?.toString().length ?? 0),
-  ).toBeGreaterThan(3);
 
-  const extensionStartX = selectionStart.x + 120;
   let afterSelectionDrag: { scrollLeft: number; selection: string } | undefined;
-  await page.keyboard.down('Shift');
-  await page.mouse.move(extensionStartX, selectionStart.y);
+  await page.mouse.move(selectionGesture.startX, selectionGesture.y);
   await page.mouse.down();
   try {
+    await moveAcrossPaintedFrames(selectionGesture.startX, selectionGesture.anchorX, 8);
+    await expect.poll(
+      () => viewport.evaluate(() => window.getSelection()?.toString().length ?? 0),
+    ).toBeGreaterThan(3);
     await moveAcrossPaintedFrames(
-      extensionStartX,
+      selectionGesture.anchorX,
       metrics.rect.x + metrics.rect.width + 50,
       20,
     );
@@ -161,7 +167,6 @@ test('a one-line Markdown code block exposes native and selection horizontal scr
     }));
   } finally {
     await page.mouse.up();
-    await page.keyboard.up('Shift');
   }
   if (!afterSelectionDrag) throw new Error('selection drag did not settle');
   expect(afterWheelScroll).toBeGreaterThan(0);
