@@ -457,7 +457,9 @@ async function withE2eWindow(
       } finally {
         await windowHandle.dispose();
       }
-      const appActive = await app.evaluate(({ app: electronApp }) => electronApp.isActive());
+      const appActive = await app.evaluate(({ app: electronApp }) =>
+        process.platform === 'darwin' ? electronApp.isActive() : true,
+      );
       return { appActive, windowFocused };
     };
     await use(page, { userDataDir, activateWindow });
