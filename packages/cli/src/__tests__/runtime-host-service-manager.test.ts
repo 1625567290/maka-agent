@@ -34,8 +34,10 @@ import { basename, dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 import {
   decodeRuntimeHostServiceManagementFrame,
+  encodeRuntimeHostServiceManagementFrame,
   RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY,
   RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV,
+  RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY,
   RUNTIME_HOST_OPERATOR_PROJECT_DIRECTORY_CONFIGURATION_REQUEST_ENV,
   RUNTIME_HOST_OPERATOR_PROCESS_LIFETIME_LOCK_CAPABILITY,
   RUNTIME_HOST_SERVICE_LOG_MAX_BYTES,
@@ -160,6 +162,7 @@ describe('managed Runtime Host service', () => {
         'service',
         'peer',
         'enable',
+        '--framed',
         '--listen',
         '/ip4/0.0.0.0/udp/44001/quic-v1',
         '--clear-coordination-relays',
@@ -174,6 +177,7 @@ describe('managed Runtime Host service', () => {
         kind: 'runtime-host-service-peer',
         action: 'enable',
         json: false,
+        framed: true,
         listenAddresses: ['/ip4/0.0.0.0/udp/44001/quic-v1'],
         coordinationRelays: [],
         expectedTarget: {
@@ -184,6 +188,23 @@ describe('managed Runtime Host service', () => {
       },
     );
     assert.equal(parseRuntimeHostCommand(['service', 'peer', 'disable']).kind, 'error');
+    for (const action of ['rotate', 'descriptor']) {
+      assert.equal(
+        parseRuntimeHostCommand([
+          'service',
+          'peer',
+          action,
+          '--framed',
+          '--expected-service-id',
+          'b'.repeat(64),
+          '--expected-root-path',
+          '/srv/maka',
+          '--expected-root-id',
+          'a'.repeat(64),
+        ]).kind,
+        'error',
+      );
+    }
     assert.equal(
       parseRuntimeHostCommand([
         'service',
@@ -1988,6 +2009,31 @@ describe('managed Runtime Host service', () => {
     assert.equal(frame.service.configurationFingerprint, undefined);
     assert.doesNotMatch(JSON.stringify(frame), /secret/u);
 
+    const futureFrame = decodeRuntimeHostServiceManagementFrame(
+      encodeRuntimeHostServiceManagementFrame({
+        ...frame,
+        operatorCapabilities: ['future-management-v2'],
+      }),
+    );
+    assert.deepEqual(
+      futureFrame?.kind === 'result' && futureFrame.action === 'status'
+        ? futureFrame.operatorCapabilities
+        : undefined,
+      ['future-management-v2'],
+    );
+
+    process.env[RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV] =
+      RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY;
+    const peerFrame = decodeRuntimeHostServiceManagementFrame(await run());
+    assert.deepEqual(
+      peerFrame?.kind === 'result' && peerFrame.action === 'status'
+        ? peerFrame.operatorCapabilities
+        : undefined,
+      [RUNTIME_HOST_OPERATOR_PEER_MANAGEMENT_CAPABILITY],
+    );
+
+    process.env[RUNTIME_HOST_OPERATOR_CAPABILITY_REQUEST_ENV] =
+      RUNTIME_HOST_OPERATOR_ACCESS_MANAGEMENT_CAPABILITY;
     process.env[RUNTIME_HOST_OPERATOR_PROJECT_DIRECTORY_CONFIGURATION_REQUEST_ENV] = '1';
     const configurationFrame = decodeRuntimeHostServiceManagementFrame(await run());
     if (configurationFrame?.kind !== 'result' || configurationFrame.action !== 'status') {

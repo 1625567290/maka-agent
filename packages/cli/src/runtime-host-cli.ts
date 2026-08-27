@@ -100,6 +100,7 @@ export type RuntimeHostCliCommand =
       kind: 'runtime-host-service-peer';
       action: 'enable' | 'disable' | 'status' | 'rotate' | 'descriptor';
       json: boolean;
+      framed?: true;
       clientDataRoot?: string;
       listenAddresses: string[];
       coordinationRelays?: string[];
@@ -480,6 +481,7 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
   let clearCoordinationRelays = false;
   const options = parseManagedServiceOptions(argv.slice(1), {
     allowConfiguration: false,
+    allowFramed: true,
     flagOptions: {
       '--clear-coordination-relays': () => {
         if (clearCoordinationRelays) return error('Duplicate --clear-coordination-relays');
@@ -501,6 +503,9 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
     },
   });
   if ('kind' in options) return options;
+  if (options.framed && (action === 'rotate' || action === 'descriptor')) {
+    return error(`runtime-host service peer ${action} does not support --framed`);
+  }
   if (listenAddresses.some(hasEphemeralRuntimeHostPeerPort)) {
     return error('--listen requires a stable non-zero transport port');
   }
@@ -528,6 +533,7 @@ function parseServicePeerCommand(argv: string[]): RuntimeHostCliCommand {
     kind: 'runtime-host-service-peer',
     action,
     json: options.json,
+    ...(options.framed ? { framed: true as const } : {}),
     ...(clientDataRoot ? { clientDataRoot } : {}),
     listenAddresses,
     ...(clearCoordinationRelays
