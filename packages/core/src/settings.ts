@@ -36,6 +36,7 @@ import {
 import { defaultLocalMemorySettings, normalizeLocalMemorySettings } from './local-memory.js';
 import type { PermissionMode } from './permission.js';
 import { decodePersistedPermissionMode } from './permission.js';
+import type { UsageProvenance } from './usage-ledger-merge.js';
 import {
   UI_LOCALE_PREFERENCES,
   isUiLocalePreference,
@@ -112,7 +113,7 @@ export interface AppNetworkSettings {
 }
 
 export type UsageRange = '24h' | '7d' | '30d' | 'all';
-export type UsageStatus = 'all' | 'success' | 'error';
+export type UsageStatus = 'all' | 'success' | 'error' | 'aborted';
 export type UsageTab = 'requests' | 'providers' | 'models' | 'tools' | 'pricing';
 
 export interface UsageSettings {
@@ -510,10 +511,10 @@ export interface UsageRequestLog {
   id: string;
   ts: number;
   kind: 'model' | 'tool';
-  sessionId: string;
+  sessionId?: string;
   /** Human-readable session title (SessionHeader.name); may be empty for untitled sessions. */
-  sessionName: string;
-  turnId: string;
+  sessionName?: string;
+  turnId?: string;
   provider: string;
   model: string;
   toolName?: string;
@@ -525,7 +526,7 @@ export interface UsageRequestLog {
   reasoning?: number;
   costUsd?: number;
   latencyMs?: number;
-  status: 'success' | 'error';
+  status: 'success' | 'error' | 'aborted';
 }
 
 export interface UsageSummary {
@@ -569,6 +570,19 @@ export interface UsageStats {
     inputPerMTokUsd: number;
     outputPerMTokUsd: number;
   }>;
+  /**
+   * Coverage/legacy/unreadable/pending accounting behind these totals, so the
+   * page can qualify a cost that reads low (unpriced/unreadable/pending) rather
+   * than presenting it as authoritative. Same provenance the summary IPC and
+   * Session Inspector already carry.
+   */
+  provenance: UsageProvenance;
+  /**
+   * True when the activity log was capped at MAX_ACTIVITY_RECORDS, so the page
+   * can say the list (and the log-derived breakdowns) are incomplete instead of
+   * silently showing a short list.
+   */
+  logsTruncated?: boolean;
 }
 
 export interface SettingsTestResult {
