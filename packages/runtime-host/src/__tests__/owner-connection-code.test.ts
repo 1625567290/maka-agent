@@ -18,28 +18,43 @@
  */
 
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import test from 'node:test';
 import {
-  decodeRuntimeHostPeerManagementFrame,
-  encodeRuntimeHostPeerManagementFrame,
-} from '../operator/index.js';
+  decodeRuntimeHostOwnerConnectionCode,
+  encodeRuntimeHostOwnerConnectionCode,
+} from '../client/owner-connection-code.js';
 
-test('peer management frames preserve a bounded machine-readable descriptor', () => {
-  const frame = {
-    kind: 'result' as const,
-    action: 'enable' as const,
-    restarted: true,
-    status: {
-      state: 'enabled' as const,
-      serviceState: 'running',
+test('owner connection code round-trips its bounded direct-peer pairing payload', () => {
+  const input = {
+    name: 'Office Mac',
+    rootId: 'a'.repeat(64),
+    transport: {
+      kind: 'libp2p-direct' as const,
       peerId: '12D3KooWpeer',
-      rootId: 'a'.repeat(64),
       routeHints: ['/ip4/192.0.2.1/udp/41000/quic-v1'],
       coordinationRelays: [],
     },
+    credential: 'pending-credential',
   };
   assert.deepEqual(
-    decodeRuntimeHostPeerManagementFrame(encodeRuntimeHostPeerManagementFrame(frame)),
-    frame,
+    decodeRuntimeHostOwnerConnectionCode(encodeRuntimeHostOwnerConnectionCode(input)),
+    input,
+  );
+});
+
+test('owner connection code rejects unversioned and route-less payloads', () => {
+  assert.throws(() => decodeRuntimeHostOwnerConnectionCode('pending-credential'));
+  assert.throws(() =>
+    encodeRuntimeHostOwnerConnectionCode({
+      name: 'Office Mac',
+      rootId: 'a'.repeat(64),
+      transport: {
+        kind: 'libp2p-direct',
+        peerId: '12D3KooWpeer',
+        routeHints: [],
+        coordinationRelays: [],
+      },
+      credential: 'pending-credential',
+    }),
   );
 });
