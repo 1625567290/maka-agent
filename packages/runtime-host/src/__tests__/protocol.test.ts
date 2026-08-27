@@ -21,7 +21,7 @@ import { RuntimeHostProtocolError } from '../protocol/errors.js';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachments';
-import { TOOL_OUTPUT_DELTA_MAX_CHARS } from '@maka/core/events';
+import { CONTEXT_BUDGET_EXHAUSTED_DETAILS, TOOL_OUTPUT_DELTA_MAX_CHARS } from '@maka/core/events';
 import {
   decodeClientCapabilityReplaceInput,
   decodeClientFrame,
@@ -187,6 +187,13 @@ describe('Runtime Host bootstrap protocol', () => {
     // Side Conversation adds another closed branch-copy input and therefore
     // needs its own later handshake boundary.
     assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 47);
+  });
+
+  test('publishes a new compatibility epoch for context-budget failure detail', () => {
+    // Epoch 50 is already used by WorkHub coordination summaries on main.
+    // The context-budget detail therefore needs its own strictly newer
+    // handshake boundary so peers cannot accept the wrong closed shape.
+    assert.ok(RUNTIME_HOST_COMPATIBILITY_EPOCH > 50);
   });
 
   test('adds credential rotation without changing existing credential inputs', () => {
@@ -1686,6 +1693,28 @@ describe('Runtime Host bootstrap protocol', () => {
     };
 
     assert.deepEqual(decodeHostFrame(response), response);
+    for (const contextBudgetExhaustedDetail of CONTEXT_BUDGET_EXHAUSTED_DETAILS) {
+      const withContextDetail = {
+        ...response,
+        result: {
+          ...response.result,
+          failureClass: 'context_budget_exhausted',
+          contextBudgetExhaustedDetail,
+        },
+      };
+      assert.deepEqual(decodeHostFrame(withContextDetail), withContextDetail);
+    }
+    assert.throws(
+      () =>
+        decodeHostFrame({
+          ...response,
+          result: {
+            ...response.result,
+            contextBudgetExhaustedDetail: 'unknown_detail',
+          },
+        }),
+      isInvalidFrame,
+    );
     assert.throws(
       () =>
         decodeHostFrame({
