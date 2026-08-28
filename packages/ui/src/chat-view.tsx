@@ -713,7 +713,10 @@ export function ChatView(props: {
                         streamingActive || props.activeSession?.status === 'running'
                       }
                       failedReasonLabel={turnPresentation?.failedReasonLabels[turn.turnId]}
-                      failedRecoveryLabel={turnPresentation?.failedRecoveryLabels[turn.turnId]}
+                      failedSeverity={turnPresentation?.failedSeverities[turn.turnId]}
+                      failedExecutionStateLabel={
+                        turnPresentation?.failedExecutionStateLabels[turn.turnId]
+                      }
                       safeResumeAction={turnPresentation?.resumeCandidateTurnId === turn.turnId
                         ? props.safeResumeAction
                         : undefined}
