@@ -64,7 +64,7 @@ import {
 import {
   createTuiMcpController,
   type TuiMcpController,
-  type TuiMcpSurface,
+  type TuiMcpManagement,
 } from './tui-mcp-control.js';
 
 export interface RuntimeHostTuiContext {
@@ -92,7 +92,7 @@ export interface RuntimeHostTuiContext {
   };
   readonly recap: SessionRecapGenerator;
   readonly onboarding: ReturnType<typeof createRuntimeHostOnboardingSurface>;
-  readonly mcp?: TuiMcpSurface;
+  readonly mcp?: TuiMcpManagement;
   readonly profile: RuntimeHostProfile;
   close(): Promise<void>;
 }
