@@ -3266,7 +3266,7 @@ async function startTestRuntimeHostCandidate(
     (await resolveStorageRoot({ path: options.rootPath, kind: 'interactive' })).rootId;
   const result = await startInteractiveRuntimeHostCandidate(
     { ...options, expectedRootId },
-    KERNEL_COMPOSITION,
+    () => KERNEL_COMPOSITION,
   );
   if (result.kind === 'winner') paths.resources.trackCloseable(result.host);
   return result;
