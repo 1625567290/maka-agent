@@ -93,14 +93,18 @@ import {
 } from './session-driver.js';
 import { SafeBoundaryResumeParkedError } from './runtime-host-session-driver.js';
 import {
+  appendExpansionCollapseConfirmation,
   appendTurnFailureToTranscript,
   appendUserPrompt,
   applyMakaSessionEventToTranscript,
   createMakaPiTranscriptState,
   activeSandboxBoundaryRequest,
   activeUserQuestionRequest,
+  applyExpansionDefaultToAll,
   completePendingInteraction,
   applyShellRunViewUpdateToTranscript,
+  EXPANSION_COLLAPSE_CONFIRM_WINDOW_MS,
+  hasExpandedEntriesAboveViewport,
   permissionModeLabel,
   retireCancelledTransientMessages,
   replaceTranscriptWithStoredMessages,
@@ -108,6 +112,7 @@ import {
   submitCompactToTranscript,
   toggleAllThinkingExpansion,
   toggleAllToolExpansion,
+  type ExpansionEntryKind,
   type MakaPiTranscriptMetadata,
 } from './pi-transcript.js';
 import { runMakaPiTuiTurn, type MakaPiTuiTurnRequest } from './pi-tui-turn.js';
@@ -320,6 +325,9 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   };
   const tui = new TuiMainScreen(terminal);
   const state = createMakaPiTranscriptState();
+  // A pending confirmation is meaningful only for the exact transcript whose
+  // geometry produced it; reconnect/session replacement starts fresh.
+  let expansionCollapseConfirm: { kind: ExpansionEntryKind; at: number } | undefined;
   let transcriptLastUsedModel: string | undefined;
   const rememberTranscriptModel = (messages: readonly StoredMessage[]): void => {
     transcriptLastUsedModel = latestAssistantModelId(messages);
@@ -328,6 +336,7 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     messages: readonly StoredMessage[],
     options: { preserveClientLocalEntries?: boolean } = {},
   ): void => {
+    expansionCollapseConfirm = undefined;
     rememberTranscriptModel(messages);
     replaceTranscriptWithStoredMessages(state, messages, options);
   };
@@ -555,9 +564,9 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     attention.setBaseTitle(`${title} (${input.title})`);
   };
 
-  const requestRender = () => {
+  const requestRender = (force = false) => {
     transcript.invalidate();
-    tui.requestRender();
+    tui.requestRender(force);
   };
   const unsubscribeSessionTitleChanges =
     input.subscribeSessionTitleChanges?.((sessionId) => {
@@ -3452,6 +3461,42 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   };
   refreshEditorCwd(cwd);
 
+  // #4011: a collapse toggle that strands expanded blocks above the viewport
+  // arms this window; pressing the same key again within it knowingly accepts
+  // one scrollback-clearing full redraw to collapse those blocks too. The
+  // window (not a latch on other keys) is the only expiry, matching the
+  // double-Escape interrupt pattern.
+  const handleExpansionToggleKey = (kind: ExpansionEntryKind): boolean => {
+    const armed = expansionCollapseConfirm;
+    expansionCollapseConfirm = undefined;
+    if (armed?.kind === kind) {
+      if (Date.now() - armed.at <= EXPANSION_COLLAPSE_CONFIRM_WINDOW_MS) {
+        // The confirmed second press: apply the (collapsed) default to every
+        // entry, including the ones above the viewport, and pay the deliberate
+        // full redraw the notice announced.
+        if (applyExpansionDefaultToAll(state, kind)) requestRender(true);
+        return true;
+      }
+      // A reader can reasonably miss the short window. Keep the already
+      // collapsed default and make the explicit choice visible again instead
+      // of falling through to the opposite ordinary toggle.
+      if (appendExpansionCollapseConfirmation(state, kind)) {
+        expansionCollapseConfirm = { kind, at: Date.now() };
+        requestRender();
+        return true;
+      }
+    }
+    const toggled =
+      kind === 'tool' ? toggleAllToolExpansion(state) : toggleAllThinkingExpansion(state);
+    if (!toggled) return false;
+    const collapsed = kind === 'tool' ? !state.expandAllTools : !state.expandAllThinking;
+    if (collapsed && hasExpandedEntriesAboveViewport(state, kind)) {
+      expansionCollapseConfirm = { kind, at: Date.now() };
+    }
+    requestRender();
+    return true;
+  };
+
   tui.addInputListener((data) => {
     // Track bracketed pastes before any consuming branch: this must observe
     // every chunk the editor could buffer, regardless of what the rest of the
@@ -3549,14 +3594,12 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
     // one (e.g. `Esc`, type, `Esc`).
     if (!matchesKey(data, Key.escape)) lastIdleEscapeAt = 0;
     if (matchesKey(data, Key.ctrl('o')) && !isKeyRepeat(data)) {
-      if (toggleAllToolExpansion(state)) {
-        requestRender();
+      if (handleExpansionToggleKey('tool')) {
         return { consume: true };
       }
     }
     if (matchesKey(data, Key.ctrl('t')) && !isKeyRepeat(data)) {
-      if (toggleAllThinkingExpansion(state)) {
-        requestRender();
+      if (handleExpansionToggleKey('thinking')) {
         return { consume: true };
       }
     }
@@ -3647,9 +3690,13 @@ export async function runMakaPiTui(input: MakaPiTuiInput): Promise<void> {
   // into a scrollback-clearing full redraw (its `firstChanged < viewportTop`
   // path). The toggles therefore retarget only entries inside the viewport;
   // see entryInLiveViewport in pi-transcript.ts (#1097). A block whose own
-  // expansion pushed its head above the viewport can consequently never be
-  // collapsed in place (#1134): the toggles still flip the default and append
-  // a notice, and the expanded content stays readable in scrollback.
+  // expansion pushed its head above the viewport can consequently not be
+  // collapsed by the next press (#1134): the toggle still flips the default
+  // and appends a notice, and the expanded content stays readable in
+  // scrollback. #4011 adds the deliberate exception: pressing the same key
+  // again within EXPANSION_COLLAPSE_CONFIRM_WINDOW_MS applies the collapsed
+  // default to those blocks too and pays one scrollback-clearing full redraw
+  // (requestRender(true)), re-anchoring the viewport at the tail.
   tui.setClearOnShrink(false);
   tui.addChild(layout);
   tui.setFocus(editorSurface);
