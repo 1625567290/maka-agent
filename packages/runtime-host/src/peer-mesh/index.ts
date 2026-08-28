@@ -30,3 +30,7 @@ export {
   type PeerMeshStatus,
   type PeerMeshTransport,
 } from './node.js';
+export {
+  openRuntimeHostPeerMeshOwner,
+  type RuntimeHostPeerMeshOwner,
+} from './owner.js';
