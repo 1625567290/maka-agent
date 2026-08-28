@@ -49,6 +49,7 @@ import {
   type SessionHeaderSnapshot,
   type ExecutionStoresWriter,
 } from '@maka/storage/execution-stores';
+import type { CreateStableSessionRequest } from '@maka/storage/session-store';
 import type { RuntimePolicyStoresWriter } from '@maka/storage/runtime-policy-stores';
 import {
   SessionConfigurationRevisionConflictError,
@@ -202,6 +203,34 @@ export class HostSessionCatalogCoordinator {
   /** WorkHub Action Gate path; callers cannot bypass the typed operation outcome. */
   createForWorkHub(input: SessionCreateInput): Promise<OperationOutcome<'session.create'>> {
     return this.#create(input);
+  }
+
+  /** Prepare external facts before WorkHub commits create + assignment atomically. */
+  async prepareWorkHubCreate(input: SessionCreateInput): Promise<CreateStableSessionRequest> {
+    const prepared = await prepareCreate(input);
+    return this.#workspaceResolver.runWithUsageRecorded(input.workspace, async (workspace) => {
+      const [model, policy] = await Promise.all([
+        this.#resolveModel(input.modelTarget, input.thinkingLevel),
+        this.#readRuntimePolicy(),
+      ]);
+      return {
+        sessionId: input.sessionId,
+        requestFingerprint: createRequestFingerprint(input, prepared),
+        input: {
+          cwd: workspace.cwd,
+          ...(workspace.projectId === null ? {} : { projectId: workspace.projectId }),
+          name: prepared.name,
+          labels: [...prepared.labels],
+          llmConnectionSlug: model.connectionSlug,
+          model: model.model,
+          ...(input.thinkingLevel === undefined ? {} : { thinkingLevel: input.thinkingLevel }),
+          ...(input.toolProfile === undefined ? {} : { toolProfile: input.toolProfile }),
+          permissionMode: prepared.permissionMode ?? policy.policy.chatDefaults.permissionMode,
+          collaborationMode: input.collaborationMode ?? 'agent',
+          orchestrationMode: input.orchestrationMode ?? 'default',
+        },
+      };
+    });
   }
 
   async #query(
