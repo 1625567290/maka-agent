@@ -17,7 +17,7 @@
  * under the License.
  */
 
-import { memo, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import { useMountedRef } from './use-mounted-ref.js';
 import { ICON_SIZE, Ban, Check, Copy, GitBranch, Info, Pencil, RefreshCcw, Timer } from './icons.js';
 import { type ClipboardCopyPhase, useClipboardCopyFeedback } from './clipboard-feedback.js';
@@ -25,7 +25,7 @@ import { Markdown } from './markdown.js';
 import {
   formatAbsoluteTimestamp,
   formatTurnDuration,
-  turnAbortMarkerLabel,
+  turnAbortStatusLabel,
 } from './chat-display-helpers.js';
 import { isTimeDrivenMotionEnabled } from './streaming-presentation.js';
 import { computerRunningLabel } from './tool-activity/computer-action-label.js';
@@ -645,27 +645,21 @@ export const TurnView = memo(function TurnView(props: {
           );
         }
         const ownsTurnChrome = segmentIndex === conversationSegments.length - 1;
+        // Disjoint namespaces: a steering id is any string, so a bare
+        // sentinel could collide with a real one.
+        const assistantKey =
+          segment.repliesTo === undefined
+            ? 'assistant-opening'
+            : `assistant-after-${segment.repliesTo}`;
         return (
-          <LocalizedChatMessage
-            // Disjoint namespaces: a steering id is any string, so a bare
-            // sentinel could collide with a real one.
-            key={
-              segment.repliesTo === undefined
-                ? 'assistant-opening'
-                : `assistant-after-${segment.repliesTo}`
-            }
-            accessibleLabel={copy.assistantAriaLabel}
-            sender="assistant"
-            data-turn-status={turn.status}
-            className="maka-chat-message maka-assistant-answer"
-          >
+          <Fragment key={assistantKey}>
+            <LocalizedChatMessage
+              accessibleLabel={copy.assistantAriaLabel}
+              sender="assistant"
+              data-turn-status={turn.status}
+              className="maka-chat-message maka-assistant-answer"
+            >
             <div className="maka-assistant-answer-content">
-              {ownsTurnChrome && turn.status === 'aborted' && (
-                <Marker variant="aborted" role="status">
-                  <Ban size={ICON_SIZE.meta} aria-hidden="true" />
-                  <em>{turnAbortMarkerLabel(turn.abortSource, locale)}</em>
-                </Marker>
-              )}
               {/* The turn timeline is the rendering source of truth
                 (materialize.ts): each step's 深度思考 disclosure, answer bubble,
                 and Astryx tool group in the order the model produced them.
@@ -699,12 +693,9 @@ export const TurnView = memo(function TurnView(props: {
                   />
                 ),
               )}
-              {/* A failed turn's banner states the OUTCOME, so it belongs after
-                  the work it is the outcome of. It used to render above the
-                  timeline, where it read as a header on reasoning and tool
-                  calls that had in fact all succeeded.
-
-                  `description` carries the parked-resume diagnostic when there
+              {/* A failed turn's banner states the OUTCOME of the turn, so it
+                  belongs after the work it is the outcome of. `description`
+                  carries the parked-resume diagnostic when there
                   is one — it explains why the button did nothing, which
                   outranks execution state on the one turn that can have both. */}
               {ownsTurnChrome && turn.status === 'failed' && props.failedReasonLabel && (
@@ -799,7 +790,16 @@ export const TurnView = memo(function TurnView(props: {
                   />
                 )
               ))}
-          </LocalizedChatMessage>
+            </LocalizedChatMessage>
+            {/* An abort is a short, settled status change rather than sender
+                content or a recovery error. Keep Astryx's system notice as a
+                sibling of the assistant message, after the work it closes. */}
+            {ownsTurnChrome && turn.status === 'aborted' && (
+              <ChatSystemMessage icon={<Ban size={ICON_SIZE.meta} aria-hidden="true" />}>
+                {turnAbortStatusLabel(turn.abortSource, locale)}
+              </ChatSystemMessage>
+            )}
+          </Fragment>
         );
       })}
     </section>
