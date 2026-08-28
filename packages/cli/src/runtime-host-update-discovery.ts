@@ -31,13 +31,20 @@ import {
   manageRuntimeHostService,
   resolveRuntimeHostManagedServiceId,
   RuntimeHostServiceManagerError,
+  withRuntimeHostManagedServiceDeploymentLock,
   type RuntimeHostManagedServiceTarget,
 } from './runtime-host-service-manager.js';
 import {
   createPlatformRuntimeHostServiceBackend,
+  resolveRuntimeHostLifecycleProvider,
   runtimeHostServiceSummary,
 } from './runtime-host-service-management-command.js';
-import { resolveRuntimeHostManagedPackageCliPath } from './runtime-host-managed-deployment.js';
+import { manageRuntimeHostManagedLifecycle } from './runtime-host-managed-lifecycle-manager.js';
+import {
+  assertRuntimeHostManagedOperatorDeployment,
+  resolveRuntimeHostManagedControlRoot,
+  resolveRuntimeHostManagedPackageCliPath,
+} from './runtime-host-managed-deployment.js';
 import type { RuntimeHostUpdateSelector } from './runtime-host-cli.js';
 import {
   resolveRuntimeHostRegistryUpdateCandidate,
@@ -65,6 +72,10 @@ export interface RuntimeHostUpdateCheckOptions {
   readonly defaultRootPath: string;
   readonly selector: RuntimeHostUpdateSelector;
   readonly expectedTarget?: RuntimeHostManagedServiceTarget;
+  readonly managedRootId?: string;
+  readonly operatorDeploymentId?: string;
+  /** Internal non-reentrant lock ownership propagated by the canonical coordinator. */
+  readonly deploymentLockHeld?: boolean;
 }
 
 export interface RuntimeHostUpdateCheckCliOptions extends RuntimeHostUpdateCheckOptions {
@@ -115,19 +126,41 @@ async function resolveManagedRuntimeHostUpdate(
   options: RuntimeHostUpdateCheckOptions,
   verifyDeployment: boolean,
 ): Promise<RuntimeHostUpdateSelection> {
-  const serviceId = resolveRuntimeHostManagedServiceId(options.clientDataRoot);
-  const backend = createPlatformRuntimeHostServiceBackend(serviceId, options.clientDataRoot);
-  const status = await manageRuntimeHostService(
-    {
-      action: 'status',
-      clientDataRoot: options.clientDataRoot,
-      defaultRootPath: options.defaultRootPath,
-      nodePath: process.execPath,
-      cliPath: process.argv[1] ?? '',
-      ...(options.expectedTarget ? { expectedTarget: options.expectedTarget } : {}),
-    },
-    backend,
-  );
+  const serviceId =
+    options.managedRootId ?? resolveRuntimeHostManagedServiceId(options.clientDataRoot);
+  const statusInput = {
+    action: 'status' as const,
+    clientDataRoot: options.clientDataRoot,
+    defaultRootPath: options.defaultRootPath,
+    nodePath: process.execPath,
+    cliPath: process.argv[1] ?? '',
+    ...(options.expectedTarget ? { expectedTarget: options.expectedTarget } : {}),
+  };
+  const backend = options.managedRootId
+    ? undefined
+    : createPlatformRuntimeHostServiceBackend(serviceId, options.clientDataRoot);
+  const readCanonicalStatus = async () => {
+    await assertRuntimeHostManagedOperatorDeployment(
+      options.managedRootId!,
+      options.operatorDeploymentId,
+      process.argv[1] ?? '',
+    );
+    return manageRuntimeHostManagedLifecycle(options.managedRootId!, statusInput, {
+      resolveProvider: resolveRuntimeHostLifecycleProvider,
+      operatorClaim: {
+        deploymentId: options.operatorDeploymentId,
+        cliPath: process.argv[1] ?? '',
+      },
+    });
+  };
+  const status = options.managedRootId
+    ? options.deploymentLockHeld
+      ? await readCanonicalStatus()
+      : await withRuntimeHostManagedServiceDeploymentLock(
+          resolveRuntimeHostManagedControlRoot(options.managedRootId),
+          readCanonicalStatus,
+        )
+    : await manageRuntimeHostService(statusInput, backend!);
   const currentVersion = status.service.installedVersion;
   const config = status.service.config;
   const service = runtimeHostServiceSummary(status);
@@ -143,7 +176,7 @@ async function resolveManagedRuntimeHostUpdate(
       'A Maka-managed Runtime Host service is required to check for updates',
     );
   }
-  if (verifyDeployment) await backend.verifyDeployment(config);
+  if (verifyDeployment && backend) await backend.verifyDeployment(config);
   const [candidate, currentCompatibility] = await Promise.all([
     resolveRuntimeHostRegistryUpdateCandidate(options.selector),
     readPackageCompatibility(config.launch.cliPath, currentVersion),

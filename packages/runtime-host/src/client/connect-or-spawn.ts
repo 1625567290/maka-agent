@@ -84,6 +84,7 @@ export interface ConnectOrSpawnRuntimeHostInput {
   connectTimeoutMs?: number;
   handshakeTimeoutMs?: number;
   candidateEntrypoint: string | URL;
+  candidateExecutable?: string;
   managedLaunchClaim?: RuntimeHostManagedLaunchClaim;
   signal?: AbortSignal;
   /** Existing authority lease inherited by a launch-owner-supervised Candidate. */
@@ -455,6 +456,9 @@ export async function connectOrSpawnRuntimeHostWithDependencies(
             rootPath: capability.canonicalPath,
             expectedRootId: capability.rootId,
             entrypoint: input.candidateEntrypoint,
+            ...(input.candidateExecutable === undefined
+              ? {}
+              : { executable: input.candidateExecutable }),
             initialConnectionTimeoutMs: Math.ceil(remaining),
             ...(input.generation === undefined ? {} : { generation: input.generation }),
             ...(managedLaunchClaim === undefined ? {} : { managedLaunchClaim }),

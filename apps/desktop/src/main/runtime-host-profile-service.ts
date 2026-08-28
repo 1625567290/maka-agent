@@ -61,7 +61,7 @@ import {
   createDesktopRuntimeHostManagedServiceStore,
   findDesktopRuntimeHostManagedServiceBinding,
   sameDesktopRuntimeHostManagedServiceBinding,
-  type DesktopRuntimeHostManagedService,
+  type DesktopRuntimeHostManagedServiceTarget,
   type DesktopRuntimeHostManagedServiceBinding,
   type DesktopRuntimeHostManagedServiceStore,
 } from "./runtime-host-managed-services.js";
@@ -93,7 +93,7 @@ export interface DesktopRuntimeHostProfileService {
   addAndEnableVerified(
     input: DesktopRuntimeHostProfileAddInput & {
       readonly credential: string;
-      readonly managedService?: DesktopRuntimeHostManagedService;
+      readonly managedService?: DesktopRuntimeHostManagedServiceTarget;
     },
   ): Promise<{ readonly profileId: string }>;
   importConnectionCode(code: string): Promise<DesktopRuntimeHostConnectionCodeImportResult>;
@@ -659,7 +659,7 @@ export function createDesktopRuntimeHostProfileService(input: {
   const addAndEnableVerified = (
     value: DesktopRuntimeHostProfileAddInput & {
       readonly credential: string;
-      readonly managedService?: DesktopRuntimeHostManagedService;
+      readonly managedService?: DesktopRuntimeHostManagedServiceTarget;
     },
   ): Promise<{ readonly profileId: string }> => {
     requireSaveInput(value);
@@ -929,6 +929,14 @@ export function createDesktopRuntimeHostProfileService(input: {
     },
     markManagedServiceUninstalling(expected) {
       return mutateProfiles(async () => {
+        if (
+          !expected.deployment.deploymentId &&
+          expected.state !== 'uninstalling'
+        ) {
+          throw new Error(
+            'Re-onboard this Runtime Host before uninstalling it; its legacy binding has no deployment generation',
+          );
+        }
         assertPairingComplete(expected.profile.id);
         const document = await catalog.read();
         const current = document.profiles.find(
@@ -948,10 +956,7 @@ export function createDesktopRuntimeHostProfileService(input: {
           throw new Error('Disable and remove the Direct peer profile before uninstalling this service');
         }
         if (
-          !(await managedServices.markUninstallingIfCurrent(
-            expected.profile,
-            expected.service,
-          ))
+          !(await managedServices.markUninstallingIfCurrent(expected))
         ) {
           throw new Error('Runtime Host managed service binding changed during uninstall');
         }
@@ -967,10 +972,7 @@ export function createDesktopRuntimeHostProfileService(input: {
         if (
           !current ||
           !sameRemoteRuntimeHostProfileTarget(current, expected.profile) ||
-          !(await managedServices.markCleanupPendingIfCurrent(
-            expected.profile,
-            expected.service,
-          ))
+          !(await managedServices.markCleanupPendingIfCurrent(expected))
         ) {
           throw new Error('Runtime Host managed service binding changed during uninstall');
         }
@@ -986,10 +988,7 @@ export function createDesktopRuntimeHostProfileService(input: {
         if (
           !current ||
           !sameRemoteRuntimeHostProfileTarget(current, expected.profile) ||
-          !(await managedServices.removeCleanupPendingIfCurrent(
-            expected.profile,
-            expected.service,
-          ))
+          !(await managedServices.removeCleanupPendingIfCurrent(expected))
         ) {
           throw new Error('Runtime Host managed service binding changed during uninstall');
         }
@@ -1127,7 +1126,7 @@ export function createDesktopRuntimeHostProfileService(input: {
         await catalog.remove(profileId);
         if (managedBinding) {
           await managedServices
-            .removeIfCurrent(profile, managedBinding.service)
+            .removeIfCurrent(managedBinding)
             .catch((error) =>
               console.error("[runtime-host] removed Profile left stale service metadata:", error),
             );
