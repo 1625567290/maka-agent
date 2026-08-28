@@ -33,6 +33,11 @@
 </p>
 
 <p align="center">
+  <a href="https://deepwiki.com/apache/maka"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki" /></a><br />
+  <sub>非官方 AI 生成文档</sub>
+</p>
+
+<p align="center">
   <a href="./README.md"><img src="https://img.shields.io/badge/English-4C8DFF?style=flat" alt="English" /></a>
 </p>
 
