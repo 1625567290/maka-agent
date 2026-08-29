@@ -58,6 +58,7 @@ import {
   type TurnPresentationDeriver,
 } from './chat-turn.js';
 import { useChatScroll } from './use-chat-scroll.js';
+import { useTranscriptScrollAuthority } from './transcript-scroll-authority.js';
 import { useTurnVirtualizer } from './use-turn-virtualizer.js';
 import { placeChatConversationItems } from './chat-conversation-items.js';
 import { useUiLocale } from './locale-context.js';
@@ -260,7 +261,6 @@ export function ChatView(props: {
   scrollTargetTurn?: { turnId: string; nonce: number };
   scrollBehavior: ScrollBehavior;
   hasOlderHistory?: boolean;
-  historyLoadPending?: boolean;
   onLoadEarlierHistory?(): Promise<void> | void;
   returnToLatest?: {
     title: string;
@@ -504,7 +504,7 @@ export function ChatView(props: {
     throw new Error('ChatView must be rendered inside ChatSurfaceLayout');
   }
   const scrollRef = chatLayout.scrollContainerRef;
-  const [latestNavigationNonce, setLatestNavigationNonce] = useState(0);
+  const scrollAuthority = useTranscriptScrollAuthority();
   const orderedTurnIds = useMemo(() => turns.map((turn) => turn.turnId), [turns]);
   const sessionId = props.activeSession?.id;
   const {
@@ -551,14 +551,11 @@ export function ChatView(props: {
   const { highlightedTurnId } = useChatScroll({
     scrollRef,
     sessionId: props.activeSession?.id,
-    hasTurns: turns.length > 0,
     messages: props.messages,
     target: props.scrollTargetTurn,
     behavior: props.scrollBehavior,
     hasOlderHistory: props.hasOlderHistory,
-    historyLoadPending: props.historyLoadPending,
     onLoadEarlierHistory: props.onLoadEarlierHistory,
-    latestNavigationNonce,
   });
   const { quote: selectionQuote, clear: clearSelectionQuote } = useMessageSelectionQuote(
     scrollRef,
@@ -670,10 +667,14 @@ export function ChatView(props: {
           title={props.returnToLatest.title}
           actionLabel={props.returnToLatest.label}
           isPending={props.returnToLatest.isPending}
-          onReturnToLatest={() =>
-            Promise.resolve(props.returnToLatest?.onClick()).then(() => {
-              setLatestNavigationNonce((nonce) => nonce + 1);
-            })}
+          onReturnToLatest={async () => {
+            // Loading the latest range is the shell's job; putting the viewport
+            // on it is this view's, and setting the pin is the whole of it —
+            // the range that arrives afterwards is growth, and growth is
+            // already followed.
+            await props.returnToLatest?.onClick();
+            scrollAuthority.pinToTail();
+          }}
         />
       ) : null}
       <SessionContextLayer
@@ -703,7 +704,7 @@ export function ChatView(props: {
           turns={promptRailTurns}
           scrollRef={scrollRef}
           onNavigateFallback={navigatePromptRailFallback}
-          onNavigateStart={chatLayout.unlockAutoFollow}
+          onNavigateStart={scrollAuthority.releasePin}
         />
         <ChatMessageList
           className="maka-chat-message-list maka-chatContent"
