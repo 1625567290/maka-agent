@@ -248,6 +248,8 @@ export function ChatMessageSurface({
         historyLoadPending={historyLoadPending}
         onLoadEarlierHistory={onLoadEarlierHistory}
         returnToLatest={hasNewerHistory ? {
+          title: transcriptCopy.partialHistoryTitle,
+          description: transcriptCopy.partialHistoryDescription,
           label: transcriptCopy.returnLatest,
           isPending: historyLoadPending,
           onClick: onReturnToLatestHistory,
