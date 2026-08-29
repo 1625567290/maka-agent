@@ -29,7 +29,9 @@ import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
 } from '@maka/core/session';
+import { RuntimeMessageAuthorityInvariantError } from '@maka/runtime/message-authority';
 import type {
+  MarkMessagesHandedOffInput,
   MessageAdmissionStore,
   PendingMessageAdmission,
   RootTurnSourceMessageReceipt,
@@ -1888,8 +1890,89 @@ test('run settlement hands off only steering admissions with immutable proof', a
   });
 
   assert.equal(fixture.readMessageAdmission('steer-proved'), undefined);
+  assert.deepEqual(fixture.handoffCalls, [
+    {
+      sessionId: ROOT.sessionId,
+      messageIds: ['steer-proved'],
+      turnId: ROOT.turnId,
+    },
+  ]);
   const batch = fixture.coordinator.beginTerminalTransition(ROOT);
   fixture.coordinator.completeIdle(batch);
+});
+
+test('run materialization preserves exact Root source receipt fallback order', async () => {
+  const fixture = createFixture();
+  fixture.receipts.set('exact-root', matchingSourceReceipt('exact-root', 42));
+  fixture.receipts.set('exact-second', matchingSourceReceipt('exact-second', 43));
+
+  await fixture.coordinator.materializeMessageHandoffsForRun({
+    ...ROOT,
+    messageIds: ['exact-root', 'exact-second', 'exact-root'],
+  });
+
+  assert.deepEqual(fixture.handoffCalls, [
+    {
+      sessionId: ROOT.sessionId,
+      turnId: ROOT.turnId,
+      messageIds: ['exact-root', 'exact-second'],
+      provenRootMessages: [
+        {
+          messageId: 'exact-root',
+          content: { text: 'canonical exact-root' },
+          admittedAt: 42,
+        },
+        {
+          messageId: 'exact-second',
+          content: { text: 'canonical exact-second' },
+          admittedAt: 43,
+        },
+      ],
+    },
+  ]);
+});
+
+test('run materialization rejects the whole requested Root batch when any receipt mismatches', async () => {
+  const mismatches: Array<{
+    messageId: string;
+    receipt?: RootTurnSourceMessageReceipt;
+  }> = [
+    { messageId: 'proof-less' },
+    {
+      messageId: 'wrong-session',
+      receipt: matchingSourceReceipt('wrong-session', 10, { sessionId: 'other' }),
+    },
+    {
+      messageId: 'wrong-turn',
+      receipt: matchingSourceReceipt('wrong-turn', 11, { turnId: 'other' }),
+    },
+    {
+      messageId: 'wrong-run',
+      receipt: matchingSourceReceipt('wrong-run', 12, { runId: 'other' }),
+    },
+    {
+      messageId: 'wrong-message',
+      receipt: matchingSourceReceipt('other-message', 13),
+    },
+  ];
+
+  for (const mismatch of mismatches) {
+    const fixture = createFixture();
+    fixture.receipts.set('exact-root', matchingSourceReceipt('exact-root', 42));
+    if (mismatch.receipt) fixture.receipts.set(mismatch.messageId, mismatch.receipt);
+
+    await assert.rejects(
+      () =>
+        fixture.coordinator.materializeMessageHandoffsForRun({
+          ...ROOT,
+          messageIds: ['exact-root', mismatch.messageId],
+        }),
+      (error: unknown) =>
+        error instanceof RuntimeMessageAuthorityInvariantError &&
+        error.message === `Root admission does not prove Message handoff ${mismatch.messageId}`,
+    );
+    assert.deepEqual(fixture.handoffCalls, []);
+  }
 });
 
 test('a failed terminal root leaves no handed-off payload for restart recovery', async () => {
@@ -2476,7 +2559,12 @@ function createFixture(
       state: 'accepted' | 'handed_off' | 'executed' | 'cancelled';
     }
   >();
-  const admissions = admissionsOverride ?? memoryMessageAdmissionStore(messageAdmissions);
+  const handoffCalls: MarkMessagesHandedOffInput[] = [];
+  const admissions =
+    admissionsOverride ??
+    memoryMessageAdmissionStore(messageAdmissions, (input) => {
+      handoffCalls.push(input);
+    });
   const sessionAdmission = new SessionAdmissionGate();
   const stopClaimed = deferred<void>();
   const terminal = deferred<TurnSnapshot>();
@@ -2618,6 +2706,7 @@ function createFixture(
     events,
     receipts,
     recoveredBatches,
+    handoffCalls,
     readMessageAdmission: (messageId: string) => messageAdmissions.get(messageId)?.admission,
     stopClaimed,
     resolveTerminal: terminal.resolve,
@@ -2642,6 +2731,7 @@ function memoryMessageAdmissionStore(
       state: 'accepted' | 'handed_off' | 'executed' | 'cancelled';
     }
   >,
+  onMessagesHandedOff?: (input: MarkMessagesHandedOffInput) => void,
 ): MessageAdmissionStore {
   return {
     commitMessageAdmission: async (admission) => {
@@ -2671,7 +2761,9 @@ function memoryMessageAdmissionStore(
         }
       }
     },
-    markMessagesHandedOff: async ({ messageIds }) => {
+    markMessagesHandedOff: async (input) => {
+      onMessagesHandedOff?.(input);
+      const { messageIds } = input;
       for (const messageId of messageIds) admissions.delete(messageId);
     },
   };
@@ -2739,6 +2831,29 @@ function sourceReceipt(
       admittedAt: 1,
     },
     sourceMessage,
+  };
+}
+
+function matchingSourceReceipt(
+  messageId: string,
+  admittedAt: number,
+  overrides: Partial<RootTurnSourceMessageReceipt['admission']> = {},
+): RootTurnSourceMessageReceipt {
+  const base = sourceReceipt(
+    messageId,
+    { text: `canonical ${messageId}` },
+    'current_turn',
+    'steering',
+    ROOT.turnId,
+  );
+  return {
+    ...base,
+    admission: {
+      ...base.admission,
+      runId: ROOT.runId,
+      admittedAt,
+      ...overrides,
+    },
   };
 }
 
