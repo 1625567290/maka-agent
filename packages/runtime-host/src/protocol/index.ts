@@ -94,7 +94,11 @@ export const RUNTIME_HOST_REGISTRATION_SCHEMA_VERSION = 1 as const;
 export const RUNTIME_HOST_PROTOCOL_VERSION = 0 as const;
 // Increment when the same protocol version no longer guarantees safe Client-Host
 // interoperability. Mismatches are rejected before domain commands are admitted.
-export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 64 as const;
+export const RUNTIME_HOST_COMPATIBILITY_EPOCH = 65 as const;
+// 65: live `tool_start` frames may carry optional `intent` / `argsPreview`
+// keys. Older Clients decode the event with a strict allowed-key list and tear
+// the connection down on unknown keys, so the pair must be refused up front.
+// The strict decoder's allowed-key union also retains `shellRunRef`.
 // 64: execution.inspect drops the retired resolve operation. Older peers still
 // know execution.inspect.resolve and would send it only to fail mid-connection,
 // so removing it needs its own handshake boundary.
