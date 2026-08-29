@@ -55,7 +55,7 @@ import type {
   BackendCompactHistoryInput,
   BackendSendInput,
 } from '@maka/core/backend-types';
-import type { SessionEvent } from '@maka/core/events';
+import { messageContentDigest, type SessionEvent } from '@maka/core/events';
 import {
   WORKHUB_COORDINATION_SESSION_ID,
   WORKHUB_COORDINATION_SESSION_ROLE,
