@@ -131,9 +131,13 @@ function peerWith(streams: RuntimeHostPeerNativeStream[]): RuntimeHostPeerClient
     verifyIdentity: () => false,
     transitSnapshot: () => ({
       allowedPeerCount: 0,
-      trustedRelayCount: 0,
       activeReservationCount: 0,
       activeCircuitCount: 0,
+      maxReservationCount: 32,
+      maxCircuitCount: 8,
+      maxCircuitsPerPeer: 2,
+      maxCircuitDurationSeconds: 7_200,
+      maxCircuitBytes: 256 * 1024 * 1024,
     }),
     configureTransit: async () => undefined,
     connect: async () => {

@@ -135,6 +135,7 @@ export interface PeerMeshNode {
   leave(meshId: string, signal?: AbortSignal): Promise<void>;
   closeMesh(meshId: string): Promise<PeerMeshStatus>;
   setTransitMesh(meshId: string | null): Promise<void>;
+  transitMeshId(): string | null;
   transitSnapshot(): RuntimeHostPeerTransitSnapshot;
   resolveRoutes(peerId: string):
     | {
@@ -154,7 +155,6 @@ export interface PeerMeshStatus {
   readonly roster: SignedPeerMeshRosterV1;
   readonly pendingInvitationCount: number;
   readonly memberRoutes: readonly PeerMeshMemberRouteStatus[];
-  readonly transitEnabled: boolean;
 }
 
 export interface PeerMeshMemberRouteStatus {
@@ -248,9 +248,7 @@ class PeerMeshNodeImpl implements PeerMeshNode {
     return Object.freeze(
       stored.meshes
         .filter((state) => isActiveMembership(state, identity.peerId))
-        .map((state) =>
-          peerMeshStatus(state, identity, stored.routes, stored.transitMeshId, this.#now()),
-        ),
+        .map((state) => peerMeshStatus(state, identity, stored.routes, this.#now())),
     );
   }
 
@@ -299,7 +297,6 @@ class PeerMeshNodeImpl implements PeerMeshNode {
         findMesh(stored.meshes, state.roster.roster.meshId)!,
         identity,
         stored.routes,
-        stored.transitMeshId,
         now,
       );
     });
@@ -445,12 +442,7 @@ class PeerMeshNodeImpl implements PeerMeshNode {
         await this.#refreshLocalRoute();
         await this.#reconcileTransit();
         const stored = this.#store.read();
-        return peerMeshStatus(
-          findMesh(stored.meshes, invitation.meshId)!,
-          identity,
-          stored.routes,
-          stored.transitMeshId,
-        );
+        return peerMeshStatus(findMesh(stored.meshes, invitation.meshId)!, identity, stored.routes);
       } finally {
         await stream.close().catch(() => undefined);
       }
@@ -546,6 +538,11 @@ class PeerMeshNodeImpl implements PeerMeshNode {
   transitSnapshot(): RuntimeHostPeerTransitSnapshot {
     this.#assertOpen();
     return this.#peer.transitSnapshot();
+  }
+
+  transitMeshId(): string | null {
+    this.#assertOpen();
+    return this.#store.read().transitMeshId;
   }
 
   resolveRoutes(peerId: string) {
@@ -956,12 +953,7 @@ class PeerMeshNodeImpl implements PeerMeshNode {
     await this.#refreshLocalRoute();
     await this.#reconcileTransit();
     const stored = this.#store.read();
-    return peerMeshStatus(
-      findMesh(stored.meshes, meshId)!,
-      this.#peer.identity(),
-      stored.routes,
-      stored.transitMeshId,
-    );
+    return peerMeshStatus(findMesh(stored.meshes, meshId)!, this.#peer.identity(), stored.routes);
   }
 
   #acceptIncoming(stream: RuntimeHostPeerNativeStream): void {
@@ -1336,7 +1328,6 @@ function peerMeshStatus(
   state: PeerMeshStateV1,
   identity: ReturnType<PeerMeshTransport['identity']>,
   routes: readonly SignedPeerMeshRouteRecordV1[] = [],
-  transitMeshId: string | null = null,
   now = Date.now(),
 ): PeerMeshStatus {
   return Object.freeze({
@@ -1349,7 +1340,6 @@ function peerMeshStatus(
             (invitation) => invitation.status === 'pending' && invitation.expiresAt > now,
           ).length
         : 0,
-    transitEnabled: state.roster.roster.meshId === transitMeshId,
     memberRoutes: Object.freeze(
       state.roster.roster.members.map((peerId) => {
         if (peerId === identity.peerId) return Object.freeze({ peerId, state: 'local' as const });
