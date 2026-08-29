@@ -53,7 +53,6 @@ import {
   TurnRunningStatus,
   TurnView,
   TransientUserMessage,
-  type ReadAttachmentBytes,
   type TurnFooterActionMeta,
   type TurnPresentationDeriver,
 } from './chat-turn.js';
@@ -64,6 +63,10 @@ import { placeChatConversationItems } from './chat-conversation-items.js';
 import { useUiLocale } from './locale-context.js';
 import { getConversationCopy } from './conversation-copy.js';
 import { SessionContextLayer, type SessionContextGoal } from './session-context-layer.js';
+import {
+  SessionAttachmentProvider,
+  type ReadAttachmentBytes,
+} from './attachment-image.js';
 
 export interface LiveContentActivationSnapshot {
   turnId: string;
@@ -299,12 +302,9 @@ export function ChatView(props: {
   };
   onRevisionNavigate?: (sessionId: string) => void;
   /**
-   * Host reader for image attachment bytes, threaded to each turn's user-message
-   * thumbnails. The desktop shell passes its preload `attachments.readBytes`;
-   * non-desktop hosts omit it and image thumbnails stay in their pending
-   * skeleton. Keeps @maka/ui host-agnostic with no direct host-global access.
-   * Pass an identity-stable reference so the memoized TurnViews keep skipping
-   * reconciliation on the hot streaming path.
+   * Host reader for image attachment bytes. The desktop shell passes its preload
+   * `attachments.readBytes`; non-desktop hosts may omit it. Keeps @maka/ui
+   * host-agnostic with no direct host-global access.
    */
   onReadAttachmentBytes?: ReadAttachmentBytes;
   /**
@@ -657,11 +657,15 @@ export function ChatView(props: {
         );
 
   return (
-    <section
-      className="maka-main agents-chat-panel agents-chat-view-root"
-      role="region"
-      aria-label={copy.conversationAriaLabel(props.activeSession.name)}
+    <SessionAttachmentProvider
+      sessionId={props.activeSession.id}
+      readBytes={props.onReadAttachmentBytes}
     >
+      <section
+        className="maka-main agents-chat-panel agents-chat-view-root"
+        role="region"
+        aria-label={copy.conversationAriaLabel(props.activeSession.name)}
+      >
       {props.returnToLatest ? (
         <TranscriptHistoryNotice
           title={props.returnToLatest.title}
@@ -734,7 +738,6 @@ export function ChatView(props: {
                           <TransientUserMessage
                             key={message.id}
                             message={message}
-                            onReadAttachmentBytes={props.onReadAttachmentBytes}
                           />
                         ))
                       : null}
@@ -758,7 +761,6 @@ export function ChatView(props: {
                         : undefined}
                       lineageBadges={turnPresentation?.lineageBadgesByTurn[turn.turnId]}
                       onLineageBadgeClick={stableLineageBadgeClick}
-                      onReadAttachmentBytes={props.onReadAttachmentBytes}
                       onOpenLinkedSession={
                         props.onOpenLinkedSession ? stableOpenLinkedSession : undefined
                       }
@@ -801,7 +803,6 @@ export function ChatView(props: {
                 <TransientUserMessage
                   key={message.id}
                   message={message}
-                  onReadAttachmentBytes={props.onReadAttachmentBytes}
                 />
               ))}
               {/* #642 fallback: streaming began before the optimistic user turn
@@ -891,7 +892,8 @@ export function ChatView(props: {
           )
         ) : null}
       </div>
-    </section>
+      </section>
+    </SessionAttachmentProvider>
   );
 }
 
