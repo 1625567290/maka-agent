@@ -25,6 +25,8 @@ import {
   type RuntimeHostPeerIdentityProof,
   type RuntimeHostPeerNativeEndpoint,
   type RuntimeHostPeerNativeStream,
+  type RuntimeHostPeerTransitRelayCandidate,
+  type RuntimeHostPeerTransitSnapshot,
 } from '../transport/peer-native.js';
 import { RuntimeHostPermanentReconnectError } from './reconnect-lifecycle.js';
 
@@ -32,7 +34,7 @@ export interface RuntimeHostPeerConnectInput {
   readonly peerId: string;
   readonly routeHints: readonly string[];
   readonly coordinationRelays?: readonly string[];
-  readonly transitRelays?: readonly string[];
+  readonly transitRelayPeerIds?: readonly string[];
   readonly directDeadlineMs: number;
 }
 
@@ -41,7 +43,7 @@ export interface RuntimeHostPeerRouteResolver {
     | {
         readonly routeHints: readonly string[];
         readonly coordinationRelays: readonly string[];
-        readonly transitRelays?: readonly string[];
+        readonly transitRelayPeerIds?: readonly string[];
       }
     | undefined;
 }
@@ -54,9 +56,10 @@ export interface RuntimeHostPeerClient {
   }>;
   signIdentity(payload: Buffer): Promise<RuntimeHostPeerIdentityProof>;
   verifyIdentity(peerId: string, payload: Buffer, proof: RuntimeHostPeerIdentityProof): boolean;
+  transitSnapshot(): RuntimeHostPeerTransitSnapshot;
   configureTransit(input: {
     readonly allowedPeerIds: readonly string[];
-    readonly trustedRelayPeerIds: readonly string[];
+    readonly relayCandidates: readonly RuntimeHostPeerTransitRelayCandidate[];
   }): Promise<void>;
   connect(
     input: RuntimeHostPeerConnectInput,
@@ -179,9 +182,13 @@ class RuntimeHostPeerClientImpl implements RuntimeHostPeerClient {
     });
   }
 
+  transitSnapshot(): RuntimeHostPeerTransitSnapshot {
+    return Object.freeze({ ...this.#requireEndpoint().transitSnapshot });
+  }
+
   configureTransit(input: {
     readonly allowedPeerIds: readonly string[];
-    readonly trustedRelayPeerIds: readonly string[];
+    readonly relayCandidates: readonly RuntimeHostPeerTransitRelayCandidate[];
   }): Promise<void> {
     return this.#requireEndpoint().configureTransit(input);
   }
@@ -300,7 +307,11 @@ class RuntimeHostPeerClientImpl implements RuntimeHostPeerClient {
         discovered?.coordinationRelays ?? [],
         input.coordinationRelays,
       ),
-      transitRelays: mergeAddresses(discovered?.transitRelays ?? [], input.transitRelays),
+      transitRelayPeerIds: mergeValues(
+        discovered?.transitRelayPeerIds ?? [],
+        input.transitRelayPeerIds,
+        64,
+      ),
       requestId,
     });
     let settled = false;
@@ -457,7 +468,15 @@ function mergeAddresses(
   primary: readonly string[],
   secondary: readonly string[] | undefined,
 ): readonly string[] {
-  return Object.freeze([...new Set([...primary, ...(secondary ?? [])])].slice(0, 32));
+  return mergeValues(primary, secondary, 32);
+}
+
+function mergeValues(
+  primary: readonly string[],
+  secondary: readonly string[] | undefined,
+  limit: number,
+): readonly string[] {
+  return Object.freeze([...new Set([...primary, ...(secondary ?? [])])].slice(0, limit));
 }
 
 async function cancelPeerConnect(

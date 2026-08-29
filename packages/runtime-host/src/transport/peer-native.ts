@@ -70,7 +70,7 @@ export interface RuntimeHostPeerNativeEndpoint {
     readonly peerId: string;
     readonly routeHints: readonly string[];
     readonly coordinationRelays?: readonly string[];
-    readonly transitRelays?: readonly string[];
+    readonly transitRelayPeerIds?: readonly string[];
     readonly directDeadlineMs: number;
   }): Promise<RuntimeHostPeerNativeStream>;
   connectMeshControl(options: {
@@ -78,12 +78,12 @@ export interface RuntimeHostPeerNativeEndpoint {
     readonly peerId: string;
     readonly routeHints: readonly string[];
     readonly coordinationRelays?: readonly string[];
-    readonly transitRelays?: readonly string[];
+    readonly transitRelayPeerIds?: readonly string[];
     readonly directDeadlineMs: number;
   }): Promise<RuntimeHostPeerNativeStream>;
   configureTransit(options: {
     readonly allowedPeerIds: readonly string[];
-    readonly trustedRelayPeerIds: readonly string[];
+    readonly relayCandidates: readonly RuntimeHostPeerTransitRelayCandidate[];
   }): Promise<void>;
   cancelConnect(requestId: number): Promise<boolean>;
   accept(): Promise<RuntimeHostPeerNativeStream | null>;
@@ -95,6 +95,11 @@ export interface RuntimeHostPeerTransitSnapshot {
   readonly allowedPeerCount: number;
   readonly activeReservationCount: number;
   readonly activeCircuitCount: number;
+}
+
+export interface RuntimeHostPeerTransitRelayCandidate {
+  readonly peerId: string;
+  readonly addresses: readonly string[];
 }
 
 interface RuntimeHostPeerNativeModule {
