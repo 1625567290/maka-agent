@@ -38,6 +38,14 @@ export {
   type RuntimeHostAccessManagementFrame,
 } from './access-management-frame.js';
 export { runtimeHostAccessCredentialFingerprint } from '../access-credential-identity.js';
+export {
+  RUNTIME_HOST_PEER_MESH_MANAGEMENT_FRAME_MAX_BYTES,
+  RUNTIME_HOST_PEER_MESH_MANAGEMENT_FRAME_PREFIX,
+  decodeRuntimeHostPeerMeshManagementFrame,
+  encodeRuntimeHostPeerMeshManagementFrame,
+  type RuntimeHostPeerMeshManagementAction,
+  type RuntimeHostPeerMeshManagementFrame,
+} from './peer-mesh-management-frame.js';
 export { resolveRuntimeHostManagedServiceId } from './managed-service-target.js';
 export {
   RUNTIME_HOST_PEER_MANAGEMENT_FRAME_PREFIX,
