@@ -1233,9 +1233,6 @@ const makaBridge = {
     disable() {
       return ipcRenderer.invoke('local-runtime-host-remote-access:disable');
     },
-    uninstall(input: { readonly allowInterruptActiveTasks: boolean }) {
-      return ipcRenderer.invoke('local-runtime-host-remote-access:uninstall', input);
-    },
   },
   runtimeHostSshTerminal: {
     getSnapshot(): Promise<DesktopRuntimeHostSshTerminalSnapshot> {
@@ -1295,8 +1292,14 @@ const makaBridge = {
     run(
       profileId: string,
       action: DesktopRuntimeHostManagementAction,
+      allowInterruptActiveTasks = false,
     ): Promise<DesktopRuntimeHostManagementResponse> {
-      return ipcRenderer.invoke('runtime-host-management:run', profileId, action);
+      return ipcRenderer.invoke(
+        'runtime-host-management:run',
+        profileId,
+        action,
+        allowInterruptActiveTasks,
+      );
     },
     update(
       profileId: string,
